@@ -1,0 +1,252 @@
+# -*- coding: utf-8 -*-
+"""bills 应用路由（Task 9）。
+
+覆盖原 Django Admin 注册的 5 个模型查询
+（Group / Bill / Profit / GroupAcc / GroupSymbol）
+及原中间件触发的 3 个同步操作。
+
+约定：
+- GET 路由通过 Depends(get_db) 获取会话，直接查询模型；
+- POST 同步路由调用 service 内部函数（service 内部自管理 session）；
+- 过滤参数映射 Admin 配置：search_fields 用 contains（模糊），
+  list_filter 用 ==（精确），与原 Django Admin 行为一致。
+- 同步顺序与原 middleware.py 完全一致。
+"""
+from typing import Any, Callable, List, Optional, Tuple
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol, Profit
+from server_fast.app.bills.schemas import (
+    BillOut,
+    GroupAccOut,
+    GroupOut,
+    GroupSymbolOut,
+    ProfitOut,
+)
+from server_fast.common.db import get_db
+
+router = APIRouter(prefix="/bills", tags=["bills"])
+
+
+def _filter_query(
+    query,
+    conditions: List[Tuple[Any, Optional[str], str]],
+):
+    """通用查询过滤。
+
+    :param conditions: (列对象, 值, 模式) 列表
+        - 模式 'eq'：精确匹配，对应 Admin list_filter
+        - 模式 'contains'：模糊匹配，对应 Admin search_fields
+    :return: 过滤后的 query（值为 None 的条件自动跳过）
+    """
+    for column, value, mode in conditions:
+        if value is None:
+            continue
+        if mode == "eq":
+            query = query.filter(column == value)
+        else:  # contains 模糊搜索
+            query = query.filter(column.contains(value))
+    return query
+
+
+def _run_sync_steps(steps: List[Tuple[str, Callable]]):
+    """依次执行同步函数列表，返回每步结果。
+
+    与原 middleware.py 保持一致：groupsymbol / groupacc 会先执行
+    value_float_em_sql 再执行对应 upsert。任一步骤异常则抛出 500。
+    """
+    results = []
+    try:
+        for name, fn in steps:
+            results.append({"step": name, "result": fn()})
+        return {"status": "ok", "steps": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# SubTask 9.2: 原 index 视图，对应 GroupAdmin
+@router.get("/group", response_model=List[GroupOut])
+def list_groups(
+    account: Optional[str] = None,
+    category: Optional[str] = None,
+    symbol: Optional[str] = None,
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """返回非 cash 类别的 Group 列表。
+
+    原 Django index 视图使用 Group.objects.exclude(category='cash')，
+    此处对应 SQLAlchemy 的 Group.category != 'cash'。
+    account/category 为 list_filter（精确），symbol 为 search_fields（模糊）。
+    """
+    # 核心：过滤掉 cash 类别（与原 index 视图一致）
+    query = db.query(Group).filter(Group.category != "cash")
+    query = _filter_query(
+        query,
+        [
+            (Group.account, account, "eq"),
+            (Group.category, category, "eq"),
+            (Group.symbol, symbol, "contains"),
+        ],
+    )
+    items = query.offset(offset).limit(limit).all()
+    return [item.to_dict() for item in items]
+
+
+# SubTask 9.3: 对应 BillAdmin
+@router.get("/bills", response_model=List[BillOut])
+def list_bills(
+    account: Optional[str] = None,
+    category: Optional[str] = None,
+    symbol: Optional[str] = None,
+    name: Optional[str] = None,
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """返回 Bill 列表。
+
+    account/category 为 list_filter（精确），symbol/name 为 search_fields（模糊）。
+    """
+    query = db.query(Bill)
+    query = _filter_query(
+        query,
+        [
+            (Bill.account, account, "eq"),
+            (Bill.category, category, "eq"),
+            (Bill.symbol, symbol, "contains"),
+            (Bill.name, name, "contains"),
+        ],
+    )
+    items = query.offset(offset).limit(limit).all()
+    return [item.to_dict() for item in items]
+
+
+# SubTask 9.4: 对应 ProfitAdmin
+@router.get("/profits", response_model=List[ProfitOut])
+def list_profits(
+    account: Optional[str] = None,
+    category: Optional[str] = None,
+    symbol: Optional[str] = None,
+    name: Optional[str] = None,
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """返回 Profit 列表，含关联 Bill 的 account/symbol/name 字段。
+
+    Profit 通过 bill_id 外键关联 Bill。原 Admin 的
+    search_fields=bill__symbol/bill__name、list_filter=bill__account/bill__category
+    均作用于关联 Bill，故此处通过 JOIN Bill 实现过滤，并在结果中补充关联字段。
+    """
+    query = db.query(Profit)
+    # 仅在存在关联过滤参数时才 JOIN，避免无谓联表
+    if any(v is not None for v in (account, category, symbol, name)):
+        query = query.join(Bill, Profit.bill_id == Bill.id)
+        query = _filter_query(
+            query,
+            [
+                (Bill.account, account, "eq"),
+                (Bill.category, category, "eq"),
+                (Bill.symbol, symbol, "contains"),
+                (Bill.name, name, "contains"),
+            ],
+        )
+    items = query.offset(offset).limit(limit).all()
+    result = []
+    for p in items:
+        d = p.to_dict()
+        # 补充关联 Bill 的 account/symbol/name（对应原 ProfitAdmin 的 bill_* 方法）
+        if p.bill:
+            d["account"] = p.bill.account
+            d["symbol"] = p.bill.symbol
+            d["name"] = p.bill.name
+        result.append(d)
+    return result
+
+
+# SubTask 9.5: 对应 GroupAccAdmin（全量列表，无过滤参数）
+@router.get("/group-accs", response_model=List[GroupAccOut])
+def list_group_accs(
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """返回 GroupAcc 全量列表。"""
+    items = db.query(GroupAcc).offset(offset).limit(limit).all()
+    return [item.to_dict() for item in items]
+
+
+# SubTask 9.6: 对应 GroupSymbolAdmin
+@router.get("/group-symbols", response_model=List[GroupSymbolOut])
+def list_group_symbols(
+    category: Optional[str] = None,
+    symbol: Optional[str] = None,
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """返回 GroupSymbol 列表。
+
+    category 为 list_filter（精确），symbol 为 search_fields（模糊）。
+    """
+    query = db.query(GroupSymbol)
+    query = _filter_query(
+        query,
+        [
+            (GroupSymbol.category, category, "eq"),
+            (GroupSymbol.symbol, symbol, "contains"),
+        ],
+    )
+    items = query.offset(offset).limit(limit).all()
+    return [item.to_dict() for item in items]
+
+
+# SubTask 9.7: 三个同步路由，触发逻辑与原 middleware.py 一致
+@router.post("/sync/group")
+def sync_group():
+    """触发实时估值同步（对应中间件 /bills/group/）。"""
+    from server_fast.app.bills.service import value_float_em_sql
+
+    return _run_sync_steps([("value_float_em_sql", value_float_em_sql)])
+
+
+@router.post("/sync/group-symbol")
+def sync_group_symbol():
+    """触发实时估值 + 标的汇总同步（对应中间件 /bills/groupsymbol/）。
+
+    与原中间件一致：先 value_float_em_sql 再 upsert_group_symbol_sql。
+    """
+    from server_fast.app.bills.service import (
+        value_float_em_sql,
+        upsert_group_symbol_sql,
+    )
+
+    return _run_sync_steps(
+        [
+            ("value_float_em_sql", value_float_em_sql),
+            ("upsert_group_symbol_sql", upsert_group_symbol_sql),
+        ]
+    )
+
+
+@router.post("/sync/group-acc")
+def sync_group_acc():
+    """触发实时估值 + 账户汇总同步（对应中间件 /bills/groupacc/）。
+
+    与原中间件一致：先 value_float_em_sql 再 upsert_group_acc_sql。
+    """
+    from server_fast.app.bills.service import (
+        value_float_em_sql,
+        upsert_group_acc_sql,
+    )
+
+    return _run_sync_steps(
+        [
+            ("value_float_em_sql", value_float_em_sql),
+            ("upsert_group_acc_sql", upsert_group_acc_sql),
+        ]
+    )
