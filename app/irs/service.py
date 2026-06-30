@@ -12,6 +12,7 @@
 """
 from datetime import date, datetime
 from decimal import Decimal
+import logging
 
 import numpy as np
 import pandas as pd
@@ -39,6 +40,8 @@ from server_fast.app.irs.models import (
     SymbolUnderlying,
     SymbolValue,
 )
+
+logger = logging.getLogger("uvicorn.error")  # 复用 uvicorn 的 logger，输出到 stderr 不被缓冲
 
 
 # =========================================================================
@@ -90,12 +93,12 @@ def upsert_model_excel_sql(folder, mdl):
     _unique_keys = mdl.unique_keys
     result = 0
     for file_name in file_names:
-        print(f'导入文件:{file_name}', end='')
+        logger.info(f'导入文件:{file_name}')
         df = pd.read_excel(folder / file_name, dtype=str)
         df = df_init_model(df, mdl)
         if not df.empty:
             result = upsert_df_to_db(df, _table, _engine, _unique_keys)
-            print(f'->成功:{result}')
+            logger.info(f'->成功:{result}')
     return result
 
 
@@ -166,9 +169,9 @@ def update_symbol_value_hlc_sql():
         _fields_update = _mdl.fields_hlc_update
         result = upsert_df_to_db(
             df_in, _table, _engine, _unique_keys, _fields_update)
-        print(f'->更新成功:{result}')
+        logger.info(f'->更新成功:{result}')
     else:
-        print(f'->无需更新')
+        logger.info("->无需更新")
 
 
 # =========================================================================
@@ -211,7 +214,7 @@ def symbol_value_em_orm():
                         session.flush()  # 触发 before_insert 钩子计算 last_ratio 等
                         count_insert += 1
                 except Exception as e:
-                    print(f"处理 symbol {sv_symbol} 失败：{str(e)}")
+                    logger.error(f"处理 symbol {sv_symbol} 失败：{str(e)}")
                     continue
     return count_insert, count_update
 
@@ -231,7 +234,7 @@ def monitor_value_em_orm():
         sv_data = current(
             list(sv_dict.keys()), fields=['symbol', 'price', 'high'])
     except Exception as e:
-        print(f"******获取实时行情失败：{str(e)}")
+        logger.error(f"******获取实时行情失败：{str(e)}")
         raise e
     sv_data_dict = {
         item['symbol']: {'price': item['price'], 'high': item['high']}
@@ -243,7 +246,7 @@ def monitor_value_em_orm():
         with session.begin():
             for sv_symbol, sv_id in sv_dict.items():
                 if sv_symbol not in sv_data_dict.keys():  # 无实时行情则跳过
-                    print(f"无实时行情：{sv_symbol}")
+                    logger.warning(f"无实时行情：{sv_symbol}")
                     continue
                 price_d = Decimal(str(sv_data_dict[sv_symbol]['price']))
                 price_h = Decimal(str(sv_data_dict[sv_symbol]['high']))
@@ -272,7 +275,7 @@ def monitor_value_em_orm():
                         session.flush()  # 触发 before_insert 钩子计算
                         count_insert += 1
                 except Exception as e:
-                    print(f"处理 symbol {sv_symbol} 失败：{str(e)}")
+                    logger.error(f"处理 symbol {sv_symbol} 失败：{str(e)}")
                     continue
     return count_insert, count_update
 
@@ -306,7 +309,7 @@ def monitor_option_em_excel_orm():
         ud_data = current(list(ud_dict.keys()), fields=['symbol', 'price'])
         ud_dict = {item['symbol']: item['price'] for item in ud_data}
     except Exception as e:
-        print(f"******获取实时行情失败：{str(e)}")
+        logger.error(f"******获取实时行情失败：{str(e)}")
     file_names = [
         f.name for f in _folder.iterdir()
         if f.is_file() and f.suffix in ['.xlsx']
@@ -320,7 +323,7 @@ def monitor_option_em_excel_orm():
             sp_dict = df.set_index('代码')['最新'].to_dict()
             for symbol, item in si_dict.items():
                 if symbol not in sp_dict:  # 无实时行情则跳过
-                    print(f"无实时行情：{symbol}")
+                    logger.warning(f"无实时行情：{symbol}")
                     continue
                 price = Decimal(str(sp_dict[symbol]))
                 price_ud = Decimal(str(ud_dict[item['ud_symbol']]))
@@ -331,7 +334,7 @@ def monitor_option_em_excel_orm():
                         .one_or_none()
                     )
                     if monitor is None:
-                        print(f"{symbol},不存在")
+                        logger.warning(f"{symbol},不存在")
                         continue
                     # 仅价格变化时更新
                     if (monitor.price_ud != price_ud) or (monitor.price != price):
@@ -342,7 +345,7 @@ def monitor_option_em_excel_orm():
                     else:
                         count_not_exist += 1
                 except Exception as e:
-                    print(f"处理 symbol {symbol} 失败：{str(e)}")
+                    logger.error(f"处理 symbol {symbol} 失败：{str(e)}")
                     continue
         session.commit()
     return count_update, count_not_exist
@@ -377,7 +380,7 @@ def monitor_option_excel_orm():
             sp_dict = df.set_index('代码')['最新'].to_dict()
             for symbol, item in si_dict.items():
                 if symbol not in sp_dict:  # 无实时行情则跳过
-                    print(f"无实时行情：{symbol}")
+                    logger.warning(f"无实时行情：{symbol}")
                     continue
                 price = Decimal(str(sp_dict[symbol]))
                 price_ud = Decimal(str(sp_dict[item['ud_symbol']]))
@@ -388,7 +391,7 @@ def monitor_option_excel_orm():
                         .one_or_none()
                     )
                     if monitor is None:
-                        print(f"{symbol},不存在")
+                        logger.warning(f"{symbol},不存在")
                         continue
                     # 每次都更新
                     monitor.price = price
@@ -396,7 +399,7 @@ def monitor_option_excel_orm():
                     session.flush()  # 触发 before_update 钩子计算
                     result += 1
                 except Exception as e:
-                    print(f"处理 symbol {symbol} 失败：{str(e)}")
+                    logger.error(f"处理 symbol {symbol} 失败：{str(e)}")
                     continue
         session.commit()
     return result
@@ -518,7 +521,7 @@ def upsert_symbol_discount_em_sql():
     '''
     _engine = settings.DB_ENGINE
     _mdl = SymbolDiscount
-    print('真实合约及合约基本信息', end='')
+    logger.info("真实合约及合约基本信息")
     with SessionLocal() as session:
         rows = session.query(_mdl.id, _mdl.symbol_con).all()
         sd_dict = {row.symbol_con: row.id for row in rows}
@@ -532,9 +535,9 @@ def upsert_symbol_discount_em_sql():
         _table = _mdl.__table__.name
         _unique_keys = _mdl.unique_keys
         result = upsert_df_to_db(df, _table, _engine, _unique_keys)
-        print(f'->成功:{result}')
+        logger.info(f'->成功:{result}')
     else:
-        print(f'->无数据')
+        logger.info("->无数据")
 
 
 # 更新主力合约标志
@@ -542,7 +545,7 @@ def update_is_main_em_sql():
     _engine = settings.DB_ENGINE
     _mdl = SymbolDiscount
     _symbol_con_zl = IrsCfg.SYMBOL_CON_ZL
-    print('主力合约标识', end='')
+    logger.info("主力合约标识")
     sql = f'''
         SELECT symbol,symbol_con,is_main FROM {_mdl.__table__.name};
         '''
@@ -558,9 +561,9 @@ def update_is_main_em_sql():
         _update_clumns = _mdl.update_is_main
         result = upsert_df_to_db(
             df, _table, _engine, _unique_keys, _update_clumns)
-        print(f'->成功:{result}')
+        logger.info(f'->成功:{result}')
     else:
-        print(f'->无数据')
+        logger.info("->无数据")
 
 
 # 更新所有合约贴水数据并更新主力标志
@@ -647,7 +650,7 @@ def discount_yield_em_orm():
         data = current(  # 获取期货及期货标的实时行情
             symbol_list, fields=['symbol', 'price', 'cum_position'])
     except Exception as e:
-        print(f"******获取实时行情失败：{str(e)}")
+        logger.error(f"******获取实时行情失败：{str(e)}")
         raise e
     data_dict = {
         item['symbol']: {
@@ -662,7 +665,7 @@ def discount_yield_em_orm():
         with session.begin():
             for symbol, sd in sd_dict.items():
                 if symbol not in data_dict.keys():  # 无实时行情则跳过
-                    print(f"无实时行情：{symbol}")
+                    logger.warning(f"无实时行情：{symbol}")
                     continue
                 price_ud = Decimal(str(data_dict[sd['symbol_ud']]['price']))
                 price = Decimal(str(data_dict[symbol]['price']))
@@ -695,6 +698,6 @@ def discount_yield_em_orm():
                         session.flush()  # 触发 before_insert 钩子计算
                         count_insert += 1
                 except Exception as e:
-                    print(f"处理 symbol {symbol} 失败：{str(e)}")
+                    logger.error(f"处理 symbol {symbol} 失败：{str(e)}")
                     continue
     return count_insert, count_update

@@ -41,6 +41,7 @@ from server_fast.app.irs.schemas import (
     SymbolValueOut,
 )
 from server_fast.common.db import get_db
+from server_fast.common.pagination import PageResponse
 
 router = APIRouter(prefix="/irs", tags=["irs"])
 
@@ -138,7 +139,7 @@ def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:
 # GET 查询路由（8 个，对应原 Admin 注册的 8 个模型）
 # =========================================================================
 
-@router.get("/value-monitor", response_model=List[MonitorValueOut])
+@router.get("/value-monitor", response_model=PageResponse[MonitorValueOut])
 def value_monitor(
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -154,15 +155,22 @@ def value_monitor(
         service.monitor_value_em_orm()
     except Exception as e:
         print(f"-->value-monitor 同步失败:{e}")
-    items = db.query(MonitorValue).offset(offset).limit(limit).all()
+    query = db.query(MonitorValue)
+    total = query.count()
+    items = query.offset(offset).limit(limit).all()
     # 按 fields_request 构建返回字段（路径如 symbol_value__symbol 自动解析）
-    return [
-        {field: _resolve_field(mv, field) for field in MonitorValue.fields_request}
-        for mv in items
-    ]
+    return {
+        "items": [
+            {field: _resolve_field(mv, field) for field in MonitorValue.fields_request}
+            for mv in items
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
-@router.get("/symbol-values", response_model=List[SymbolValueOut])
+@router.get("/symbol-values", response_model=PageResponse[SymbolValueOut])
 def list_symbol_values(
     symbol: Optional[str] = Query(None, description="代码精确匹配（search_fields）"),
     limit: int = Query(100, ge=1),
@@ -173,11 +181,12 @@ def list_symbol_values(
     query = db.query(SymbolValue)
     if symbol:
         query = query.filter(SymbolValue.symbol == symbol)
+    total = query.count()
     items = query.order_by(SymbolValue.m_tot.desc()).offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/symbol-kpis", response_model=List[SymbolKpiOut])
+@router.get("/symbol-kpis", response_model=PageResponse[SymbolKpiOut])
 def list_symbol_kpis(
     symbol: Optional[str] = Query(None, description="关联 SymbolValue.symbol 精确匹配"),
     limit: int = Query(100, ge=1),
@@ -191,11 +200,12 @@ def list_symbol_kpis(
         query = query.join(
             SymbolValue, SymbolKpi.symbol_value_id == SymbolValue.id
         ).filter(SymbolValue.symbol == symbol)
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/symbol-options", response_model=List[SymbolOptionOut])
+@router.get("/symbol-options", response_model=PageResponse[SymbolOptionOut])
 def list_symbol_options(
     underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
     underlying_name: Optional[str] = Query(None, description="标的名称精确匹配"),
@@ -220,16 +230,18 @@ def list_symbol_options(
         query = query.filter(SymbolOption.price_strike == price_strike)
     if days_left is not None:
         query = query.filter(SymbolOption.days_left == days_left)
+    # JOIN 与过滤条件已应用，count 对主表 SymbolOption 安全
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
     extra = {
         "underlying_symbol": "underlying__symbol",
         "underlying_name": "underlying__name",
         "underlying_multiplier": "underlying__multiplier",
     }
-    return [_serialize_with_related(item, extra) for item in items]
+    return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/monitor-options", response_model=List[MonitorOptionOut])
+@router.get("/monitor-options", response_model=PageResponse[MonitorOptionOut])
 def list_monitor_options(
     symbol: Optional[str] = Query(None, description="期权代码精确匹配"),
     underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
@@ -259,6 +271,8 @@ def list_monitor_options(
                 query = query.filter(SymbolUnderlying.symbol == underlying_symbol)
             if underlying_name:
                 query = query.filter(SymbolUnderlying.name == underlying_name)
+    # JOIN 与过滤条件已应用，count 对主表 MonitorOption 安全
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
     extra = {
         "option_price_strike": "option__price_strike",
@@ -268,10 +282,10 @@ def list_monitor_options(
         "underlying_symbol": "option__underlying__symbol",
         "underlying_name": "option__underlying__name",
     }
-    return [_serialize_with_related(item, extra) for item in items]
+    return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/monitor-option-ts", response_model=List[MonitorOptionTOut])
+@router.get("/monitor-option-ts", response_model=PageResponse[MonitorOptionTOut])
 def list_monitor_option_ts(
     underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
     underlying_name: Optional[str] = Query(None, description="标的名称精确匹配"),
@@ -298,6 +312,8 @@ def list_monitor_option_ts(
                 query = query.filter(SymbolUnderlying.symbol == underlying_symbol)
             if underlying_name:
                 query = query.filter(SymbolUnderlying.name == underlying_name)
+    # JOIN 与过滤条件已应用，count 对主表 MonitorOptionT 安全
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
     extra = {
         "option_price_strike": "option__price_strike",
@@ -306,10 +322,10 @@ def list_monitor_option_ts(
         "underlying_symbol": "option__underlying__symbol",
         "underlying_name": "option__underlying__name",
     }
-    return [_serialize_with_related(item, extra) for item in items]
+    return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/symbol-discounts", response_model=List[SymbolDiscountOut])
+@router.get("/symbol-discounts", response_model=PageResponse[SymbolDiscountOut])
 def list_symbol_discounts(
     symbol_type: Optional[str] = Query(None, description="合约类别精确匹配（list_filter）"),
     is_main: Optional[bool] = Query(None, description="是否主力精确匹配（list_filter）"),
@@ -326,11 +342,12 @@ def list_symbol_discounts(
         query = query.filter(SymbolDiscount.is_main == is_main)
     if symbol:
         query = query.filter(SymbolDiscount.symbol == symbol)
+    total = query.count()
     items = query.order_by(SymbolDiscount.symbol_con).offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/monitor-discounts", response_model=List[MonitorDiscountOut])
+@router.get("/monitor-discounts", response_model=PageResponse[MonitorDiscountOut])
 def list_monitor_discounts(
     symbol: Optional[str] = Query(None, description="关联 SymbolDiscount.symbol 精确匹配"),
     symbol_con: Optional[str] = Query(None, description="关联连续合约精确匹配"),
@@ -355,6 +372,8 @@ def list_monitor_discounts(
             query = query.filter(SymbolDiscount.symbol_type == symbol_type)
         if is_main is not None:
             query = query.filter(SymbolDiscount.is_main == is_main)
+    # JOIN 与过滤条件已应用，count 对主表 MonitorDiscount 安全
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
     extra = {
         "symbol": "symbol_real__symbol",
@@ -364,7 +383,7 @@ def list_monitor_discounts(
         "symbol_ud": "symbol_real__symbol_ud",
         "delisted_date": "symbol_real__delisted_date",
     }
-    return [_serialize_with_related(item, extra) for item in items]
+    return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 # =========================================================================

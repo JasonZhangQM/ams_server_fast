@@ -9,12 +9,15 @@
 """
 import pandas as pd
 import numpy as np
+import logging
 from gm.api import *
 from datetime import datetime
 from server_fast.config import settings
 from server_fast.common.utils import *
 from server_fast.app.bds.config import Config as dbsCfg
 from server_fast.app.bds.models import *
+
+logger = logging.getLogger("uvicorn.error")  # 复用 uvicorn 的 logger，输出到 stderr 不被缓冲
 
 
 # 获取交易日历并存入数据库
@@ -27,7 +30,7 @@ def insert_trade_date_em_sql():
     _engine = settings.DB_ENGINE
     _field = 'trade_date'
     _mdl = TradeDate
-    print(f"交易日历获取并导入",end='')
+    logger.info("交易日历获取并导入")
     max_date = get_field_max_sql(_field,_mdl,_engine)
     today_year = datetime.today().year
     if max_date is None:
@@ -35,7 +38,7 @@ def insert_trade_date_em_sql():
     else:
         max_year = max_date.year
     if max_year >= today_year:
-        print('->已经有最新数据，无需调取接口')
+        logger.info("->已经有最新数据，无需调取接口")
         return None
     df = get_trading_dates_by_year( #调取em接口获取交易日历
         'SHSE', max_year, datetime.today().year)
@@ -46,9 +49,9 @@ def insert_trade_date_em_sql():
         df = df_init_model(df,_mdl) # 过滤字段
         _table = _mdl.__table__.name  # SQLAlchemy 表名（原 Django: _meta.db_table）
         df.to_sql(_table,_engine,if_exists='append', index=False)
-        print(f"->成功 {len(df)}")
+        logger.info(f"->成功 {len(df)}")
     else:
-        print('->无需导入')
+        logger.info("->无需导入")
 
 # 导入证券基本信息(东财)
 def upsert_symbol_info_excel_sql():
@@ -58,7 +61,7 @@ def upsert_symbol_info_excel_sql():
     _map_market_code = dbsCfg.MAP_MARKET_CODE
     _fields_replace = _mdl.fields_replace
 
-    print(f"证券基本信息导入",end='')
+    logger.info("证券基本信息导入")
     file_names = [
         f.name for f in _folder.iterdir()
         if f.is_file() and f.suffix in ['.xlsx']
@@ -79,6 +82,6 @@ def upsert_symbol_info_excel_sql():
             _table = _mdl.__table__.name  # SQLAlchemy 表名（原 Django: _meta.db_table）
             _unique_keys = _mdl.unique_keys
             result = upsert_df_to_db(df, _table, _engine, _unique_keys)
-            print(f"->成功：{result}")
+            logger.info(f"->成功：{result}")
         else:
-            print(f"->无需导入：{file_name}")
+            logger.info(f"->无需导入：{file_name}")

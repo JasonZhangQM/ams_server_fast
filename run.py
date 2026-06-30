@@ -8,7 +8,16 @@
 - 不读写原 `ams` 数据库
 - 入口：`python -m server_fast.run`，供外部调度（如 Windows 计划任务）调用
 """
+import logging
 from datetime import datetime
+
+# 配置 root logger，使 service 中复用的 uvicorn.error logger 能正常输出
+# （uvicorn.error logger propagate=True，消息会传播到 root logger）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("server_fast.run")
 
 from server_fast.app.bds.service import (
     insert_trade_date_em_sql,
@@ -19,10 +28,10 @@ from server_fast.app.bills.service import (
     del_old_symbol_group_sql,
     insert_bill_all_excel_sql,
     update_symbol_bill_sql,
-    upsert_daily_acc_sql,
-    upsert_daily_all_sql,
-    upsert_daily_cash_group_sql,
-    upsert_daily_value_group_em_sql,
+    # upsert_daily_acc_sql,
+    # upsert_daily_all_sql,
+    # upsert_daily_cash_group_sql,
+    # upsert_daily_value_group_em_sql,
     upsert_group_acc_sql,
     upsert_group_cash_sql,
     upsert_group_profit_sql,
@@ -57,10 +66,10 @@ def _build_steps():
         ("收益汇总", upsert_group_profit_sql),
         ("收益试算", upsert_profit_group_sql),
         ("资金试算", cash_update_group_sql),
-        ("交易日结", upsert_daily_value_group_em_sql),
-        ("资金日结", upsert_daily_cash_group_sql),
-        ("账户日结、月结、季结、年结", upsert_daily_acc_sql),
-        ("月结、季结、年结", upsert_daily_all_sql),
+        # ("交易日结", upsert_daily_value_group_em_sql),
+        # ("资金日结", upsert_daily_cash_group_sql),
+        # ("账户日结、月结、季结、年结", upsert_daily_acc_sql),
+        # ("月结、季结、年结", upsert_daily_all_sql),
         ("账户汇总", upsert_group_acc_sql),
         ("估值数据导入", lambda: upsert_model_excel_sql(
             IrsCfg.FOLDER_SYMBOL_VALUE, SymbolValue)),
@@ -78,19 +87,19 @@ def run_all():
 
     单步失败不中断后续步骤（与原脚本顺序执行语义一致），仅在末尾汇总失败数。
     """
-    print(f"========== 定时任务启动：{datetime.now():%Y-%m-%d %H:%M:%S} ==========")
+    logger.info(f"========== 定时任务启动：{datetime.now():%Y-%m-%d %H:%M:%S} ==========")
     steps = _build_steps()
     fail_count = 0
     for idx, (desc, func) in enumerate(steps, start=1):
-        print(f"\n[{idx}/{len(steps)}] {desc}")
+        logger.info(f"[{idx}/{len(steps)}] {desc}")
         try:
             func()
         except Exception as e:
             # 单步失败不中断后续步骤，记录错误后继续
             fail_count += 1
-            print(f"****** 步骤失败：{desc} -> {type(e).__name__}: {e}")
-    print(f"\n========== 定时任务结束：{datetime.now():%Y-%m-%d %H:%M:%S} ==========")
-    print(f"总计 {len(steps)} 步，成功 {len(steps) - fail_count} 步，失败 {fail_count} 步")
+            logger.error(f"****** 步骤失败：{desc} -> {type(e).__name__}: {e}")
+    logger.info(f"========== 定时任务结束：{datetime.now():%Y-%m-%d %H:%M:%S} ==========")
+    logger.info(f"总计 {len(steps)} 步，成功 {len(steps) - fail_count} 步，失败 {fail_count} 步")
     return fail_count
 
 

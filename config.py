@@ -4,6 +4,14 @@
 - DB_ENGINE 为 SQLAlchemy engine 单例（显式包含端口 3306，区别于原 Django 无端口写法）。
 - gm SDK set_token 调用用 try/except 包裹，gm 未安装时不影响配置加载。
 """
+import sys
+
+# Windows 控制台默认 GBK 代码页会导致中文日志乱码，
+# 在所有日志输出前强制将 stdout/stderr 重配置为 UTF-8（Python 3.7+ 支持）
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure") and _stream.encoding != "utf-8":
+        _stream.reconfigure(encoding="utf-8")
+
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict

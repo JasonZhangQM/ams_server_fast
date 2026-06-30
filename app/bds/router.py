@@ -7,7 +7,7 @@
 - POST /bds/sync/trade-date   同步交易日历
 - POST /bds/sync/symbol-info  同步证券信息
 """
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -19,6 +19,7 @@ from server_fast.app.bds.service import (
     upsert_symbol_info_excel_sql,
 )
 from server_fast.common.db import get_db
+from server_fast.common.pagination import PageResponse
 
 router = APIRouter(prefix="/bds", tags=["bds"])
 
@@ -36,18 +37,20 @@ def _run_sync(task_name: str, func) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/trade-dates", response_model=List[TradeDateOut])
+@router.get("/trade-dates", response_model=PageResponse[TradeDateOut])
 def list_trade_dates(
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """查询交易日历全量数据（对应 TradeDateAdmin，仅分页）。"""
-    items = db.query(TradeDate).offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    query = db.query(TradeDate)
+    total = query.count()  # 满足过滤条件的总记录数
+    items = query.offset(offset).limit(limit).all()
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/symbol-infos", response_model=List[SymbolInfoOut])
+@router.get("/symbol-infos", response_model=PageResponse[SymbolInfoOut])
 def list_symbol_infos(
     symbol: Optional[str] = Query(None, description="代码模糊匹配（search_fields）"),
     name: Optional[str] = Query(None, description="名称模糊匹配（search_fields）"),
@@ -70,8 +73,9 @@ def list_symbol_infos(
         query = query.filter(SymbolInfo.name.contains(name))
     if industry:
         query = query.filter(SymbolInfo.industry == industry)
+    total = query.count()  # 应用所有过滤条件后的总记录数
     items = query.offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("/sync/trade-date")

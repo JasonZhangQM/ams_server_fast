@@ -26,6 +26,7 @@ from server_fast.app.bills.schemas import (
     ProfitOut,
 )
 from server_fast.common.db import get_db
+from server_fast.common.pagination import PageResponse
 
 router = APIRouter(prefix="/bills", tags=["bills"])
 
@@ -67,7 +68,7 @@ def _run_sync_steps(steps: List[Tuple[str, Callable]]):
 
 
 # SubTask 9.2: 原 index 视图，对应 GroupAdmin
-@router.get("/group", response_model=List[GroupOut])
+@router.get("/group", response_model=PageResponse[GroupOut])
 def list_groups(
     account: Optional[str] = None,
     category: Optional[str] = None,
@@ -92,12 +93,14 @@ def list_groups(
             (Group.symbol, symbol, "contains"),
         ],
     )
+    # 过滤后总数（在 offset/limit 之前计算）
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 # SubTask 9.3: 对应 BillAdmin
-@router.get("/bills", response_model=List[BillOut])
+@router.get("/bills", response_model=PageResponse[BillOut])
 def list_bills(
     account: Optional[str] = None,
     category: Optional[str] = None,
@@ -121,12 +124,14 @@ def list_bills(
             (Bill.name, name, "contains"),
         ],
     )
+    # 过滤后总数（在 offset/limit 之前计算）
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 # SubTask 9.4: 对应 ProfitAdmin
-@router.get("/profits", response_model=List[ProfitOut])
+@router.get("/profits", response_model=PageResponse[ProfitOut])
 def list_profits(
     account: Optional[str] = None,
     category: Optional[str] = None,
@@ -141,6 +146,9 @@ def list_profits(
     Profit 通过 bill_id 外键关联 Bill。原 Admin 的
     search_fields=bill__symbol/bill__name、list_filter=bill__account/bill__category
     均作用于关联 Bill，故此处通过 JOIN Bill 实现过滤，并在结果中补充关联字段。
+
+    COUNT 与数据查询共享同一 query 对象（含 JOIN 与过滤条件），
+    由于 Profit→Bill 为多对一关系，JOIN 不会产生重复行，count 安全。
     """
     query = db.query(Profit)
     # 仅在存在关联过滤参数时才 JOIN，避免无谓联表
@@ -155,6 +163,8 @@ def list_profits(
                 (Bill.name, name, "contains"),
             ],
         )
+    # COUNT 与数据查询过滤条件一致（JOIN 已包含在内），在 offset/limit 之前计算
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
     result = []
     for p in items:
@@ -165,23 +175,26 @@ def list_profits(
             d["symbol"] = p.bill.symbol
             d["name"] = p.bill.name
         result.append(d)
-    return result
+    return {"items": result, "total": total, "limit": limit, "offset": offset}
 
 
 # SubTask 9.5: 对应 GroupAccAdmin（全量列表，无过滤参数）
-@router.get("/group-accs", response_model=List[GroupAccOut])
+@router.get("/group-accs", response_model=PageResponse[GroupAccOut])
 def list_group_accs(
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """返回 GroupAcc 全量列表。"""
-    items = db.query(GroupAcc).offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    query = db.query(GroupAcc)
+    # 全表总数（无过滤参数）
+    total = query.count()
+    items = query.offset(offset).limit(limit).all()
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 # SubTask 9.6: 对应 GroupSymbolAdmin
-@router.get("/group-symbols", response_model=List[GroupSymbolOut])
+@router.get("/group-symbols", response_model=PageResponse[GroupSymbolOut])
 def list_group_symbols(
     category: Optional[str] = None,
     symbol: Optional[str] = None,
@@ -201,8 +214,10 @@ def list_group_symbols(
             (GroupSymbol.symbol, symbol, "contains"),
         ],
     )
+    # 过滤后总数（在 offset/limit 之前计算）
+    total = query.count()
     items = query.offset(offset).limit(limit).all()
-    return [item.to_dict() for item in items]
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 # SubTask 9.7: 三个同步路由，触发逻辑与原 middleware.py 一致
