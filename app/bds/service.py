@@ -71,6 +71,7 @@ def upsert_symbol_info_excel_sql():
         df = pd.read_excel(_folder/file_name,dtype=str)
         df = df.map( # 去除空格
             lambda x: x.strip() if isinstance(x, str) else x)
+        df.columns = df.columns.str.strip()  # 去除列名首尾空格（如 ' 所属行业' → '所属行业'）
         df = df.rename(columns=_mdl.map_fields()) # 外部列名映射数据库字段
         df = df[filter_in_cols(df.columns,_mdl.db_fields())] # 过滤字段
         df['symbol'] = df['symbol'].map( # 代码市场映射
