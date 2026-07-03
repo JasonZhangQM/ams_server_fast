@@ -176,7 +176,6 @@ class GroupAccOut(BaseModel):
     pf_total: Optional[Decimal] = None  # 总浮盈
     pl_all: Optional[Decimal] = None  # 总盈亏
     pfl_all: Optional[Decimal] = None  # 总盈亏率
-    pfl_day: Optional[Decimal] = None  # 日盈亏率
     diff_br: Optional[Decimal] = None  # 经纪差额
     diff_dw: Optional[Decimal] = None  # 资金差额
     diff_dwt: Optional[Decimal] = None  # 资金日结差额
@@ -198,9 +197,7 @@ class GroupSymbolOut(BaseModel):
     count: int  # 成交笔数
     p_total: Optional[int] = None  # 总持仓
     cost_total: Optional[Decimal] = None  # 总成本
-    value_d_total: Optional[Decimal] = None  # 日市值合计
     value_total: Optional[Decimal] = None  # 总市值
-    pf_d_total: Optional[Decimal] = None  # 日浮盈合计
     pf_total: Optional[Decimal] = None  # 总浮盈
     pl_all: Optional[Decimal] = None  # 总盈亏
     pfl_all: Optional[Decimal] = None  # 总盈亏率

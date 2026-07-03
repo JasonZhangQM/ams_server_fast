@@ -284,6 +284,7 @@ def run_batch_import():
     6. upsert_profit_group_sql     收益试算
     7. cash_update_group_sql       资金试算
     8. upsert_group_acc_sql        账户汇总
+    9. upsert_group_symbol_sql        标的汇总
     """
     from server_fast.app.bills.service import (
         insert_bill_all_excel_sql,
@@ -294,6 +295,7 @@ def run_batch_import():
         upsert_profit_group_sql,
         cash_update_group_sql,
         upsert_group_acc_sql,
+        upsert_group_symbol_sql,
     )
 
     return _run_sync_steps(
@@ -306,5 +308,6 @@ def run_batch_import():
             ("upsert_profit_group_sql", upsert_profit_group_sql),
             ("cash_update_group_sql", cash_update_group_sql),
             ("upsert_group_acc_sql", upsert_group_acc_sql),
+            ("upsert_group_symbol_sql", upsert_group_symbol_sql),
         ]
     )

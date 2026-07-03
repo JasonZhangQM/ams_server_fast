@@ -996,7 +996,6 @@ def get_group_sql_df():
 def upsert_group_acc_sql():
     _engine = settings.DB_ENGINE
     _mdl = GroupAcc
-    _mdl_acc = DailyAcc
     # 获取Group数据，按account汇总
     df_g = get_group_sql_df()  # 获取数据
     df_acc = df_g.groupby('account').sum(numeric_only=True)
@@ -1017,28 +1016,8 @@ def upsert_group_acc_sql():
     df_acc['cost_total'] = (  # 证券成本剔除现金、理财
         df_acc['cost_total'] - df_acc['cash_acc'] - df_acc['fm_acc'])
     df_acc['acc_aset'] = df_acc['value_total']  # 账户净值
-    df_acc['value_total'] = (  # 证券市值剔除现金
+    df_acc['value_total'] = (  # 证券市值剔除现金、理财
         df_acc['value_total'] - df_acc['cash_acc'] - df_acc['fm_acc'])
-
-    # 计算当日盈亏（Django ORM 查询已转为 SQLAlchemy session 查询）
-    with SessionLocal() as session:
-        # DailyAcc 最新交易日（原 .filter(daily_type='day').aggregate(Max('trade_date'))）
-        max_trade_date = session.query(
-            func.max(_mdl_acc.trade_date)
-        ).filter(_mdl_acc.daily_type == 'day').scalar()
-        # 取最新交易日各账户数据，排除 ALL（原 .filter().exclude(account='ALL').values(*fields)）
-        stmt = select(*[getattr(_mdl_acc, f) for f in _mdl_acc.fields_group_acc]).where(
-            _mdl_acc.daily_type == 'day',
-            _mdl_acc.trade_date == max_trade_date,
-            _mdl_acc.account != 'ALL',
-        )
-        result = session.execute(stmt)
-        df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
-    df.set_index('account', inplace=True)
-    df = df.astype(filter_dtypes(df.columns, _mdl_acc.to_dtype()))  # 转换数据类型
-    df_acc = pd.concat([df_acc, df], axis=1)
-    df_acc['pfl_day'] = (  # 当日盈亏=当日净值-上日净值
-        df_acc['acc_aset'] - df_acc['daily_value']).round(0)
 
     # 求合计数
     new_row_df = df_acc.sum(
@@ -1062,7 +1041,6 @@ def upsert_group_symbol_sql():
     _engine = settings.DB_ENGINE
     _mdl = Group
     _mdl_symbol = GroupSymbol
-    _mdl_daily_value = DailyValue
     # 获取Group数据（原 Django _meta.fields 改为 __table__.columns）
     sql = f'''
         SELECT {','.join([col.name for col in _mdl.__table__.columns])}
@@ -1077,26 +1055,7 @@ def upsert_group_symbol_sql():
     df_g['pfl_all'] = (  # 盈亏合计
         df_g['pl_all'] + df_g['pf_total'])
 
-    # 计算当日盈亏（Django ORM 查询已转为 SQLAlchemy session 查询）
-    with SessionLocal() as session:
-        # 最新交易日（原 .aggregate(Max('trade_date'))）
-        max_trade_date = session.query(
-            func.max(_mdl_daily_value.trade_date)
-        ).scalar()
-        # 取最新交易日数据（原 .filter(trade_date=...).values(*fields)）
-        stmt = select(*[getattr(_mdl_daily_value, f) for f in _mdl_daily_value.fields_group_symbol]).where(
-            _mdl_daily_value.trade_date == max_trade_date,
-        )
-        result = session.execute(stmt)
-        df = pd.DataFrame(result.fetchall(), columns=list(result.keys()))
-    df = df.astype(filter_dtypes(df.columns, _mdl_daily_value.to_dtype()))
-    df = df.fillna(0)
-    df['value_d_total'] = df['value_d_long'] + df['value_d_short']
-    df_g_daily = df.groupby(['category', 'symbol']).sum(numeric_only=True)
-
-    df_g_symbol = df_g.groupby(['category', 'symbol']).sum(numeric_only=True)
-    df_symbol = pd.concat([df_g_daily, df_g_symbol], axis=1)
-    df_symbol['pf_d_total'] = df_symbol['value_total'] - df_symbol['value_d_total']
+    df_symbol = df_g.groupby(['category', 'symbol']).sum(numeric_only=True)
 
     df_symbol.reset_index(inplace=True)
     result = 0
