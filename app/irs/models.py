@@ -56,28 +56,28 @@ class SymbolValue(Base, BaseModel):
         Index("k_bds_symbol_value_symbol", "symbol"),
     )
 
-    symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
-    name: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    pp_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    pp_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    pp_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    pp_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    pp_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    vix: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True)
-    p_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    p_init: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    p_inc: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    v2: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    v3: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    m_tot: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
-    m_init: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
-    bg_p_bid1: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    bg_p_bid2: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    bg_p_bid3: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    py_close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    y_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    y_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    last_close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, comment="代码")
+    name: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="名称")
+    pp_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极低")
+    pp_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="低")
+    pp_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="中")
+    pp_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="高")
+    pp_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极高")
+    vix: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True, comment="波指")
+    p_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="目标量")
+    p_init: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="V1")
+    p_inc: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="增量")
+    v2: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="V2")
+    v3: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="V3")
+    m_tot: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="目标(万)")
+    m_init: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="首笔(万)")
+    bg_p_bid1: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="买点1")
+    bg_p_bid2: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="买点2")
+    bg_p_bid3: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="买点3")
+    py_close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="上年末")
+    y_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="年高")
+    y_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="年低")
+    last_close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="昨收")
 
     # ---- 保留的自定义类属性 ----
     fields_hlc_update = ["py_close", "y_high", "y_low", "last_close"]
@@ -106,24 +106,24 @@ class SymbolKpi(Base, BaseModel):
 
     # 外键列名 symbol_value_id（Django db_column 显式指定）
     symbol_value_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_value.id"), unique=True, nullable=False
+        Integer, ForeignKey("irs_symbol_value.id"), unique=True, nullable=False, comment="估值标的"
     )
-    last_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    max_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    min_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    roe_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    inc_oper_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    net_prof_pcom_cut_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    sale_gpm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    sale_npm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ast_liab_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pe_ttm_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pe_lyr_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pb_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pcf_ttm_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    peg_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    dy_ttm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    dy_lfy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
+    last_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="昨收%")
+    max_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="年高%")
+    min_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="年低%")
+    roe_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="ROE(cut)")
+    inc_oper_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="营收yoy)")
+    net_prof_pcom_cut_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="净利yoy")
+    sale_gpm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="毛利率")
+    sale_npm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="净利率")
+    ast_liab_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="负债率")
+    pe_ttm_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PE(ttm)")
+    pe_lyr_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PE(lyr)")
+    pb_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PB(lyr)")
+    pcf_ttm_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PCo(ttm)")
+    peg_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PEG(lyr)")
+    dy_ttm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="DY(ttm)")
+    dy_lfy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="DY(lfy)")
 
     # 关联对象（事件钩子通过 target.symbol_value 读取关联字段）
     symbol_value: Mapped["SymbolValue"] = relationship(
@@ -140,26 +140,26 @@ class MonitorValue(Base, BaseModel):
     __tablename__ = "irs_monitor_value"
 
     symbol_value_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_value.id"), unique=True, nullable=False
+        Integer, ForeignKey("irs_symbol_value.id"), unique=True, nullable=False, comment="估值标的"
     )
-    rh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    pv_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_el_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_l_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_m_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_h_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    pv_eh_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    bg_d_bid1: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    bg_d_bid2: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    bg_d_bid3: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    hd_diff: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True)
-    hd_target: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True)
-    hd_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
+    rh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="阶段高")
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最新价")
+    pv_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极低(%)")
+    pv_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="低(%)")
+    pv_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="中(%)")
+    pv_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="高(%)")
+    pv_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极高(%)")
+    pv_el_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极低(y%)")
+    pv_l_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="低(y%)")
+    pv_m_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="中(y%)")
+    pv_h_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="高(y%)")
+    pv_eh_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极高(y%)")
+    bg_d_bid1: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="买1(%)")
+    bg_d_bid2: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="买2(%)")
+    bg_d_bid3: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="买3(%)")
+    hd_diff: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="回撤值")
+    hd_target: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="回撤点")
+    hd_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="回撤(%)")
 
     # ---- 保留的自定义类属性（路由层会使用） ----
     fields_request = [
@@ -190,9 +190,9 @@ class SymbolUnderlying(BaseModel, Base):
 
     __tablename__ = "irs_symbol_underlying"
 
-    symbol: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
-    name: Mapped[str] = mapped_column(String(16), nullable=False)
-    multiplier: Mapped[int] = mapped_column(Integer, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(16), unique=True, nullable=False, comment="代码")
+    name: Mapped[str] = mapped_column(String(16), nullable=False, comment="名称")
+    multiplier: Mapped[int] = mapped_column(Integer, nullable=False, comment="期权乘数")
 
     # ---- 保留的自定义类属性 ----
     fields_not_null = ["id", "symbol", "name", "multiplier"]
@@ -225,12 +225,12 @@ class SymbolOption(Base, BaseModel):
     )
 
     underlying_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_underlying.id"), nullable=False
+        Integer, ForeignKey("irs_symbol_underlying.id"), nullable=False, comment="期权标的"
     )
-    price_strike: Mapped[Decimal] = mapped_column(Numeric(9, 4), nullable=False)
-    delisted_date: Mapped[date] = mapped_column(Date, nullable=False)
-    days_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    value_per: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    price_strike: Mapped[Decimal] = mapped_column(Numeric(9, 4), nullable=False, comment="行权价")
+    delisted_date: Mapped[date] = mapped_column(Date, nullable=False, comment="行权日")
+    days_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="剩余天数")
+    value_per: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="单点价值")
 
     underlying: Mapped["SymbolUnderlying"] = relationship(
         "SymbolUnderlying", back_populates="underlying_symbol"
@@ -259,26 +259,26 @@ class MonitorOption(Base, BaseModel):
     OPTION_TYPE_CALL = "call"  # 认购
     OPTION_TYPE_PUT = "put"    # 认沽
 
-    symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, comment="期权代码")
     option_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_option.id"), nullable=False
+        Integer, ForeignKey("irs_symbol_option.id"), nullable=False, comment="期权配置"
     )
     option_type: Mapped[str] = mapped_column(
-        String(8), nullable=False, default=OPTION_TYPE_CALL
+        String(8), nullable=False, default=OPTION_TYPE_CALL, comment="期权类型"
     )
     price_ud: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, default=Decimal("1")
+        Numeric(12, 4), nullable=True, default=Decimal("1"), comment="标的现价"
     )
     price: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(9, 4), nullable=True, default=Decimal("1")
+        Numeric(9, 4), nullable=True, default=Decimal("1"), comment="期权现价"
     )
-    value_t: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True)
-    value_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True)
-    atm_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_t: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_t_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_i_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
+    value_t: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="时间价值")
+    value_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="内在价值")
+    atm_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="平值(%)")
+    ratio_t: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%)")
+    ratio_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%)")
+    ratio_t_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%Y)")
+    ratio_i_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%Y)")
 
     # ---- 保留的自定义类属性 ----
     cols_map_fields = {
@@ -307,29 +307,29 @@ class MonitorOptionT(Base, BaseModel):
     __tablename__ = "irs_monitor_option_t"
 
     option_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_option.id"), unique=True, nullable=False
+        Integer, ForeignKey("irs_symbol_option.id"), unique=True, nullable=False, comment="期权配置"
     )
     price_ud: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, default=Decimal("1")
+        Numeric(12, 4), nullable=True, default=Decimal("1"), comment="标的现价"
     )
     price_c: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(9, 4), nullable=True, default=Decimal("1")
+        Numeric(9, 4), nullable=True, default=Decimal("1"), comment="认购现价"
     )
-    value_t_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True)
-    value_i_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True)
-    ratio_t_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_i_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_t_y_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_i_y_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
+    value_t_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="时间价值c")
+    value_i_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="内在价值c")
+    ratio_t_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%)c")
+    ratio_i_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%)c")
+    ratio_t_y_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%Y)c")
+    ratio_i_y_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%Y)c")
     price_p: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(9, 4), nullable=True, default=Decimal("1")
+        Numeric(9, 4), nullable=True, default=Decimal("1"), comment="认沽现价"
     )
-    value_t_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True)
-    value_i_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True)
-    ratio_t_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_i_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_t_y_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_i_y_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
+    value_t_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="时间价值p")
+    value_i_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="内在价值p")
+    ratio_t_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%)p")
+    ratio_i_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%)p")
+    ratio_t_y_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%Y)p")
+    ratio_i_y_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%Y)p")
 
     option: Mapped["SymbolOption"] = relationship(
         "SymbolOption", back_populates="symbol_option_t"
@@ -352,14 +352,14 @@ class SymbolDiscount(Base, BaseModel):
     OPTION_MAIN = True    # 是
     OPTION_MINOR = False  # 否
 
-    symbol_con: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
-    symbol: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    symbol_con: Mapped[str] = mapped_column(String(16), unique=True, nullable=False, comment="连续合约")
+    symbol: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="真实合约")
     is_main: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=OPTION_MINOR
+        Boolean, nullable=False, default=OPTION_MINOR, comment="主力"
     )
-    symbol_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    symbol_ud: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    delisted_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    symbol_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="合约类别")
+    symbol_ud: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="标的代码")
+    delisted_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="到期日")
 
     # ---- 保留的自定义类属性 ----
     cols_map_fields = {
@@ -387,15 +387,15 @@ class MonitorDiscount(Base, BaseModel):
 
     # 外键列名 symbol_real_id（Django db_column 显式指定）
     symbol_real_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_discount.id"), unique=True, nullable=False
+        Integer, ForeignKey("irs_symbol_discount.id"), unique=True, nullable=False, comment="估值标的"
     )
-    days_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    price: Mapped[Decimal] = mapped_column(Numeric(9, 2), nullable=False)
-    price_ud: Mapped[Decimal] = mapped_column(Numeric(9, 2), nullable=False)
-    discount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
-    ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
-    ratio_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True)
+    days_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="剩余天数")
+    position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="持仓量")
+    price: Mapped[Decimal] = mapped_column(Numeric(9, 2), nullable=False, comment="合约现价")
+    price_ud: Mapped[Decimal] = mapped_column(Numeric(9, 2), nullable=False, comment="基础现价")
+    discount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="贴水")
+    ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="贴水率(%)")
+    ratio_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="贴水率(%Y)")
 
     # ---- 保留的自定义类属性 ----
     cols_map_fields = {

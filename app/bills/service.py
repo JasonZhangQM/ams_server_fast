@@ -29,7 +29,7 @@ from server_fast.common.utils import (
 from server_fast.common.db import SessionLocal
 from server_fast.app.bills.config import Config as BlsCfg
 from server_fast.app.bills.models import (
-    Bill, Profit, Group, GroupAcc, GroupSymbol, DailyValue, DailyAcc,
+    Bill, Profit, Group, GroupAcc, GroupSymbol, 
 )
 
 logger = logging.getLogger("uvicorn.error")  # 复用 uvicorn 的 logger，输出到 stderr 不被缓冲
