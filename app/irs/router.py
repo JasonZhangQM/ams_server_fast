@@ -400,3 +400,47 @@ def sync_data(target: str):
     if funcs is None:
         raise HTTPException(status_code=400, detail=f"unknown target: {target}")
     return _run_sync_chain(target, funcs)
+
+
+# =========================================================================
+# 定时脚本拆分路由（对应 run.py 中 irs 部分，每个功能单独 POST 触发）
+# 使用 /run/ 前缀，避免与 /sync/{target} 路径参数路由冲突
+# =========================================================================
+
+@router.post("/run/symbol-value-import")
+def run_symbol_value_import():
+    """估值数据导入（对应 run.py: upsert_model_excel_sql(FOLDER_SYMBOL_VALUE, SymbolValue)）。"""
+    return _run_sync_chain(
+        "symbol-value-import",
+        [lambda: service.upsert_model_excel_sql(IrsCfg.FOLDER_SYMBOL_VALUE, SymbolValue)],
+    )
+
+
+@router.post("/run/symbol-underlying-import")
+def run_symbol_underlying_import():
+    """期权标的导入（对应 run.py: upsert_model_excel_sql(FOLDER_OPTION, SymbolUnderlying)）。"""
+    return _run_sync_chain(
+        "symbol-underlying-import",
+        [lambda: service.upsert_model_excel_sql(IrsCfg.FOLDER_OPTION, SymbolUnderlying)],
+    )
+
+
+@router.post("/run/symbol-discount-import")
+def run_symbol_discount_import():
+    """贴水标的(连续合约)导入（对应 run.py: upsert_model_excel_sql(FOLDER_SYMBOL_CON, SymbolDiscount)）。"""
+    return _run_sync_chain(
+        "symbol-discount-import",
+        [lambda: service.upsert_model_excel_sql(IrsCfg.FOLDER_SYMBOL_CON, SymbolDiscount)],
+    )
+
+
+@router.post("/run/discount-em")
+def run_discount_em():
+    """连续合约信息完善（对应 run.py: upsert_discount_em_sql）。"""
+    return _run_sync_chain("discount-em", [service.upsert_discount_em_sql])
+
+
+@router.post("/run/symbol-option-self")
+def run_symbol_option_self():
+    """SymbolOption 更新到期日（对应 run.py: symbol_option_update_self_orm）。"""
+    return _run_sync_chain("symbol-option-self", [service.symbol_option_update_self_orm])

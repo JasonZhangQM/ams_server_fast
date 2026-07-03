@@ -265,3 +265,46 @@ def sync_group_acc():
             ("upsert_group_acc_sql", upsert_group_acc_sql),
         ]
     )
+
+
+# =========================================================================
+# 定时脚本拆分路由（对应 run.py 中 bills 部分8个步骤，顺序执行）
+# =========================================================================
+
+@router.post("/run/batch-import")
+def run_batch_import():
+    """顺序执行账单导入到账户汇总的完整流程（对应 run.py 中 bills 部分）。
+
+    执行顺序：
+    1. insert_bill_all_excel_sql   导入账单数据
+    2. update_symbol_bill_sql      更新账单中的代码
+    3. del_old_symbol_group_sql    删除汇总表中的旧代码
+    4. upsert_group_cash_sql       资金汇总
+    5. upsert_group_profit_sql     收益汇总
+    6. upsert_profit_group_sql     收益试算
+    7. cash_update_group_sql       资金试算
+    8. upsert_group_acc_sql        账户汇总
+    """
+    from server_fast.app.bills.service import (
+        insert_bill_all_excel_sql,
+        update_symbol_bill_sql,
+        del_old_symbol_group_sql,
+        upsert_group_cash_sql,
+        upsert_group_profit_sql,
+        upsert_profit_group_sql,
+        cash_update_group_sql,
+        upsert_group_acc_sql,
+    )
+
+    return _run_sync_steps(
+        [
+            ("insert_bill_all_excel_sql", insert_bill_all_excel_sql),
+            ("update_symbol_bill_sql", update_symbol_bill_sql),
+            ("del_old_symbol_group_sql", del_old_symbol_group_sql),
+            ("upsert_group_cash_sql", upsert_group_cash_sql),
+            ("upsert_group_profit_sql", upsert_group_profit_sql),
+            ("upsert_profit_group_sql", upsert_profit_group_sql),
+            ("cash_update_group_sql", cash_update_group_sql),
+            ("upsert_group_acc_sql", upsert_group_acc_sql),
+        ]
+    )
