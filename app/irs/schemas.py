@@ -31,26 +31,26 @@ class SymbolValueOut(BaseModel):
 
     symbol: str                                # 代码
     name: Optional[str] = None                 # 名称
-    pp_el: Optional[Decimal] = None            # 估值价-极低
-    pp_l: Optional[Decimal] = None             # 估值价-低
-    pp_m: Optional[Decimal] = None             # 估值价-中（自动计算）
-    pp_h: Optional[Decimal] = None             # 估值价-高
-    pp_eh: Optional[Decimal] = None            # 估值价-极高
-    vix: Optional[Decimal] = None              # 回撤率
-    p_total: Optional[int] = None              # 总批次
-    p_init: Optional[int] = None               # 首批
-    p_inc: Optional[int] = None                # 加批次
-    v2: Optional[int] = None                   # 第二批买入量（自动计算）
-    v3: Optional[int] = None                   # 第三批买入量（自动计算）
-    m_tot: Optional[Decimal] = None            # 总金额(万)（自动计算）
-    m_init: Optional[Decimal] = None           # 首笔金额(万)（自动计算）
-    bg_p_bid1: Optional[Decimal] = None        # 买点1（自动计算）
-    bg_p_bid2: Optional[Decimal] = None        # 买点2（自动计算）
-    bg_p_bid3: Optional[Decimal] = None        # 买点3（自动计算）
-    py_close: Optional[Decimal] = None         # 上年末收盘价
-    y_high: Optional[Decimal] = None           # 近期高点
-    y_low: Optional[Decimal] = None            # 近期低点
-    last_close: Optional[Decimal] = None       # 最新收盘价
+    pp_el: Optional[Decimal] = None            # 极低
+    pp_l: Optional[Decimal] = None             # 低
+    pp_m: Optional[Decimal] = None             # 中
+    pp_h: Optional[Decimal] = None             # 高
+    pp_eh: Optional[Decimal] = None            # 极高
+    vix: Optional[Decimal] = None              # 波指
+    p_total: Optional[int] = None              # 目标量
+    p_init: Optional[int] = None               # V1
+    p_inc: Optional[int] = None                # 增量
+    v2: Optional[int] = None                   # V2
+    v3: Optional[int] = None                   # V3
+    m_tot: Optional[Decimal] = None            # 目标(万)
+    m_init: Optional[Decimal] = None           # 首笔(万)
+    bg_p_bid1: Optional[Decimal] = None        # 买点1
+    bg_p_bid2: Optional[Decimal] = None        # 买点2
+    bg_p_bid3: Optional[Decimal] = None        # 买点3
+    py_close: Optional[Decimal] = None         # 上年末
+    y_high: Optional[Decimal] = None           # 年高
+    y_low: Optional[Decimal] = None            # 年低
+    last_close: Optional[Decimal] = None       # 昨收
     id: int                                    # 主键
     create_time: datetime                      # 创建时间
     update_time: datetime                      # 更新时间
@@ -64,23 +64,23 @@ class SymbolKpiOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    symbol_value_id: int                                    # 关联估值配置ID
-    last_ratio: Optional[Decimal] = None                    # 最新涨跌幅(%)
-    max_ratio: Optional[Decimal] = None                     # 区间最大涨幅(%)
-    min_ratio: Optional[Decimal] = None                     # 区间最小跌幅(%)
-    roe_cut: Optional[Decimal] = None                       # ROE(扣非)
-    inc_oper_yoy: Optional[Decimal] = None                  # 营收同比(%)
-    net_prof_pcom_cut_yoy: Optional[Decimal] = None         # 扣非净利同比(%)
-    sale_gpm: Optional[Decimal] = None                      # 销售毛利率(%)
-    sale_npm: Optional[Decimal] = None                      # 销售净利率(%)
-    ast_liab_rate: Optional[Decimal] = None                 # 资产负债率(%)
-    pe_ttm_cut: Optional[Decimal] = None                    # PE(TTM扣非)
-    pe_lyr_cut: Optional[Decimal] = None                    # PE(LYR扣非)
-    pb_lyr: Optional[Decimal] = None                        # PB(LYR)
-    pcf_ttm_oper: Optional[Decimal] = None                  # PCF(TTM经营)
-    peg_lyr: Optional[Decimal] = None                       # PEG(LYR)
-    dy_ttm: Optional[Decimal] = None                        # 股息率(TTM)(%)
-    dy_lfy: Optional[Decimal] = None                        # 股息率(LFY)(%)
+    symbol_value_id: int                                    # 估值标的
+    last_ratio: Optional[Decimal] = None                    # 昨收%
+    max_ratio: Optional[Decimal] = None                     # 年高%
+    min_ratio: Optional[Decimal] = None                     # 年低%
+    roe_cut: Optional[Decimal] = None                       # ROE(cut)
+    inc_oper_yoy: Optional[Decimal] = None                  # 营收yoy)
+    net_prof_pcom_cut_yoy: Optional[Decimal] = None         # 净利yoy
+    sale_gpm: Optional[Decimal] = None                      # 毛利率
+    sale_npm: Optional[Decimal] = None                      # 净利率
+    ast_liab_rate: Optional[Decimal] = None                 # 负债率
+    pe_ttm_cut: Optional[Decimal] = None                    # PE(ttm)
+    pe_lyr_cut: Optional[Decimal] = None                    # PE(lyr)
+    pb_lyr: Optional[Decimal] = None                        # PB(lyr)
+    pcf_ttm_oper: Optional[Decimal] = None                  # PCo(ttm)
+    peg_lyr: Optional[Decimal] = None                       # PEG(lyr)
+    dy_ttm: Optional[Decimal] = None                        # DY(ttm)
+    dy_lfy: Optional[Decimal] = None                        # DY(lfy)
     id: int                                                 # 主键
     create_time: datetime                                   # 创建时间
     update_time: datetime                                   # 更新时间
@@ -101,22 +101,22 @@ class MonitorValueOut(BaseModel):
 
     # 关联 SymbolValue 字段（经 _resolve_field 解析，关联为 None 时取 None）
     symbol_value_symbol: Optional[str] = Field(
-        default=None, alias="symbol_value__symbol", description="估值配置代码"
+        default=None, alias="symbol_value__symbol", description="代码"
     )
     symbol_value_pp_el: Optional[Decimal] = Field(
-        default=None, alias="symbol_value__pp_el", description="估值价-极低"
+        default=None, alias="symbol_value__pp_el", description="极低"
     )
     symbol_value_pp_l: Optional[Decimal] = Field(
-        default=None, alias="symbol_value__pp_l", description="估值价-低"
+        default=None, alias="symbol_value__pp_l", description="低"
     )
     symbol_value_pp_m: Optional[Decimal] = Field(
-        default=None, alias="symbol_value__pp_m", description="估值价-中"
+        default=None, alias="symbol_value__pp_m", description="中"
     )
     symbol_value_pp_h: Optional[Decimal] = Field(
-        default=None, alias="symbol_value__pp_h", description="估值价-高"
+        default=None, alias="symbol_value__pp_h", description="高"
     )
     symbol_value_pp_eh: Optional[Decimal] = Field(
-        default=None, alias="symbol_value__pp_eh", description="估值价-极高"
+        default=None, alias="symbol_value__pp_eh", description="极高"
     )
     symbol_value_bg_p_bid1: Optional[Decimal] = Field(
         default=None, alias="symbol_value__bg_p_bid1", description="买点1"
@@ -132,7 +132,7 @@ class MonitorValueOut(BaseModel):
         default=None, alias="symbol_value__vr", description="保留字段(不存在)"
     )
     # MonitorValue 自身字段
-    rh: Optional[Decimal] = None                            # 近期高点
+    rh: Optional[Decimal] = None                            # 阶段高
     price: Optional[Decimal] = None                         # 最新价
 
 
@@ -144,18 +144,18 @@ class SymbolOptionOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    underlying_id: int                                    # 关联标的ID
+    underlying_id: int                                    # 期权标的
     price_strike: Decimal                                 # 行权价
-    delisted_date: date                                   # 到期日
-    days_left: Optional[int] = None                       # 剩余天数（自动计算）
-    value_per: Optional[Decimal] = None                   # 单点价值（自动计算）
+    delisted_date: date                                   # 行权日
+    days_left: Optional[int] = None                       # 剩余天数
+    value_per: Optional[Decimal] = None                   # 单点价值
     id: int                                               # 主键
     create_time: datetime                                 # 创建时间
     update_time: datetime                                 # 更新时间
     # 扁平化嵌入 SymbolUnderlying 字段（关联对象可能为 None）
-    underlying_symbol: Optional[str] = None               # 标的代码
-    underlying_name: Optional[str] = None                 # 标的名称
-    underlying_multiplier: Optional[int] = None           # 标的乘数
+    underlying_symbol: Optional[str] = None               # 代码
+    underlying_name: Optional[str] = None                 # 名称
+    underlying_multiplier: Optional[int] = None           # 期权乘数
 
 
 # =========================================================================
@@ -167,28 +167,28 @@ class MonitorOptionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     symbol: str                                          # 期权代码
-    option_id: int                                       # 关联期权配置ID
-    option_type: str                                     # 期权类型(call/put)
+    option_id: int                                       # 期权配置
+    option_type: str                                     # 期权类型
     price_ud: Optional[Decimal] = None                   # 标的现价
     price: Optional[Decimal] = None                      # 期权现价
-    value_t: Optional[Decimal] = None                    # 时间价值（自动计算）
-    value_i: Optional[Decimal] = None                    # 内在价值（自动计算）
-    atm_i: Optional[Decimal] = None                      # 平值度(%)
-    ratio_t: Optional[Decimal] = None                    # 时间价值占比(%)
-    ratio_i: Optional[Decimal] = None                    # 内在价值占比(%)
-    ratio_t_y: Optional[Decimal] = None                  # 年化时间占比(%)
-    ratio_i_y: Optional[Decimal] = None                  # 年化内在占比(%)
+    value_t: Optional[Decimal] = None                    # 时间价值
+    value_i: Optional[Decimal] = None                    # 内在价值
+    atm_i: Optional[Decimal] = None                      # 平值(%)
+    ratio_t: Optional[Decimal] = None                    # 时间(%)
+    ratio_i: Optional[Decimal] = None                    # 内在(%)
+    ratio_t_y: Optional[Decimal] = None                  # 时间(%Y)
+    ratio_i_y: Optional[Decimal] = None                  # 内在(%Y)
     id: int                                              # 主键
     create_time: datetime                                # 创建时间
     update_time: datetime                                # 更新时间
     # 扁平化嵌入 SymbolOption 字段
     option_price_strike: Optional[Decimal] = None        # 行权价
-    option_delisted_date: Optional[date] = None          # 到期日
+    option_delisted_date: Optional[date] = None          # 行权日
     option_days_left: Optional[int] = None               # 剩余天数
     option_value_per: Optional[Decimal] = None           # 单点价值
     # 扁平化嵌入 SymbolUnderlying 字段
-    underlying_symbol: Optional[str] = None              # 标的代码
-    underlying_name: Optional[str] = None                # 标的名称
+    underlying_symbol: Optional[str] = None              # 代码
+    underlying_name: Optional[str] = None                # 名称
 
 
 # =========================================================================
@@ -199,32 +199,32 @@ class MonitorOptionTOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    option_id: int                                       # 关联期权配置ID
+    option_id: int                                       # 期权配置
     price_ud: Optional[Decimal] = None                   # 标的现价
-    price_c: Optional[Decimal] = None                    # 认购期权现价
-    value_t_c: Optional[Decimal] = None                  # 认购时间价值
-    value_i_c: Optional[Decimal] = None                  # 认购内在价值
-    ratio_t_c: Optional[Decimal] = None                  # 认购时间占比(%)
-    ratio_i_c: Optional[Decimal] = None                  # 认购内在占比(%)
-    ratio_t_y_c: Optional[Decimal] = None                # 认购年化时间占比(%)
-    ratio_i_y_c: Optional[Decimal] = None                # 认购年化内在占比(%)
-    price_p: Optional[Decimal] = None                    # 认沽期权现价
-    value_t_p: Optional[Decimal] = None                  # 认沽时间价值
-    value_i_p: Optional[Decimal] = None                  # 认沽内在价值
-    ratio_t_p: Optional[Decimal] = None                  # 认沽时间占比(%)
-    ratio_i_p: Optional[Decimal] = None                  # 认沽内在占比(%)
-    ratio_t_y_p: Optional[Decimal] = None                # 认沽年化时间占比(%)
-    ratio_i_y_p: Optional[Decimal] = None                # 认沽年化内在占比(%)
+    price_c: Optional[Decimal] = None                    # 认购现价
+    value_t_c: Optional[Decimal] = None                  # 时间价值c
+    value_i_c: Optional[Decimal] = None                  # 内在价值c
+    ratio_t_c: Optional[Decimal] = None                  # 时间(%)c
+    ratio_i_c: Optional[Decimal] = None                  # 内在(%)c
+    ratio_t_y_c: Optional[Decimal] = None                # 时间(%Y)c
+    ratio_i_y_c: Optional[Decimal] = None                # 内在(%Y)c
+    price_p: Optional[Decimal] = None                    # 认沽现价
+    value_t_p: Optional[Decimal] = None                  # 时间价值p
+    value_i_p: Optional[Decimal] = None                  # 内在价值p
+    ratio_t_p: Optional[Decimal] = None                  # 时间(%)p
+    ratio_i_p: Optional[Decimal] = None                  # 内在(%)p
+    ratio_t_y_p: Optional[Decimal] = None                # 时间(%Y)p
+    ratio_i_y_p: Optional[Decimal] = None                # 内在(%Y)p
     id: int                                              # 主键
     create_time: datetime                                # 创建时间
     update_time: datetime                                # 更新时间
     # 扁平化嵌入 SymbolOption 字段
     option_price_strike: Optional[Decimal] = None        # 行权价
-    option_delisted_date: Optional[date] = None          # 到期日
+    option_delisted_date: Optional[date] = None          # 行权日
     option_days_left: Optional[int] = None               # 剩余天数
     # 扁平化嵌入 SymbolUnderlying 字段
-    underlying_symbol: Optional[str] = None              # 标的代码
-    underlying_name: Optional[str] = None                # 标的名称
+    underlying_symbol: Optional[str] = None              # 代码
+    underlying_name: Optional[str] = None                # 名称
 
 
 # =========================================================================
@@ -235,10 +235,10 @@ class SymbolDiscountOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    symbol_con: str                                 # 连续合约代码
-    symbol: Optional[str] = None                    # 真实合约代码
-    is_main: bool                                   # 是否主力
-    symbol_type: Optional[str] = None               # 合约类别（自动解析）
+    symbol_con: str                                 # 连续合约
+    symbol: Optional[str] = None                    # 真实合约
+    is_main: bool                                   # 主力
+    symbol_type: Optional[str] = None               # 合约类别
     symbol_ud: Optional[str] = None                 # 标的代码
     delisted_date: Optional[date] = None            # 到期日
     id: int                                         # 主键
@@ -254,21 +254,21 @@ class MonitorDiscountOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    symbol_real_id: int                             # 关联贴水配置ID
-    days_left: Optional[int] = None                 # 剩余天数（自动计算）
-    position: Optional[int] = None                  # 累计持仓
+    symbol_real_id: int                             # 估值标的
+    days_left: Optional[int] = None                 # 剩余天数
+    position: Optional[int] = None                  # 持仓量
     price: Decimal                                  # 合约现价
     price_ud: Decimal                               # 基础现价
-    discount: Optional[Decimal] = None              # 贴水值（自动计算）
+    discount: Optional[Decimal] = None              # 贴水
     ratio: Optional[Decimal] = None                 # 贴水率(%)
-    ratio_y: Optional[Decimal] = None               # 年化贴水率(%)
+    ratio_y: Optional[Decimal] = None               # 贴水率(%Y)
     id: int                                         # 主键
     create_time: datetime                           # 创建时间
     update_time: datetime                           # 更新时间
     # 扁平化嵌入 SymbolDiscount 字段（关联对象可能为 None）
-    symbol: Optional[str] = None                    # 真实合约代码
-    symbol_con: Optional[str] = None                # 连续合约代码
-    is_main: Optional[bool] = None                  # 是否主力
+    symbol: Optional[str] = None                    # 真实合约
+    symbol_con: Optional[str] = None                # 连续合约
+    is_main: Optional[bool] = None                  # 主力
     symbol_type: Optional[str] = None               # 合约类别
     symbol_ud: Optional[str] = None                 # 标的代码
     delisted_date: Optional[date] = None            # 到期日

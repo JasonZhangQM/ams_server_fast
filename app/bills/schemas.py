@@ -23,45 +23,45 @@ class GroupOut(BaseModel):
 
     # 标识与时间
     account: Optional[str] = None  # 账户
-    category: str  # 类别
-    symbol: str  # 证券代码
-    start_time: datetime  # 起始时间
-    end_time: datetime  # 结束时间
-    count: int  # 成交笔数
+    category: str  # 交易分类
+    symbol: str  # 代码
+    start_time: datetime  # 首次交易时
+    end_time: datetime  # 最后交易时
+    count: int  # 交易次数
     profit_time: Optional[datetime] = None  # 收益试算时间
-    value_time: Optional[datetime] = None  # 市值试算时间
-    daily_time: Optional[datetime] = None  # 收益日结时间
+    value_time: Optional[datetime] = None  # 市值更新时间
+    daily_time: Optional[datetime] = None  # 日结时间
 
     # 持仓
     p_long: Optional[int] = None  # 多头持仓
     p_short: Optional[int] = None  # 空头持仓
-    p_total: Optional[int] = None  # 总持仓
+    p_total: Optional[int] = None  # 持仓
 
     # 成本
-    cost_t_long: Optional[Decimal] = None  # 多头总成本
-    cost_t_short: Optional[Decimal] = None  # 空头总成本
-    cost_total: Optional[Decimal] = None  # 总成本
+    cost_t_long: Optional[Decimal] = None  # 多头成本
+    cost_t_short: Optional[Decimal] = None  # 空头成本
+    cost_total: Optional[Decimal] = None  # 持仓成本
 
     # 市值与浮盈
     value_long: Optional[Decimal] = None  # 多头市值
     value_short: Optional[Decimal] = None  # 空头市值
-    value_total: Optional[Decimal] = None  # 总市值
+    value_total: Optional[Decimal] = None  # 市值
     pf_long: Optional[Decimal] = None  # 多头浮盈
     pf_short: Optional[Decimal] = None  # 空头浮盈
-    pf_total: Optional[Decimal] = None  # 总浮盈
+    pf_total: Optional[Decimal] = None  # 浮动盈亏
 
     # 平仓盈亏
     pl_t_long: Optional[Decimal] = None  # 多头平仓盈亏
     pl_t_short: Optional[Decimal] = None  # 空头平仓盈亏
-    pl_total: Optional[Decimal] = None  # 总平仓盈亏
-    pl_t_other: Optional[Decimal] = None  # 其他平仓盈亏
-    pl_t_ft: Optional[Decimal] = None  # 期货平仓盈亏
-    pl_t_br: Optional[Decimal] = None  # 经纪平仓盈亏
+    pl_total: Optional[Decimal] = None  # 平仓盈亏
+    pl_t_other: Optional[Decimal] = None  # 其他损益
+    pl_t_ft: Optional[Decimal] = None  # 税费
+    pl_t_br: Optional[Decimal] = None  # 融资利息
 
     # 差额
-    diff_br: Optional[Decimal] = None  # 经纪差额
-    diff_dw: Optional[Decimal] = None  # 资金差额
-    diff_dwt: Optional[Decimal] = None  # 资金日结差额
+    diff_br: Optional[Decimal] = None  # 融资余额
+    diff_dw: Optional[Decimal] = None  # 出入净额
+    diff_dwt: Optional[Decimal] = None  # 划转净额
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
@@ -76,25 +76,25 @@ class BillOut(BaseModel):
 
     # 基本信息
     trade_time: datetime  # 交易时间
-    symbol: str  # 证券代码
-    name: str  # 证券名称
-    exec_type: str  # 交易类别
+    symbol: str  # 代码
+    name: str  # 名称
+    exec_type: str  # 操作类型
     category1: str  # 一级分类
-    category: str  # 分类
-    b_s: Optional[str] = None  # 买卖方向
-    c_p: Optional[str] = None  # 类别（买/卖）
-    o_c: Optional[str] = None  # 开平方向
+    category: str  # 总分类
+    b_s: Optional[str] = None  # 买/卖
+    c_p: Optional[str] = None  # 沽/购
+    o_c: Optional[str] = None  # 开/平
 
     # 成交数据
-    price: Decimal  # 成交均价
-    vol: int  # 成交数量
-    amount: Decimal  # 成交金额
-    amount_act: Decimal  # 实际发生金额
+    price: Decimal  # 成交价
+    vol: int  # 成交量
+    amount: Decimal  # 成交额
+    amount_act: Decimal  # 发生额
     balance: Optional[int] = None  # 余额
 
     # 费用明细
-    fee_tax: Optional[Decimal] = None  # 税费
-    fees: Optional[Decimal] = None  # 手续费
+    fee_tax: Optional[Decimal] = None  # 税费合计
+    fees: Optional[Decimal] = None  # 手续费/佣金
     taxes: Optional[Decimal] = None  # 印花税
     fee_exec1: Optional[Decimal] = None  # 过户费
     fee_exec2: Optional[Decimal] = None  # 交易过户费
@@ -109,10 +109,10 @@ class BillOut(BaseModel):
 
     # 编号与账户信息
     id_exec: Optional[str] = None  # 成交编号
-    id_agree: Optional[str] = None  # 合同编号/流水号
+    id_agree: Optional[str] = None  # 流水号
     currency: str  # 币种
-    account_id: Optional[str] = None  # 股东账号/资金账号
-    market: Optional[str] = None  # 交易市场
+    account_id: Optional[str] = None  # 账号
+    market: Optional[str] = None  # 市场
     account: str  # 账户
 
     # 通用字段（BaseModel 提供）
@@ -131,25 +131,25 @@ class ProfitOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     # 关联 Bill
-    bill_id: int  # 关联账单 ID
+    bill_id: int  # 关联账单
 
     # 持仓与成本
     p_long: Optional[int] = None  # 多头持仓
     p_short: Optional[int] = None  # 空头持仓
-    cost_t_long: Optional[Decimal] = None  # 多头总成本
-    cost_t_short: Optional[Decimal] = None  # 空头总成本
-    cost_u_long: Optional[Decimal] = None  # 多头单位成本
-    cost_u_short: Optional[Decimal] = None  # 空头单位成本
+    cost_t_long: Optional[Decimal] = None  # 多头成本
+    cost_t_short: Optional[Decimal] = None  # 空头成本
+    cost_u_long: Optional[Decimal] = None  # u成本l
+    cost_u_short: Optional[Decimal] = None  # u成本s
 
     # 盈亏与差额
-    pl_long: Optional[Decimal] = None  # 多头盈亏
-    pl_short: Optional[Decimal] = None  # 空头盈亏
-    pl_other: Optional[Decimal] = None  # 其他盈亏
-    pl_ft: Optional[Decimal] = None  # 期货盈亏
-    pl_br: Optional[Decimal] = None  # 经纪盈亏
-    diff_br: Optional[Decimal] = None  # 经纪差额
-    diff_dw: Optional[Decimal] = None  # 资金差额
-    diff_dwt: Optional[Decimal] = None  # 资金日结差额
+    pl_long: Optional[Decimal] = None  # 平仓盈亏l
+    pl_short: Optional[Decimal] = None  # 平仓盈亏s
+    pl_other: Optional[Decimal] = None  # 其他损益
+    pl_ft: Optional[Decimal] = None  # 税费
+    pl_br: Optional[Decimal] = None  # 融资利息
+    diff_br: Optional[Decimal] = None  # 融资余额
+    diff_dw: Optional[Decimal] = None  # 入金净额
+    diff_dwt: Optional[Decimal] = None  # 划转净额
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
@@ -157,9 +157,9 @@ class ProfitOut(BaseModel):
     update_time: datetime  # 更新时间
 
     # 扁平化嵌入关联 Bill 的字段（放末尾；关联 Bill 可能不存在）
-    account: Optional[str] = None  # 关联账单的账户
-    symbol: Optional[str] = None  # 关联账单的证券代码
-    name: Optional[str] = None  # 关联账单的证券名称
+    account: Optional[str] = None  # 账户
+    symbol: Optional[str] = None  # 代码
+    name: Optional[str] = None  # 名称
 
 
 class GroupAccOut(BaseModel):
@@ -168,18 +168,18 @@ class GroupAccOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     account: str  # 账户
-    cash_acc: Optional[Decimal] = None  # 资金账户余额
-    fm_acc: Optional[Decimal] = None  # 资金账户浮盈
-    cost_total: Optional[Decimal] = None  # 总成本
-    value_total: Optional[Decimal] = None  # 总市值
-    acc_aset: Optional[Decimal] = None  # 账户资产
-    pf_total: Optional[Decimal] = None  # 总浮盈
-    pl_all: Optional[Decimal] = None  # 总盈亏
-    pfl_all: Optional[Decimal] = None  # 总盈亏率
-    diff_br: Optional[Decimal] = None  # 经纪差额
-    diff_dw: Optional[Decimal] = None  # 资金差额
-    diff_dwt: Optional[Decimal] = None  # 资金日结差额
-    status: Optional[Decimal] = None  # 状态
+    cash_acc: Optional[Decimal] = None  # 资金余额
+    fm_acc: Optional[Decimal] = None  # 理财余额
+    cost_total: Optional[Decimal] = None  # 证券成本
+    value_total: Optional[Decimal] = None  # 证券市值
+    acc_aset: Optional[Decimal] = None  # 账户净值
+    pf_total: Optional[Decimal] = None  # 浮动盈亏
+    pl_all: Optional[Decimal] = None  # 平仓盈亏
+    pfl_all: Optional[Decimal] = None  # 盈亏合计
+    diff_br: Optional[Decimal] = None  # 融资余额
+    diff_dw: Optional[Decimal] = None  # 入金净额
+    diff_dwt: Optional[Decimal] = None  # 划转净额
+    status: Optional[Decimal] = None  # 校验
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
@@ -192,18 +192,18 @@ class GroupSymbolOut(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    category: str  # 类别
-    symbol: str  # 证券代码
-    count: int  # 成交笔数
-    p_total: Optional[int] = None  # 总持仓
-    cost_total: Optional[Decimal] = None  # 总成本
-    value_total: Optional[Decimal] = None  # 总市值
-    pf_total: Optional[Decimal] = None  # 总浮盈
-    pl_all: Optional[Decimal] = None  # 总盈亏
-    pfl_all: Optional[Decimal] = None  # 总盈亏率
-    diff_br: Optional[Decimal] = None  # 经纪差额
-    diff_dw: Optional[Decimal] = None  # 资金差额
-    diff_dwt: Optional[Decimal] = None  # 资金日结差额
+    category: str  # 交易分类
+    symbol: str  # 代码
+    count: int  # 交易次数
+    p_total: Optional[int] = None  # 持仓量
+    cost_total: Optional[Decimal] = None  # 持仓成本
+    value_total: Optional[Decimal] = None  # 当前市值
+    pf_total: Optional[Decimal] = None  # 浮动盈亏
+    pl_all: Optional[Decimal] = None  # 平仓盈亏
+    pfl_all: Optional[Decimal] = None  # 盈亏合计
+    diff_br: Optional[Decimal] = None  # 融资余额
+    diff_dw: Optional[Decimal] = None  # 出入净额
+    diff_dwt: Optional[Decimal] = None  # 划转净额
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
