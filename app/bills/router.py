@@ -17,13 +17,14 @@ from typing import Any, Callable, List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol, Profit
+from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol, Profit, ProfitYear
 from server_fast.app.bills.schemas import (
     BillOut,
     GroupAccOut,
     GroupOut,
     GroupSymbolOut,
     ProfitOut,
+    ProfitYearOut,
 )
 from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
@@ -221,6 +222,20 @@ def list_group_symbols(
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
+# 年度收益查询
+@router.get("/profit-years", response_model=PageResponse[ProfitYearOut])
+def list_profit_years(
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """返回年度收益列表，按年度降序排列。"""
+    query = db.query(ProfitYear).order_by(ProfitYear.year.desc())
+    total = query.count()
+    items = query.offset(offset).limit(limit).all()
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
 # SubTask 9.7: 三个同步路由，触发逻辑与原 middleware.py 一致
 @router.post("/sync/group")
 def sync_group():
@@ -280,8 +295,9 @@ def run_batch_import():
     5. upsert_group_profit_sql     收益汇总
     6. upsert_profit_group_sql     收益试算
     7. cash_update_group_sql       资金试算
-    8. upsert_group_acc_sql        账户汇总
-    9. upsert_group_symbol_sql        标的汇总
+    8. upsert_profit_year_sql      年度收益统计
+    9. upsert_group_acc_sql        账户汇总
+    10. upsert_group_symbol_sql     标的汇总
     """
     from server_fast.app.bills.services.bill_import import insert_bill_all_excel_sql
     from server_fast.app.bills.services.group_summary import (
@@ -292,6 +308,7 @@ def run_batch_import():
     )
     from server_fast.app.bills.services.profit_calc import upsert_profit_group_sql
     from server_fast.app.bills.services.cash_calc import cash_update_group_sql
+    from server_fast.app.bills.services.profit_year import upsert_profit_year_sql
     from server_fast.app.bills.services.account_summary import (
         upsert_group_acc_sql,
         upsert_group_symbol_sql,
@@ -306,6 +323,7 @@ def run_batch_import():
             ("upsert_group_profit_sql", upsert_group_profit_sql),
             ("upsert_profit_group_sql", upsert_profit_group_sql),
             ("cash_update_group_sql", cash_update_group_sql),
+            ("upsert_profit_year_sql", upsert_profit_year_sql),
             ("upsert_group_acc_sql", upsert_group_acc_sql),
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
         ]

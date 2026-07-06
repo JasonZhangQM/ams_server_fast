@@ -359,3 +359,20 @@ class GroupSymbol(Base, BaseModel):
     def __str__(self) -> str:
         return f'标的汇总-{self.category}-{self.symbol}'
 
+
+class ProfitYear(Base, BaseModel):
+    """年度收益统计模型（按年度汇总 Profit 表的盈亏合计）。"""
+
+    __tablename__ = "bills_profit_year"
+
+    year: Mapped[int] = mapped_column(Integer, unique=True, comment="年度")
+    pl_long: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="平仓盈亏l")
+    pl_short: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="平仓盈亏s")
+    pl_other: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="其他损益")
+    pl_all: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="平仓盈亏")
+    # 累计盈亏：该年度及之前所有年份 pl_all 的累计求和
+    pl_cumulative: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="累计盈亏")
+
+    def __str__(self) -> str:
+        return f'年度收益-{self.year}'
+

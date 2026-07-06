@@ -210,3 +210,21 @@ class GroupSymbolOut(BaseModel):
     id: int  # 主键
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间
+
+
+class ProfitYearOut(BaseModel):
+    """年度收益响应（对应 ProfitYear 模型，共 9 字段）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    year: int  # 年度
+    pl_long: Optional[Decimal] = None  # 平仓盈亏l
+    pl_short: Optional[Decimal] = None  # 平仓盈亏s
+    pl_other: Optional[Decimal] = None  # 其他损益
+    pl_all: Optional[Decimal] = None  # 平仓盈亏
+    pl_cumulative: Optional[Decimal] = None  # 累计盈亏
+
+    # 通用字段（BaseModel 提供）
+    id: int  # 主键
+    create_time: datetime  # 创建时间
+    update_time: datetime  # 更新时间
