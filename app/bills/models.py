@@ -369,7 +369,8 @@ class ProfitYear(Base, BaseModel):
     pl_long: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="平仓盈亏l")
     pl_short: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="平仓盈亏s")
     pl_other: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="其他损益")
-    pl_all: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="平仓盈亏")
+    pl_br: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="融资利息")
+    pl_all: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="总平仓盈亏")
     # 累计盈亏：该年度及之前所有年份 pl_all 的累计求和
     pl_cumulative: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="累计盈亏")
 

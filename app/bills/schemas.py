@@ -213,7 +213,7 @@ class GroupSymbolOut(BaseModel):
 
 
 class ProfitYearOut(BaseModel):
-    """年度收益响应（对应 ProfitYear 模型，共 9 字段）。"""
+    """年度收益响应（对应 ProfitYear 模型，共 10 字段）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -221,7 +221,8 @@ class ProfitYearOut(BaseModel):
     pl_long: Optional[Decimal] = None  # 平仓盈亏l
     pl_short: Optional[Decimal] = None  # 平仓盈亏s
     pl_other: Optional[Decimal] = None  # 其他损益
-    pl_all: Optional[Decimal] = None  # 平仓盈亏
+    pl_br: Optional[Decimal] = None  # 融资利息
+    pl_all: Optional[Decimal] = None  # 总平仓盈亏
     pl_cumulative: Optional[Decimal] = None  # 累计盈亏
 
     # 通用字段（BaseModel 提供）
