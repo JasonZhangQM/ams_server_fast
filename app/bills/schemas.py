@@ -122,9 +122,9 @@ class BillOut(BaseModel):
 
 
 class ProfitOut(BaseModel):
-    """账单收益响应（对应 Profit 模型，共 21 字段）。
+    """账单收益响应（对应 Profit 模型，共 22 字段）。
 
-    自身 18 字段 + 扁平化嵌入关联 Bill 的 account/symbol/name（3 字段）。
+    自身 18 字段 + 扁平化嵌入关联 Bill 的 account/symbol/name/trade_time（4 字段）。
     关联 Bill 可能不存在，故扁平化字段声明为 Optional。
     """
 
@@ -160,6 +160,7 @@ class ProfitOut(BaseModel):
     account: Optional[str] = None  # 账户
     symbol: Optional[str] = None  # 代码
     name: Optional[str] = None  # 名称
+    trade_time: Optional[datetime] = None  # 交易时间
 
 
 class GroupAccOut(BaseModel):

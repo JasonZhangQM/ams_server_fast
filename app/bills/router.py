@@ -169,11 +169,12 @@ def list_profits(
     result = []
     for p in items:
         d = p.to_dict()
-        # 补充关联 Bill 的 account/symbol/name（对应原 ProfitAdmin 的 bill_* 方法）
+        # 补充关联 Bill 的 account/symbol/name/trade_time（对应原 ProfitAdmin 的 bill_* 方法）
         if p.bill:
             d["account"] = p.bill.account
             d["symbol"] = p.bill.symbol
             d["name"] = p.bill.name
+            d["trade_time"] = p.bill.trade_time
         result.append(d)
     return {"items": result, "total": total, "limit": limit, "offset": offset}
 
@@ -224,7 +225,7 @@ def list_group_symbols(
 @router.post("/sync/group")
 def sync_group():
     """触发实时估值同步（对应中间件 /bills/group/）。"""
-    from server_fast.app.bills.service import value_float_em_sql
+    from server_fast.app.bills.services.value_calc import value_float_em_sql
 
     return _run_sync_steps([("value_float_em_sql", value_float_em_sql)])
 
@@ -235,10 +236,8 @@ def sync_group_symbol():
 
     与原中间件一致：先 value_float_em_sql 再 upsert_group_symbol_sql。
     """
-    from server_fast.app.bills.service import (
-        value_float_em_sql,
-        upsert_group_symbol_sql,
-    )
+    from server_fast.app.bills.services.value_calc import value_float_em_sql
+    from server_fast.app.bills.services.account_summary import upsert_group_symbol_sql
 
     return _run_sync_steps(
         [
@@ -254,10 +253,8 @@ def sync_group_acc():
 
     与原中间件一致：先 value_float_em_sql 再 upsert_group_acc_sql。
     """
-    from server_fast.app.bills.service import (
-        value_float_em_sql,
-        upsert_group_acc_sql,
-    )
+    from server_fast.app.bills.services.value_calc import value_float_em_sql
+    from server_fast.app.bills.services.account_summary import upsert_group_acc_sql
 
     return _run_sync_steps(
         [
@@ -286,14 +283,16 @@ def run_batch_import():
     8. upsert_group_acc_sql        账户汇总
     9. upsert_group_symbol_sql        标的汇总
     """
-    from server_fast.app.bills.service import (
-        insert_bill_all_excel_sql,
+    from server_fast.app.bills.services.bill_import import insert_bill_all_excel_sql
+    from server_fast.app.bills.services.group_summary import (
         update_symbol_bill_sql,
         del_old_symbol_group_sql,
         upsert_group_cash_sql,
         upsert_group_profit_sql,
-        upsert_profit_group_sql,
-        cash_update_group_sql,
+    )
+    from server_fast.app.bills.services.profit_calc import upsert_profit_group_sql
+    from server_fast.app.bills.services.cash_calc import cash_update_group_sql
+    from server_fast.app.bills.services.account_summary import (
         upsert_group_acc_sql,
         upsert_group_symbol_sql,
     )
