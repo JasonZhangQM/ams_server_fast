@@ -11,9 +11,10 @@ import pandas as pd
 import numpy as np
 import logging
 from gm.api import *
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from server_fast.config import settings
 from server_fast.common.utils import *
+from server_fast.common.db import SessionLocal
 from server_fast.app.bds.config import Config as dbsCfg
 from server_fast.app.bds.models import *
 
@@ -86,3 +87,70 @@ def upsert_symbol_info_excel_sql():
             logger.info(f"->成功：{result}")
         else:
             logger.info(f"->无需导入：{file_name}")
+
+
+# 循环获取 INDEX_CODE 中所有指数的历史行情并 upsert 入库
+def upsert_index_history_sql():
+    """循环获取 INDEX_CODE 中所有指数的历史行情并 upsert 入库。
+
+    增量更新策略：
+    - 数据库已有该 symbol 数据：从最新日期 + 1 天开始获取
+    - 数据库无该 symbol 数据：从 listed_date 开始全量获取
+
+    单个 symbol 失败不中断后续步骤，返回 steps 字典记录每个 symbol 的获取条数。
+    """
+    _engine = settings.DB_ENGINE
+    _mdl = IndexHistory
+    _index_code = dbsCfg.INDEX_CODE
+    steps = {}  # 记录每个 symbol 的获取条数
+    logger.info("指数历史行情获取并导入")
+    for symbol, info in _index_code.items():
+        try:
+            # 查询数据库中该 symbol 的最新 trade_date
+            with SessionLocal() as session:
+                row = (
+                    session.query(_mdl.trade_date)
+                    .filter(_mdl.symbol == symbol)
+                    .order_by(_mdl.trade_date.desc())
+                    .first()
+                )
+            max_date = row[0] if row else None
+            # 增量更新起点：有数据则从最新日期 + 1 天，否则从 listed_date 全量获取
+            if max_date is not None:
+                start_time = max_date + timedelta(days=1)
+            else:
+                start_time = info['listed_date']
+            end_time = date.today()
+            # 调用 gm 接口获取历史行情（带超时保护，防止 gm 终端未启动时阻塞）
+            df = call_with_timeout(history, timeout=30)(
+                symbol=symbol,
+                frequency='1d',
+                start_time=start_time,
+                end_time=end_time,
+                fields='eob,symbol,open,high,low,close',
+                adjust=ADJUST_NONE,
+                df=True,
+            )
+            if df is None or df.empty:
+                logger.info(f"->{symbol} 无需导入")
+                steps[symbol] = 0
+                continue
+            # eob（datetime）转为 date 并重命名为 trade_date
+            df['eob'] = pd.to_datetime(df['eob']).dt.date
+            df = df.rename(columns={'eob': 'trade_date'})
+            df = df_init_model(df, _mdl)  # 清洗、列名映射、字段过滤、类型转换
+            if not df.empty:
+                df = df.replace({np.nan: None})
+                _table = _mdl.__table__.name
+                _unique_keys = _mdl.unique_keys
+                result = upsert_df_to_db(df, _table, _engine, _unique_keys)
+                logger.info(f"->{symbol} 成功：{result}")
+                steps[symbol] = len(df)
+            else:
+                logger.info(f"->{symbol} 无需导入")
+                steps[symbol] = 0
+        except Exception as e:
+            # 单步失败不中断后续 symbol，记录错误并继续
+            logger.error(f"->{symbol} 失败：{str(e)}")
+            steps[symbol] = -1
+    return steps

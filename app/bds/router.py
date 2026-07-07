@@ -7,17 +7,19 @@
 - POST /bds/sync/trade-date   同步交易日历
 - POST /bds/sync/symbol-info  同步证券信息
 """
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from server_fast.app.bds.models import SymbolInfo, TradeDate
-from server_fast.app.bds.schemas import SymbolInfoOut, TradeDateOut
+from server_fast.app.bds.models import IndexHistory, SymbolInfo, TradeDate
+from server_fast.app.bds.schemas import IndexHistoryOut, SymbolInfoOut, TradeDateOut
 from server_fast.app.bds.service import (
     insert_trade_date_em_sql,
+    upsert_index_history_sql,
     upsert_symbol_info_excel_sql,
 )
+from server_fast.app.bds.config import Config
 from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
 
@@ -88,3 +90,47 @@ def sync_trade_date():
 def sync_symbol_info():
     """同步证券信息（触发 upsert_symbol_info_excel_sql）。"""
     return _run_sync("symbol-info", upsert_symbol_info_excel_sql)
+
+
+@router.post("/sync/index-history")
+def sync_index_history():
+    """同步指数历史行情（触发 upsert_index_history_sql）。
+
+    返回 steps 字典，记录每个 symbol 的获取条数。
+    """
+    try:
+        steps = upsert_index_history_sql()
+        return {"status": "ok", "message": "index-history synced", "steps": steps}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/index-histories", response_model=PageResponse[IndexHistoryOut])
+def list_index_histories(
+    symbol: Optional[List[str]] = Query(None, description="代码多选精确匹配"),
+    start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """查询指数历史行情，支持代码多选和日期范围筛选。
+
+    响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
+    """
+    query = db.query(IndexHistory)
+    if symbol:
+        query = query.filter(IndexHistory.symbol.in_(symbol))
+    if start_date:
+        query = query.filter(IndexHistory.trade_date >= start_date)
+    if end_date:
+        query = query.filter(IndexHistory.trade_date <= end_date)
+    total = query.count()
+    items = query.order_by(IndexHistory.trade_date.desc()).offset(offset).limit(limit).all()
+    # 附加 sec_name 字段（从 Config.INDEX_CODE 查找，不存数据库）
+    items_dict = []
+    for item in items:
+        d = item.to_dict()
+        d["sec_name"] = Config.INDEX_CODE.get(item.symbol, {}).get("sec_name")
+        items_dict.append(d)
+    return {"items": items_dict, "total": total, "limit": limit, "offset": offset}

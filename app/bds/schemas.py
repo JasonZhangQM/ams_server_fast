@@ -48,3 +48,20 @@ class SymbolInfoOut(BaseModel):
     dar: Optional[Decimal] = None  # 负债率(%)
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间
+
+
+class IndexHistoryOut(BaseModel):
+    """指数历史行情响应 Schema（对应 bds.IndexHistory 模型）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int  # 主键
+    symbol: str  # 代码
+    trade_date: date  # 交易日期
+    open: Optional[Decimal] = None  # 开盘价
+    high: Optional[Decimal] = None  # 最高价
+    low: Optional[Decimal] = None  # 最低价
+    close: Optional[Decimal] = None  # 收盘价
+    sec_name: Optional[str] = None  # 指数名称（从 Config.INDEX_CODE 查找，不存数据库）
+    create_time: datetime  # 创建时间
+    update_time: datetime  # 更新时间

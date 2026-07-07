@@ -13,7 +13,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Date, Index, Numeric, String
+from sqlalchemy import Date, Index, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
@@ -92,3 +92,36 @@ class TradeDate(Base, BaseModel):
     def __str__(self) -> str:
         """模型实例字符串表示，便于调试与日志输出。"""
         return f"交易日:{self.trade_date}"
+
+
+class IndexHistory(Base, BaseModel):
+    """指数历史行情模型（对应表 bds_index_history）。"""
+
+    __tablename__ = "bds_index_history"
+
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="代码")
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
+    open: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="开盘价")
+    high: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最高价")
+    low: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最低价")
+    close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="收盘价")
+
+    # 联合唯一约束 + 索引
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uk_bds_index_history_symbol_date"),
+        Index("k_bds_index_history_symbol", "symbol"),
+    )
+
+    # BaseModel 工具方法所需元数据
+    cols_map_fields = {
+        "symbol": ["代码"],
+        "trade_date": ["交易日期"],
+        "open": ["开盘价"],
+        "high": ["最高价"],
+        "low": ["最低价"],
+        "close": ["收盘价"],
+    }
+    unique_keys = ["symbol", "trade_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.trade_date}"
