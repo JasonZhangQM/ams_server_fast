@@ -217,13 +217,27 @@ def list_profits(
 # SubTask 9.5: 对应 GroupAccAdmin（全量列表，无过滤参数）
 @router.get("/group-accs", response_model=PageResponse[GroupAccOut])
 def list_group_accs(
+    account: Optional[List[str]] = Query(default=None),
+    acc_aset_only: Optional[bool] = Query(default=None),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """返回 GroupAcc 全量列表。"""
+    """返回 GroupAcc 列表。
+
+    account 支持多值 IN 匹配，acc_aset_only 为 True 时仅返回账户净值不为 0 的记录。
+    """
     query = db.query(GroupAcc)
-    # 全表总数（无过滤参数）
+    query = _filter_query(
+        query,
+        [
+            (GroupAcc.account, account, "in"),
+        ],
+    )
+    # 仅保留账户净值不为 0 的记录
+    if acc_aset_only:
+        query = query.filter(GroupAcc.acc_aset != 0)
+    # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
     items = query.offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
@@ -234,6 +248,7 @@ def list_group_accs(
 def list_group_symbols(
     category: Optional[List[str]] = Query(default=None),
     symbol: Optional[str] = None,
+    value_only: Optional[bool] = Query(default=None),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -242,6 +257,7 @@ def list_group_symbols(
 
     category 支持多值 IN 匹配（可传入多个值，命中任一即返回），
     symbol 为 search_fields（模糊）。
+    value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录。
     """
     query = db.query(GroupSymbol)
     query = _filter_query(
@@ -251,6 +267,9 @@ def list_group_symbols(
             (GroupSymbol.symbol, symbol, "contains"),
         ],
     )
+    # 仅保留当前市值不为 0 的记录
+    if value_only:
+        query = query.filter(GroupSymbol.value_total != 0)
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
     items = query.offset(offset).limit(limit).all()
