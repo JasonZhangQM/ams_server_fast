@@ -17,6 +17,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from server_fast.app.bills.config import Config
 from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol, Profit, ProfitYear
 from server_fast.app.bills.schemas import (
     BillOut,
@@ -32,22 +33,53 @@ from server_fast.common.pagination import PageResponse
 router = APIRouter(prefix="/bills", tags=["bills"])
 
 
+# 通用类别列表接口：返回 Config.MAP_CATEGORY 字典的所有 key 作为类别列表
+@router.get("/categories")
+def list_categories():
+    """返回应用配置的交易类别列表。
+
+    数据源为 Config.MAP_CATEGORY 字典的 key 集合，确保前端下拉选项
+    与后端交易类型映射配置保持一致，无需依赖数据库实际数据。
+    """
+    categories = list(Config.MAP_CATEGORY.keys())
+    return {"categories": categories}
+
+
+# 通用账户列表接口：返回 Config.ACCOUNT_INFO 字典的所有 key 作为账户列表
+@router.get("/accounts")
+def list_accounts():
+    """返回应用配置的账户列表。
+
+    数据源为 Config.ACCOUNT_INFO 字典的 key 集合，确保前端下拉选项
+    与后端账户配置保持一致，无需依赖数据库实际数据。
+    """
+    accounts = list(Config.ACCOUNT_INFO.keys())
+    return {"accounts": accounts}
+
+
 def _filter_query(
     query,
-    conditions: List[Tuple[Any, Optional[str], str]],
+    conditions: List[Tuple[Any, Optional[Any], str]],
 ):
     """通用查询过滤。
 
     :param conditions: (列对象, 值, 模式) 列表
         - 模式 'eq'：精确匹配，对应 Admin list_filter
         - 模式 'contains'：模糊匹配，对应 Admin search_fields
-    :return: 过滤后的 query（值为 None 的条件自动跳过）
+        - 模式 'in'：多值 IN 匹配，value 需为非空列表
+    :return: 过滤后的 query（值为 None 的条件自动跳过；
+        'in' 模式下空列表也会跳过）
     """
     for column, value, mode in conditions:
         if value is None:
             continue
         if mode == "eq":
             query = query.filter(column == value)
+        elif mode == "in":
+            # 多值匹配：value 为空列表时跳过，避免生成空 IN 语句
+            if not value:
+                continue
+            query = query.filter(column.in_(value))
         else:  # contains 模糊搜索
             query = query.filter(column.contains(value))
     return query
@@ -71,8 +103,8 @@ def _run_sync_steps(steps: List[Tuple[str, Callable]]):
 # SubTask 9.2: 原 index 视图，对应 GroupAdmin
 @router.get("/group", response_model=PageResponse[GroupOut])
 def list_groups(
-    account: Optional[str] = None,
-    category: Optional[str] = None,
+    account: Optional[List[str]] = Query(default=None),
+    category: Optional[List[str]] = Query(default=None),
     symbol: Optional[str] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -82,15 +114,15 @@ def list_groups(
 
     原 Django index 视图使用 Group.objects.exclude(category='cash')，
     此处对应 SQLAlchemy 的 Group.category != 'cash'。
-    account/category 为 list_filter（精确），symbol 为 search_fields（模糊）。
+    account/category 支持多值 IN 匹配，symbol 为 search_fields（模糊）。
     """
     # 核心：过滤掉 cash 类别（与原 index 视图一致）
     query = db.query(Group).filter(Group.category != "cash")
     query = _filter_query(
         query,
         [
-            (Group.account, account, "eq"),
-            (Group.category, category, "eq"),
+            (Group.account, account, "in"),
+            (Group.category, category, "in"),
             (Group.symbol, symbol, "contains"),
         ],
     )
@@ -103,8 +135,8 @@ def list_groups(
 # SubTask 9.3: 对应 BillAdmin
 @router.get("/bills", response_model=PageResponse[BillOut])
 def list_bills(
-    account: Optional[str] = None,
-    category: Optional[str] = None,
+    account: Optional[List[str]] = Query(default=None),
+    category: Optional[List[str]] = Query(default=None),
     symbol: Optional[str] = None,
     name: Optional[str] = None,
     limit: int = Query(100, ge=1),
@@ -113,14 +145,15 @@ def list_bills(
 ):
     """返回 Bill 列表。
 
-    account/category 为 list_filter（精确），symbol/name 为 search_fields（模糊）。
+    account/category 支持多值 IN 匹配，
+    symbol/name 为 search_fields（模糊）。
     """
     query = db.query(Bill)
     query = _filter_query(
         query,
         [
-            (Bill.account, account, "eq"),
-            (Bill.category, category, "eq"),
+            (Bill.account, account, "in"),
+            (Bill.category, category, "in"),
             (Bill.symbol, symbol, "contains"),
             (Bill.name, name, "contains"),
         ],
@@ -134,8 +167,8 @@ def list_bills(
 # SubTask 9.4: 对应 ProfitAdmin
 @router.get("/profits", response_model=PageResponse[ProfitOut])
 def list_profits(
-    account: Optional[str] = None,
-    category: Optional[str] = None,
+    account: Optional[List[str]] = Query(default=None),
+    category: Optional[List[str]] = Query(default=None),
     symbol: Optional[str] = None,
     name: Optional[str] = None,
     limit: int = Query(100, ge=1),
@@ -145,8 +178,9 @@ def list_profits(
     """返回 Profit 列表，含关联 Bill 的 account/symbol/name 字段。
 
     Profit 通过 bill_id 外键关联 Bill。原 Admin 的
-    search_fields=bill__symbol/bill__name、list_filter=bill__account/bill__category
-    均作用于关联 Bill，故此处通过 JOIN Bill 实现过滤，并在结果中补充关联字段。
+    search_fields=bill__symbol/bill__name、list_filter=bill__account
+    均作用于关联 Bill；account/category 支持多值 IN 匹配，
+    故此处通过 JOIN Bill 实现过滤，并在结果中补充关联字段。
 
     COUNT 与数据查询共享同一 query 对象（含 JOIN 与过滤条件），
     由于 Profit→Bill 为多对一关系，JOIN 不会产生重复行，count 安全。
@@ -158,8 +192,8 @@ def list_profits(
         query = _filter_query(
             query,
             [
-                (Bill.account, account, "eq"),
-                (Bill.category, category, "eq"),
+                (Bill.account, account, "in"),
+                (Bill.category, category, "in"),
                 (Bill.symbol, symbol, "contains"),
                 (Bill.name, name, "contains"),
             ],
@@ -198,7 +232,7 @@ def list_group_accs(
 # SubTask 9.6: 对应 GroupSymbolAdmin
 @router.get("/group-symbols", response_model=PageResponse[GroupSymbolOut])
 def list_group_symbols(
-    category: Optional[str] = None,
+    category: Optional[List[str]] = Query(default=None),
     symbol: Optional[str] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -206,13 +240,14 @@ def list_group_symbols(
 ):
     """返回 GroupSymbol 列表。
 
-    category 为 list_filter（精确），symbol 为 search_fields（模糊）。
+    category 支持多值 IN 匹配（可传入多个值，命中任一即返回），
+    symbol 为 search_fields（模糊）。
     """
     query = db.query(GroupSymbol)
     query = _filter_query(
         query,
         [
-            (GroupSymbol.category, category, "eq"),
+            (GroupSymbol.category, category, "in"),
             (GroupSymbol.symbol, symbol, "contains"),
         ],
     )
@@ -220,6 +255,19 @@ def list_group_symbols(
     total = query.count()
     items = query.offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+# 标的分组类别查询：返回 Config.MAP_CATEGORY 字典的所有 key 作为类别列表
+@router.get("/group-symbols/categories")
+def list_group_symbol_categories():
+    """返回应用配置的交易类别列表。
+
+    数据源为 Config.MAP_CATEGORY 字典的 key 集合，确保前端下拉选项
+    与后端交易类型映射配置保持一致，无需依赖数据库实际数据。
+    """
+    # 直接取字典 key 列表，避免查询数据库
+    categories = list(Config.MAP_CATEGORY.keys())
+    return {"categories": categories}
 
 
 # 年度收益查询
