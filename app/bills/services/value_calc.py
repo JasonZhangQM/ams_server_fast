@@ -3,7 +3,7 @@ import logging
 import pandas as pd
 from gm.api import *
 from server_fast.config import settings
-from server_fast.common.utils import filter_dtypes, map_value, df_init_model, upsert_df_to_db, get_sql_to_df
+from server_fast.common.utils import filter_dtypes, map_value, df_init_model, upsert_df_to_db, get_sql_to_df, call_with_timeout
 from server_fast.app.bills.config import Config as BlsCfg
 from server_fast.app.bills.models import Group
 
@@ -61,9 +61,10 @@ def value_float_em_sql():
     df = get_sql_to_df(sql, _engine)
     df = df.fillna(0)
     df = df.astype(filter_dtypes(list(df.columns), _mdl.to_dtype()))
-    # 获取实时数据
+    # 获取实时数据（带超时保护，防止 gm 终端未启动时无限阻塞）
     try:
-        current_data = current(list(df['symbol']), fields=['symbol', 'price'])
+        current_data = call_with_timeout(current, timeout=10)(
+            list(df['symbol']), fields=['symbol', 'price'])
     except Exception as e:
         logger.error(f'*****获取实时数据失败:{e}')
         raise e

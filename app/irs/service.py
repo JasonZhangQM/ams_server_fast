@@ -25,6 +25,7 @@ from server_fast.common.utils import (
     df_init_model,
     get_sql_to_df,
     upsert_df_to_db,
+    call_with_timeout,
 )
 from server_fast.config import settings
 from server_fast.app.bds.models import SymbolInfo, TradeDate
@@ -229,9 +230,9 @@ def monitor_value_em_orm():
     with SessionLocal() as session:
         rows = session.query(mdl.id, mdl.symbol).all()
         sv_dict = {row.symbol: row.id for row in rows}
-    # 获取实时行情
+    # 获取实时行情（带超时保护，防止 gm 终端未启动时无限阻塞）
     try:
-        sv_data = current(
+        sv_data = call_with_timeout(current, timeout=10)(
             list(sv_dict.keys()), fields=['symbol', 'price', 'high'])
     except Exception as e:
         logger.error(f"******获取实时行情失败：{str(e)}")
@@ -305,8 +306,9 @@ def monitor_option_em_excel_orm():
             }
             for item in queryset
         }
-    try:  # 调取em接口获取标的实时行情
-        ud_data = current(list(ud_dict.keys()), fields=['symbol', 'price'])
+    try:  # 调取em接口获取标的实时行情（带超时保护）
+        ud_data = call_with_timeout(current, timeout=10)(
+            list(ud_dict.keys()), fields=['symbol', 'price'])
         ud_dict = {item['symbol']: item['price'] for item in ud_data}
     except Exception as e:
         logger.error(f"******获取实时行情失败：{str(e)}")
@@ -589,7 +591,7 @@ def discount_yield_em_sql():  # 有问题,不用
     df = get_sql_to_df(sql, _engine)
     df['symbol_real_id'] = df['id']
     symbol_list = list(set(df['symbol_ud'])) + list(set(df['symbol']))
-    data = current(  # 获取期货及期货标的实时行情
+    data = call_with_timeout(current, timeout=10)(  # 获取期货及期货标的实时行情（带超时保护）
         symbol_list, fields=['symbol', 'price', 'cum_position'])
     symbol_dict = {
         item['symbol']: {'price': item['price'], 'position': item['cum_position']}
@@ -647,7 +649,7 @@ def discount_yield_em_orm():
         sd_dict.keys()) + list(
         {v['symbol_ud'] for k, v in sd_dict.items()})
     try:
-        data = current(  # 获取期货及期货标的实时行情
+        data = call_with_timeout(current, timeout=10)(  # 获取期货及期货标的实时行情（带超时保护）
             symbol_list, fields=['symbol', 'price', 'cum_position'])
     except Exception as e:
         logger.error(f"******获取实时行情失败：{str(e)}")

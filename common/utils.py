@@ -10,6 +10,8 @@ from sqlalchemy import text
 import codecs
 import pandas as pd
 import numpy as np
+from functools import wraps
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 
 def filter_in_cols(df_cols: list[str], complete_cols: list[str]) -> list[str]:
@@ -291,3 +293,28 @@ def convert_to_utf8(input_file, output_file, input_encoding='gbk'):
         print(f"错误: 无法以 {input_encoding} 编码解析文件，请尝试其他编码")
     except Exception as e:
         print(f"转换过程中发生错误: {str(e)}")
+
+
+def call_with_timeout(func, timeout=10):
+    """为可能阻塞的函数添加超时保护。
+
+    gm 终端未启动时，current() 会无限阻塞等待连接，
+    导致后端 worker 被占满。此包装函数在独立线程中执行目标函数，
+    超时后抛出 TimeoutError，避免后端被卡死。
+
+    :param func: 目标函数
+    :param timeout: 超时秒数，默认 10 秒
+    :return: 目标函数的返回值
+    :raises TimeoutError: 超时未返回时抛出
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func, *args, **kwargs)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                raise TimeoutError(
+                    f"调用 {func.__name__} 超时（{timeout}秒），"
+                    f"请检查 gm 终端服务是否启动")
+    return wrapper
