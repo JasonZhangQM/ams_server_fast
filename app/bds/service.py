@@ -27,6 +27,8 @@ def insert_trade_date_em_sql():
     获取交易日历并存入数据库
     field = 'trade_date'
     mdl = TradeDate
+
+    返回值：新增的交易日数量（int），0 表示无需更新
     '''
     _engine = settings.DB_ENGINE
     _field = 'trade_date'
@@ -40,7 +42,7 @@ def insert_trade_date_em_sql():
         max_year = max_date.year
     if max_year >= today_year:
         logger.info("->已经有最新数据，无需调取接口")
-        return None
+        return 0
     df = get_trading_dates_by_year( #调取em接口获取交易日历
         'SHSE', max_year, datetime.today().year)
     df = df[df['trade_date']!='']
@@ -51,8 +53,10 @@ def insert_trade_date_em_sql():
         _table = _mdl.__table__.name  # SQLAlchemy 表名（原 Django: _meta.db_table）
         df.to_sql(_table,_engine,if_exists='append', index=False)
         logger.info(f"->成功 {len(df)}")
+        return len(df)
     else:
         logger.info("->无需导入")
+        return 0
 
 # 导入证券基本信息(东财)
 def upsert_symbol_info_excel_sql():

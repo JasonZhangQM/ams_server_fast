@@ -41,12 +41,18 @@ def _run_sync(task_name: str, func) -> dict:
 
 @router.get("/trade-dates", response_model=PageResponse[TradeDateOut])
 def list_trade_dates(
+    start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询交易日历全量数据（对应 TradeDateAdmin，仅分页）。"""
+    """查询交易日历数据，支持可选的日期范围筛选。"""
     query = db.query(TradeDate)
+    if start_date:
+        query = query.filter(TradeDate.trade_date >= start_date)
+    if end_date:
+        query = query.filter(TradeDate.trade_date <= end_date)
     total = query.count()  # 满足过滤条件的总记录数
     items = query.offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
@@ -82,8 +88,18 @@ def list_symbol_infos(
 
 @router.post("/sync/trade-date")
 def sync_trade_date():
-    """同步交易日历（触发 insert_trade_date_em_sql）。"""
-    return _run_sync("trade-date", insert_trade_date_em_sql)
+    """同步交易日历（触发 insert_trade_date_em_sql）。
+
+    返回值说明：
+    - status: 同步状态，成功为 "ok"
+    - message: 同步结果描述信息
+    - updated_count: 新增的交易日数量（0 表示无需更新）
+    """
+    try:
+        updated_count = insert_trade_date_em_sql()
+        return {"status": "ok", "message": "trade-date synced", "updated_count": updated_count or 0}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/sync/symbol-info")
