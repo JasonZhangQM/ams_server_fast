@@ -174,17 +174,31 @@ def list_index_histories(
     return {"items": items_dict, "total": total, "limit": limit, "offset": offset}
 
 
+@router.get("/index-codes")
+def list_index_codes():
+    """返回应用配置的指数代码列表。
+
+    数据源为 Config.INDEX_CODE 字典，确保前端下拉选项与后端指数配置
+    保持一致，无需依赖数据库查询。每项包含 code（指数代码）和
+    sec_name（指数名称）。
+    """
+    index_codes = [
+        {"code": code, "sec_name": info["sec_name"]}
+        for code, info in Config.INDEX_CODE.items()
+    ]
+    return {"index_codes": index_codes}
+
+
 @router.get("/index-constituents", response_model=PageResponse[IndexConstituentOut])
 def list_index_constituents(
     index_code: Optional[List[str]] = Query(default=None, description="指数代码多选精确匹配"),
     symbol: Optional[str] = Query(default=None, description="成分股代码模糊匹配"),
-    start_date: Optional[date] = Query(default=None, description="开始日期 YYYY-MM-DD"),
-    end_date: Optional[date] = Query(default=None, description="结束日期 YYYY-MM-DD"),
+    trade_date: Optional[date] = Query(default=None, description="交易日期 YYYY-MM-DD"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询指数成分股，支持指数代码多选、成分股代码模糊匹配和日期范围筛选。
+    """查询指数成分股，支持指数代码多选、成分股代码模糊匹配和具体交易日期筛选。
 
     响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
     """
@@ -195,11 +209,9 @@ def list_index_constituents(
     # symbol 模糊匹配
     if symbol:
         query = query.filter(IndexConstituent.symbol.contains(symbol))
-    # 日期范围
-    if start_date:
-        query = query.filter(IndexConstituent.trade_date >= start_date)
-    if end_date:
-        query = query.filter(IndexConstituent.trade_date <= end_date)
+    # 具体交易日期精确匹配
+    if trade_date:
+        query = query.filter(IndexConstituent.trade_date == trade_date)
     # 按 trade_date 降序
     query = query.order_by(IndexConstituent.trade_date.desc())
     total = query.count()
