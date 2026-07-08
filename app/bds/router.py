@@ -2,14 +2,16 @@
 """bds 应用路由（从 server_dj/apps/bds/admin.py 迁移）。
 
 提供 2 个 GET 查询路由与 2 个 POST 同步路由：
-- GET  /bds/trade-dates       查询交易日历（对应 TradeDateAdmin）
-- GET  /bds/symbol-infos      查询证券信息（对应 SymbolInfoAdmin）
-- POST /bds/sync/trade-date   同步交易日历
-- POST /bds/sync/symbol-info  同步证券信息
+- GET  /bds/trade-dates         查询交易日历（对应 TradeDateAdmin）
+- GET  /bds/symbol-infos        查询证券信息（对应 SymbolInfoAdmin）
+- POST /bds/sync/trade-date     同步交易日历
+- POST /bds/sync/symbol-info    同步证券信息
 """
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Optional
 
+import numpy as np
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -231,3 +233,72 @@ def sync_index_constituent(trade_date: Optional[date] = None):
         return {"status": "success", "message": "指数成分股同步完成", "steps": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/index-cum-returns")
+def list_index_cum_returns(
+    start_date: Optional[str] = Query(
+        default=None, description="起始日期 YYYY-MM-DD，默认当前日期前30天"
+    ),
+    db: Session = Depends(get_db),
+):
+    """查询指数累计收益率。
+
+    逻辑说明：
+    1. 查询 bds_index_history 表中 trade_date >= start_date 且 symbol 在
+       Config.INDEX_CODE 字典键中的全部记录。
+    2. 用 pandas 透视数据：行索引为 trade_date（升序），列名为通过
+       Config.INDEX_CODE[symbol]['sec_name'] 映射的指数名称，值为 close 收盘价。
+    3. 累计收益率计算：(df/df.iloc[0]-1)*100，保留两位小数。
+    4. 空数据时返回 {"trade_dates": [], "series": {}}。
+    5. 非空时构造响应：trade_dates 为日期字符串列表（YYYY-MM-DD），
+       series 为 {指数名称: 累计收益率列表}，NaN 转 null。
+    """
+    # 默认起始日：当前日期前 30 天
+    if start_date is None:
+        start_date = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    # 查询满足条件的全部指数历史记录（symbol 限定在 Config.INDEX_CODE 键中）
+    rows = (
+        db.query(IndexHistory)
+        .filter(
+            IndexHistory.trade_date >= start_date,
+            IndexHistory.symbol.in_(list(Config.INDEX_CODE.keys())),
+        )
+        .all()
+    )
+
+    # 空数据直接返回空结构
+    if not rows:
+        return {"trade_dates": [], "series": {}}
+
+    # 构造 DataFrame 并透视：行=trade_date，列=symbol，值=close
+    df = pd.DataFrame(
+        [
+            {
+                "trade_date": r.trade_date,
+                "symbol": r.symbol,
+                "close": float(r.close) if r.close is not None else np.nan,
+            }
+            for r in rows
+        ]
+    )
+    df = df.pivot(index="trade_date", columns="symbol", values="close")
+    # 列名由 symbol 映射为 sec_name（指数名称）
+    df = df.rename(columns={k: v["sec_name"] for k, v in Config.INDEX_CODE.items()})
+    # 按 trade_date 升序排序
+    df = df.sort_index(ascending=True)
+
+    # 累计收益率：(当日收盘价 / 首日收盘价 - 1) * 100，保留两位小数
+    cum_df = ((df / df.iloc[0] - 1) * 100).round(2)
+
+    # 日期字符串列表（YYYY-MM-DD 格式）
+    trade_dates = [d.strftime("%Y-%m-%d") for d in cum_df.index]
+
+    # 构造 series：{指数名称: 累计收益率列表}，NaN 转 None（JSON 序列化为 null）
+    series = {
+        col_name: [None if pd.isna(v) else float(v) for v in cum_df[col_name]]
+        for col_name in cum_df.columns
+    }
+
+    return {"trade_dates": trade_dates, "series": series}
