@@ -158,3 +158,103 @@ def upsert_index_history_sql():
             logger.error(f"->{symbol} 失败：{str(e)}")
             steps[symbol] = -1
     return steps
+
+
+# 循环获取 INDEX_CODE 中所有指数指定日期的成分股并追加入库
+def upsert_index_constituent_sql(trade_date=None):
+    """循环获取 INDEX_CODE 中所有指数指定日期的成分股并追加入库。
+
+    同步策略：
+    - trade_date 为 None：获取每个指数最新交易日的成分股
+    - trade_date 指定：获取每个指数该日期的成分股
+
+    成分股变更检测：若当前获取的成分股集合与数据库中该 index_code 最新已保存
+    交易日的成分股集合一致，则跳过不保存，避免存储无变化的冗余快照。
+
+    单个 index_code 失败不中断后续步骤，返回 steps 字典记录每个 index_code 的结果
+    （1=已保存，0=未变化或空数据跳过，-1=失败）。
+    """
+    _engine = settings.DB_ENGINE
+    _mdl = IndexConstituent
+    _index_code = dbsCfg.INDEX_CODE
+    steps = {}  # 记录每个 index_code 的保存结果
+    logger.info("指数成分股获取并导入")
+
+    def _normalize_weight(w):
+        """权重归一化：NaN/None 统一转 0.0，其余保留 4 位小数。"""
+        if w is None or pd.isna(w):
+            return 0.0
+        return round(float(w), 4)
+
+    # trade_date 转字符串供 API 使用，None 表示获取最新交易日数据
+    trade_date_str = trade_date.strftime('%Y-%m-%d') if trade_date else None
+
+    for index_code, info in _index_code.items():
+        try:
+            # ---- 查询数据库中该 index_code 最新已保存的 trade_date 及其成分股集合 ----
+            with SessionLocal() as session:
+                row = (
+                    session.query(_mdl.trade_date)
+                    .filter(_mdl.index_code == index_code)
+                    .order_by(_mdl.trade_date.desc())
+                    .first()
+                )
+                max_date = row[0] if row else None
+
+                if max_date is not None:
+                    last_rows = (
+                        session.query(_mdl.symbol, _mdl.weight)
+                        .filter(
+                            _mdl.index_code == index_code,
+                            _mdl.trade_date == max_date,
+                        )
+                        .all()
+                    )
+                    last_saved_set = {
+                        (r.symbol, _normalize_weight(r.weight)) for r in last_rows
+                    }
+                else:
+                    last_saved_set = set()
+
+            # ---- 调用 gm 接口获取成分股（带超时保护，防止 gm 终端未启动时阻塞） ----
+            df = call_with_timeout(stk_get_index_constituents, timeout=30)(
+                index=index_code,
+                trade_date=trade_date_str,
+            )
+            # API 返回空 DataFrame 时跳过（非交易日或数据尚未更新）
+            if df is None or df.empty:
+                logger.info(f"->{index_code} API 返回空数据，跳过")
+                steps[index_code] = 0
+                continue
+
+            # 仅取需要的四列
+            df = df[['index', 'symbol', 'weight', 'trade_date']]
+            # 构建当前成分股集合用于变更检测
+            current_set = set(zip(
+                df['symbol'],
+                df['weight'].apply(_normalize_weight),
+            ))
+            # 成分股集合未变化则跳过不保存
+            if current_set == last_saved_set:
+                logger.info(f"->{index_code} 成分股未变化，跳过")
+                steps[index_code] = 0
+                continue
+
+            # 重命名列 index → index_code（index 为 SQL 保留字）
+            df = df.rename(columns={'index': 'index_code'})
+            # 转换 trade_date 为 date 类型（API 返回字符串格式 %Y-%m-%d）
+            df['trade_date'] = pd.to_datetime(
+                df['trade_date'], format='%Y-%m-%d'
+            ).dt.date
+            # weight 转 float，NaN 统一转 0
+            df['weight'] = df['weight'].apply(_normalize_weight)
+            # 追加写入数据库
+            df.to_sql(_mdl.__table__.name, _engine, if_exists='append', index=False)
+
+            logger.info(f"->{index_code} 成功保存")
+            steps[index_code] = 1
+        except Exception as e:
+            # 单步失败不中断后续 index_code，记录错误并继续
+            logger.error(f"->{index_code} 失败：{str(e)}")
+            steps[index_code] = -1
+    return steps

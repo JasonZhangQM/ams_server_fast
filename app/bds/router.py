@@ -7,15 +7,22 @@
 - POST /bds/sync/trade-date   同步交易日历
 - POST /bds/sync/symbol-info  同步证券信息
 """
+from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from server_fast.app.bds.models import IndexHistory, SymbolInfo, TradeDate
-from server_fast.app.bds.schemas import IndexHistoryOut, SymbolInfoOut, TradeDateOut
+from server_fast.app.bds.models import IndexConstituent, IndexHistory, SymbolInfo, TradeDate
+from server_fast.app.bds.schemas import (
+    IndexConstituentOut,
+    IndexHistoryOut,
+    SymbolInfoOut,
+    TradeDateOut,
+)
 from server_fast.app.bds.service import (
     insert_trade_date_em_sql,
+    upsert_index_constituent_sql,
     upsert_index_history_sql,
     upsert_symbol_info_excel_sql,
 )
@@ -163,3 +170,64 @@ def list_index_histories(
         d["sec_name"] = Config.INDEX_CODE.get(item.symbol, {}).get("sec_name")
         items_dict.append(d)
     return {"items": items_dict, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/index-constituents", response_model=PageResponse[IndexConstituentOut])
+def list_index_constituents(
+    index_code: Optional[List[str]] = Query(default=None, description="指数代码多选精确匹配"),
+    symbol: Optional[str] = Query(default=None, description="成分股代码模糊匹配"),
+    start_date: Optional[date] = Query(default=None, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[date] = Query(default=None, description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(default=10, ge=1),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """查询指数成分股，支持指数代码多选、成分股代码模糊匹配和日期范围筛选。
+
+    响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
+    """
+    query = db.query(IndexConstituent)
+    # index_code 多选 IN 过滤
+    if index_code:
+        query = query.filter(IndexConstituent.index_code.in_(index_code))
+    # symbol 模糊匹配
+    if symbol:
+        query = query.filter(IndexConstituent.symbol.contains(symbol))
+    # 日期范围
+    if start_date:
+        query = query.filter(IndexConstituent.trade_date >= start_date)
+    if end_date:
+        query = query.filter(IndexConstituent.trade_date <= end_date)
+    # 按 trade_date 降序
+    query = query.order_by(IndexConstituent.trade_date.desc())
+    total = query.count()
+    items = query.offset(offset).limit(limit).all()
+    # 附加 sec_name 字段（从 Config.INDEX_CODE 查找，不存数据库）
+    result_items = []
+    for item in items:
+        item_dict = item.to_dict()
+        item_dict["sec_name"] = Config.INDEX_CODE.get(item.index_code, {}).get("sec_name")
+        result_items.append(item_dict)
+    return {"items": result_items, "total": total, "limit": limit, "offset": offset}
+
+
+@router.post("/sync/index-constituent")
+def sync_index_constituent(trade_date: Optional[date] = None):
+    """同步指数成分股数据到数据库。
+
+    触发底层 upsert_index_constituent_sql() 函数，遍历配置中所有指数代码，
+    通过 GM 接口获取指定日期（未指定则为最新交易日）的成分股并执行追加操作。
+
+    参数说明：
+    - trade_date: 可选，指定同步的交易日（%Y-%m-%d），未指定则获取最新交易日数据
+
+    返回值说明：
+    - status: 同步状态，成功为 "success"
+    - message: 同步结果描述信息
+    - steps: 各 index_code 的结果字典（1=已保存，0=未变化或空数据跳过，-1=失败）
+    """
+    try:
+        result = upsert_index_constituent_sql(trade_date=trade_date)
+        return {"status": "success", "message": "指数成分股同步完成", "steps": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

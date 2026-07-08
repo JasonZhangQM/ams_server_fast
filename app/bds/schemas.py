@@ -65,3 +65,15 @@ class IndexHistoryOut(BaseModel):
     sec_name: Optional[str] = None  # 指数名称（从 Config.INDEX_CODE 查找，不存数据库）
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间
+
+
+class IndexConstituentOut(BaseModel):
+    """指数成分股响应 Schema（对应 bds.IndexConstituent 模型）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    index_code: str  # 指数代码
+    symbol: str  # 成分股代码
+    weight: Optional[Decimal] = None  # 权重
+    trade_date: date  # 交易日期
+    sec_name: Optional[str] = None  # 指数名称（不入库，从 Config.INDEX_CODE 查找）

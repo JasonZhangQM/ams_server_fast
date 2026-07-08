@@ -125,3 +125,25 @@ class IndexHistory(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.symbol}-{self.trade_date}"
+
+
+class IndexConstituent(Base, BaseModel):
+    """指数成分股模型（对应表 bds_index_constituent）。"""
+
+    __tablename__ = "bds_index_constituent"
+
+    index_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="指数代码")
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="成分股代码")
+    weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True, comment="权重")
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
+
+    __table_args__ = (
+        UniqueConstraint("index_code", "symbol", "trade_date", name="uk_bds_index_constituent"),
+        Index("k_bds_index_constituent_index_code", "index_code"),
+        Index("k_bds_index_constituent_trade_date", "trade_date"),
+    )
+
+    unique_keys = ["index_code", "symbol", "trade_date"]
+
+    def __str__(self) -> str:
+        return f"{self.index_code}-{self.symbol}-{self.trade_date}"
