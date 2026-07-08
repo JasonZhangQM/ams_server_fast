@@ -270,7 +270,7 @@ def list_index_cum_returns(
 
     # 空数据直接返回空结构
     if not rows:
-        return {"trade_dates": [], "series": {}}
+        return {"trade_dates": [], "series": {}, "max_drawdown": {}}
 
     # 构造 DataFrame 并透视：行=trade_date，列=symbol，值=close
     df = pd.DataFrame(
@@ -289,8 +289,14 @@ def list_index_cum_returns(
     # 按 trade_date 升序排序
     df = df.sort_index(ascending=True)
 
-    # 累计收益率：(当日收盘价 / 首日收盘价 - 1) * 100，保留两位小数
-    cum_df = ((df / df.iloc[0] - 1) * 100).round(2)
+    # 累计净值：当日收盘价 / 首日收盘价
+    cum = df / df.iloc[0]
+    # 累计收益率：(累计净值 - 1) * 100，保留两位小数
+    cum_df = ((cum - 1) * 100).round(2)
+
+    # 最大回撤：当日累计净值 / 截至当日历史峰值 - 1，结果为非正值（≤0）
+    running_max = cum.expanding().max()
+    max_drawdown_df = ((cum / running_max - 1) * 100).round(2)
 
     # 日期字符串列表（YYYY-MM-DD 格式）
     trade_dates = [d.strftime("%Y-%m-%d") for d in cum_df.index]
@@ -301,4 +307,10 @@ def list_index_cum_returns(
         for col_name in cum_df.columns
     }
 
-    return {"trade_dates": trade_dates, "series": series}
+    # 构造 max_drawdown：{指数名称: 最大回撤列表}，NaN 转 None
+    max_drawdown = {
+        col_name: [None if pd.isna(v) else float(v) for v in max_drawdown_df[col_name]]
+        for col_name in max_drawdown_df.columns
+    }
+
+    return {"trade_dates": trade_dates, "series": series, "max_drawdown": max_drawdown}
