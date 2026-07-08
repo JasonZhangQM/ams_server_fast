@@ -94,14 +94,27 @@ def sync_symbol_info():
 
 @router.post("/sync/index-history")
 def sync_index_history():
-    """同步指数历史行情（触发 upsert_index_history_sql）。
+    """同步指数历史行情数据到数据库。
 
-    返回 steps 字典，记录每个 symbol 的获取条数。
+    触发底层 upsert_index_history_sql() 函数，遍历配置中所有指数代码，
+    通过 GM 接口获取历史行情并执行 upsert 操作。
+
+    返回值说明：
+    - status: 同步状态，成功为 "ok"
+    - message: 同步结果描述信息
+    - updated_count: 成功更新的指数代码数量（统计获取条数 > 0 的 symbol 数量）
+
+    异常处理：
+    - 捕获所有异常并抛出 HTTP 500 错误，返回异常详情
     """
     try:
+        # 调用底层服务函数执行同步，返回各 symbol 的获取条数字典
         steps = upsert_index_history_sql()
-        return {"status": "ok", "message": "index-history synced", "steps": steps}
+        # 统计实际有更新数据的 symbol 数量（获取条数 > 0 表示有新增数据）
+        updated_count = sum(1 for count in steps.values() if count > 0)
+        return {"status": "ok", "message": "index-history synced", "updated_count": updated_count}
     except Exception as e:
+        # 捕获异常并转换为 HTTP 500 错误响应
         raise HTTPException(status_code=500, detail=str(e))
 
 
