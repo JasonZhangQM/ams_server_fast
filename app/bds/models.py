@@ -197,3 +197,54 @@ class FundBalance(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.symbol}-{self.rpt_date}"
+
+
+class FundIncome(Base, BaseModel):
+    """利润表模型（对应表 bds_fund_income）。"""
+
+    __tablename__ = "bds_fund_income"
+
+    # ---- 元数据字段 ----
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="股票代码")
+    pub_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="发布日期")
+    rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
+    rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
+    data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+
+    # ---- 收入类字段 ----
+    ttl_inc_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业总收入")
+    inc_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业收入")
+    # ---- 成本费用类字段 ----
+    ttl_cost_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业总成本")
+    cost_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业成本")
+    exp_sell: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="销售费用")
+    exp_adm: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="管理费用")
+    exp_rd: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="研发费用")
+    exp_fin: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="财务费用")
+    # ---- 其他经营收益 ----
+    inc_inv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="投资收益")
+    inc_fv_chg: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="公允价值变动收益")
+    # ---- 利润类字段 ----
+    oper_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业利润")
+    ttl_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="利润总额")
+    inc_tax: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="所得税费用")
+    net_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="净利润")
+    net_prof_pcom: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="归母净利润")
+    # ---- 每股收益 ----
+    eps_base: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="基本每股收益")
+    eps_dil: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="稀释每股收益")
+    # ---- 综合收益及其他 ----
+    inc_noper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业外收入")
+    exp_noper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业外支出")
+    ttl_comp_inc: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="综合收益总额")
+
+    # 联合唯一约束：按 symbol + rpt_date 去重
+    __table_args__ = (
+        UniqueConstraint("symbol", "rpt_date", name="uk_bds_fund_income"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["symbol", "rpt_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.rpt_date}"

@@ -119,3 +119,48 @@ class FundBalanceOut(BaseModel):
     ttl_eqy: Optional[Decimal] = Field(default=None, description="股东权益合计")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
+
+
+class FundIncomeOut(BaseModel):
+    """利润表响应 Schema（对应 bds.FundIncome 模型）。
+
+    每个字段的 description 与 ORM 模型的 comment 保持一致，
+    以便 OpenAPI 文档与前端表头统一。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    symbol: str = Field(description="股票代码")
+    pub_date: Optional[date] = Field(default=None, description="发布日期")
+    rpt_date: Optional[date] = Field(default=None, description="报告日期")
+    rpt_type: Optional[int] = Field(default=None, description="报表类型")
+    data_type: Optional[int] = Field(default=None, description="数据类型")
+    # ---- 收入类字段 ----
+    ttl_inc_oper: Optional[Decimal] = Field(default=None, description="营业总收入")
+    inc_oper: Optional[Decimal] = Field(default=None, description="营业收入")
+    # ---- 成本费用类字段 ----
+    ttl_cost_oper: Optional[Decimal] = Field(default=None, description="营业总成本")
+    cost_oper: Optional[Decimal] = Field(default=None, description="营业成本")
+    exp_sell: Optional[Decimal] = Field(default=None, description="销售费用")
+    exp_adm: Optional[Decimal] = Field(default=None, description="管理费用")
+    exp_rd: Optional[Decimal] = Field(default=None, description="研发费用")
+    exp_fin: Optional[Decimal] = Field(default=None, description="财务费用")
+    # ---- 其他经营收益 ----
+    inc_inv: Optional[Decimal] = Field(default=None, description="投资收益")
+    inc_fv_chg: Optional[Decimal] = Field(default=None, description="公允价值变动收益")
+    # ---- 利润类字段 ----
+    oper_prof: Optional[Decimal] = Field(default=None, description="营业利润")
+    ttl_prof: Optional[Decimal] = Field(default=None, description="利润总额")
+    inc_tax: Optional[Decimal] = Field(default=None, description="所得税费用")
+    net_prof: Optional[Decimal] = Field(default=None, description="净利润")
+    net_prof_pcom: Optional[Decimal] = Field(default=None, description="归母净利润")
+    # ---- 每股收益 ----
+    eps_base: Optional[Decimal] = Field(default=None, description="基本每股收益")
+    eps_dil: Optional[Decimal] = Field(default=None, description="稀释每股收益")
+    # ---- 综合收益及其他 ----
+    inc_noper: Optional[Decimal] = Field(default=None, description="营业外收入")
+    exp_noper: Optional[Decimal] = Field(default=None, description="营业外支出")
+    ttl_comp_inc: Optional[Decimal] = Field(default=None, description="综合收益总额")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")
