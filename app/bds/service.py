@@ -527,3 +527,130 @@ def upsert_fund_income_sql(symbols):
             logger.error(f"->{symbol} 失败：{str(e)}")
             steps[symbol] = -1
     return steps
+
+
+# 现金流量表 20 个财务字段（英文逗号分隔，供 gm 接口 fields 参数使用）
+FUND_CASHFLOW_FIELDS = (
+    "cash_rcv_sale,cf_in_oper,cash_pur_gds_svc,cash_pay_emp,cash_pay_tax,cf_out_oper,"
+    "net_cf_oper,cash_rcv_sale_inv,cf_in_inv,pur_fix_intg_ast,net_cf_inv,brw_rcv,"
+    "cf_in_fin,cash_rpay_brw,net_cf_fin,net_prof,efct_er_chg_cash,net_incr_cash_eq,"
+    "cash_cash_eq_bgn,cash_cash_eq_end"
+)
+
+
+def _fetch_fund_cashflow_batched(symbol, start_date, end_date):
+    """分批获取现金流量表数据（gm API 限制 fields 不超过 20 个）。
+
+    将 20 个字段按 20 个一批分别请求，再以元数据列为 key 合并，
+    返回包含全部字段的完整 DataFrame。
+    """
+    all_fields = FUND_CASHFLOW_FIELDS.split(",")
+    batch_size = 20
+    dfs = []
+    for i in range(0, len(all_fields), batch_size):
+        batch_fields = ",".join(all_fields[i:i + batch_size])
+        df = call_with_timeout(stk_get_fundamentals_cashflow, timeout=30)(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            fields=batch_fields,
+            df=True,
+        )
+        if df is not None and not df.empty:
+            dfs.append(df)
+    if not dfs:
+        return None
+    if len(dfs) == 1:
+        return dfs[0]
+    # 多批数据按元数据列合并（同一 symbol+日期范围返回的行一致）
+    merge_cols = ["symbol", "pub_date", "rpt_date", "rpt_type", "data_type"]
+    result = dfs[0]
+    for df in dfs[1:]:
+        result = result.merge(df, on=merge_cols, how="outer")
+    return result
+
+
+# 循环获取指定股票列表的现金流量表数据并 upsert 入库
+def upsert_fund_cashflow_sql(symbols):
+    """循环获取指定股票列表的现金流量表数据并 upsert 入库。
+
+    增量更新策略：
+    - 数据库已有该 symbol 数据：从最新 rpt_date + 1 天开始获取
+    - 数据库无该 symbol 数据：全量获取（start_date=None）
+
+    去重规则（按 symbol + rpt_date）：
+    - 已有记录且新数据 pub_date >= 已有 pub_date：更新所有字段
+    - 已有记录但新数据 pub_date < 已有 pub_date：跳过该行
+    - 无已有记录：插入新记录
+
+    单个 symbol 失败不中断后续步骤，返回 steps 字典记录每个 symbol 的保存条数。
+    """
+    _mdl = FundCashflow
+    _field_list = FUND_CASHFLOW_FIELDS.split(",")  # 20 个财务字段名列表
+    steps = {}  # 记录每个 symbol 的保存条数
+    logger.info("现金流量表数据获取并导入")
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    for symbol in symbols:
+        try:
+            # 查询数据库中该 symbol 的最大 rpt_date，用于增量更新
+            with SessionLocal() as db:
+                max_rpt_date = (
+                    db.query(func.max(_mdl.rpt_date))
+                    .filter(_mdl.symbol == symbol)
+                    .scalar()
+                )
+            # 增量起点：有数据则从最新 rpt_date + 1 天，否则从 2010-01-01 全量获取
+            if max_rpt_date is not None:
+                start_date = (max_rpt_date + timedelta(days=1)).strftime("%Y-%m-%d")
+            else:
+                start_date = "2010-01-01"
+            # 调用 gm 接口获取现金流量表（分批获取，带超时保护）
+            df = _fetch_fund_cashflow_batched(symbol, start_date, end_date)
+            if df is None or df.empty:
+                logger.info(f"->{symbol} 无需导入")
+                steps[symbol] = 0
+                continue
+            saved_count = 0
+            with SessionLocal() as db:
+                for _, row in df.iterrows():
+                    rpt_date = _to_date(row.get("rpt_date"))
+                    if rpt_date is None:
+                        continue
+                    pub_date = _to_date(row.get("pub_date"))
+                    # 查询是否已有该 (symbol, rpt_date) 记录
+                    existing = (
+                        db.query(_mdl)
+                        .filter(_mdl.symbol == symbol, _mdl.rpt_date == rpt_date)
+                        .first()
+                    )
+                    if existing is not None:
+                        # 已有记录：新数据 pub_date 更旧则跳过，否则更新所有字段
+                        if (pub_date is not None and existing.pub_date is not None
+                                and pub_date < existing.pub_date):
+                            continue
+                        existing.pub_date = pub_date
+                        existing.rpt_type = _clean_scalar(row.get("rpt_type"))
+                        existing.data_type = _clean_scalar(row.get("data_type"))
+                        for f in _field_list:
+                            setattr(existing, f, _clean_scalar(row.get(f)))
+                    else:
+                        # 无已有记录：插入新记录
+                        obj = _mdl(symbol=symbol, rpt_date=rpt_date)
+                        obj.pub_date = pub_date
+                        obj.rpt_type = _clean_scalar(row.get("rpt_type"))
+                        obj.data_type = _clean_scalar(row.get("data_type"))
+                        for f in _field_list:
+                            setattr(obj, f, _clean_scalar(row.get(f)))
+                        db.add(obj)
+                    saved_count += 1
+                    # 每 100 条 commit 一次
+                    if saved_count % 100 == 0:
+                        db.commit()
+                db.commit()  # 提交剩余记录
+            logger.info(f"->{symbol} 成功：{saved_count}")
+            steps[symbol] = saved_count
+        except Exception as e:
+            # 单步失败不中断后续 symbol，记录错误并继续
+            logger.error(f"->{symbol} 失败：{str(e)}")
+            steps[symbol] = -1
+    return steps

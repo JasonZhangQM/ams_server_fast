@@ -148,7 +148,7 @@ class FundIncomeOut(BaseModel):
     exp_fin: Optional[Decimal] = Field(default=None, description="财务费用")
     # ---- 其他经营收益 ----
     inc_inv: Optional[Decimal] = Field(default=None, description="投资收益")
-    inc_fv_chg: Optional[Decimal] = Field(default=None, description="公允价值变动收益")
+    inc_fv_chg: Optional[Decimal] = Field(default=None, description="公允价值变动")
     # ---- 利润类字段 ----
     oper_prof: Optional[Decimal] = Field(default=None, description="营业利润")
     ttl_prof: Optional[Decimal] = Field(default=None, description="利润总额")
@@ -162,5 +162,48 @@ class FundIncomeOut(BaseModel):
     inc_noper: Optional[Decimal] = Field(default=None, description="营业外收入")
     exp_noper: Optional[Decimal] = Field(default=None, description="营业外支出")
     ttl_comp_inc: Optional[Decimal] = Field(default=None, description="综合收益总额")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")
+
+
+class FundCashflowOut(BaseModel):
+    """现金流量表响应 Schema（对应 bds.FundCashflow 模型）。
+
+    每个字段的 description 与 ORM 模型的 comment 保持一致，
+    以便 OpenAPI 文档与前端表头统一。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    symbol: str = Field(description="股票代码")
+    pub_date: Optional[date] = Field(default=None, description="发布日期")
+    rpt_date: Optional[date] = Field(default=None, description="报告日期")
+    rpt_type: Optional[int] = Field(default=None, description="报表类型")
+    data_type: Optional[int] = Field(default=None, description="数据类型")
+    # ---- 经营活动现金流 ----
+    cash_rcv_sale: Optional[Decimal] = Field(default=None, description="销售商品、提供劳务收到的现金")
+    cf_in_oper: Optional[Decimal] = Field(default=None, description="经营活动现金流入小计")
+    cash_pur_gds_svc: Optional[Decimal] = Field(default=None, description="购买商品、接受劳务支付的现金")
+    cash_pay_emp: Optional[Decimal] = Field(default=None, description="支付给职工以及为职工支付的现金")
+    cash_pay_tax: Optional[Decimal] = Field(default=None, description="支付的各项税费")
+    cf_out_oper: Optional[Decimal] = Field(default=None, description="经营活动现金流出小计")
+    net_cf_oper: Optional[Decimal] = Field(default=None, description="经营活动产生的现金流量净额")
+    # ---- 投资活动现金流 ----
+    cash_rcv_sale_inv: Optional[Decimal] = Field(default=None, description="收回投资收到的现金")
+    cf_in_inv: Optional[Decimal] = Field(default=None, description="投资活动现金流入小计")
+    pur_fix_intg_ast: Optional[Decimal] = Field(default=None, description="购建固定资产、无形资产和其他长期资产支付的现金")
+    net_cf_inv: Optional[Decimal] = Field(default=None, description="投资活动产生的现金流量净额")
+    # ---- 筹资活动现金流 ----
+    brw_rcv: Optional[Decimal] = Field(default=None, description="取得借款收到的现金")
+    cf_in_fin: Optional[Decimal] = Field(default=None, description="筹资活动现金流入小计")
+    cash_rpay_brw: Optional[Decimal] = Field(default=None, description="偿还债务支付的现金")
+    net_cf_fin: Optional[Decimal] = Field(default=None, description="筹资活动产生的现金流量净额")
+    # ---- 汇总 ----
+    net_prof: Optional[Decimal] = Field(default=None, description="净利润")
+    efct_er_chg_cash: Optional[Decimal] = Field(default=None, description="汇率变动对现金及现金等价物的影响")
+    net_incr_cash_eq: Optional[Decimal] = Field(default=None, description="现金及现金等价物净增加额")
+    cash_cash_eq_bgn: Optional[Decimal] = Field(default=None, description="期初现金及现金等价物余额")
+    cash_cash_eq_end: Optional[Decimal] = Field(default=None, description="期末现金及现金等价物余额")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")

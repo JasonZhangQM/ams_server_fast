@@ -17,9 +17,10 @@ from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
-from server_fast.app.bds.models import FundBalance, FundIncome, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
+from server_fast.app.bds.models import FundBalance, FundCashflow, FundIncome, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
 from server_fast.app.bds.schemas import (
     FundBalanceOut,
+    FundCashflowOut,
     FundIncomeOut,
     IndexConstituentOut,
     IndexHistoryOut,
@@ -29,6 +30,7 @@ from server_fast.app.bds.schemas import (
 from server_fast.app.bds.service import (
     insert_trade_date_em_sql,
     upsert_fund_balance_sql,
+    upsert_fund_cashflow_sql,
     upsert_fund_income_sql,
     upsert_index_constituent_sql,
     upsert_index_history_sql,
@@ -439,6 +441,46 @@ def list_fund_incomes(
     total = query.count()
     items = (
         query.order_by(FundIncome.rpt_date.desc(), FundIncome.pub_date.desc())
+        .offset(offset).limit(limit).all()
+    )
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+@router.post("/sync/fund-cashflow")
+def sync_fund_cashflow(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
+    """同步现金流量表数据，接收单个股票代码，获取并入库。"""
+    if not symbol:
+        return {"status": "error", "message": "symbol 不能为空"}
+    steps = upsert_fund_cashflow_sql([symbol])
+    return {"status": "success", "message": f"同步完成：{symbol}", "steps": steps}
+
+
+@router.get("/fund-cashflows", response_model=PageResponse[FundCashflowOut])
+def list_fund_cashflows(
+    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
+    rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
+    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    limit: int = Query(default=10, ge=1),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """查询现金流量表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。
+
+    排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
+    """
+    query = db.query(FundCashflow)
+    # symbol 模糊匹配
+    if symbol:
+        query = query.filter(FundCashflow.symbol.like(f"%{symbol}%"))
+    # rpt_type 精确匹配
+    if rpt_type is not None:
+        query = query.filter(FundCashflow.rpt_type == rpt_type)
+    # 报告日期起始日过滤
+    if start_date:
+        query = query.filter(FundCashflow.rpt_date >= start_date)
+    total = query.count()
+    items = (
+        query.order_by(FundCashflow.rpt_date.desc(), FundCashflow.pub_date.desc())
         .offset(offset).limit(limit).all()
     )
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}

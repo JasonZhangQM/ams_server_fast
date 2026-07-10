@@ -223,7 +223,7 @@ class FundIncome(Base, BaseModel):
     exp_fin: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="财务费用")
     # ---- 其他经营收益 ----
     inc_inv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="投资收益")
-    inc_fv_chg: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="公允价值变动收益")
+    inc_fv_chg: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="公允价值变动")
     # ---- 利润类字段 ----
     oper_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业利润")
     ttl_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="利润总额")
@@ -241,6 +241,55 @@ class FundIncome(Base, BaseModel):
     # 联合唯一约束：按 symbol + rpt_date 去重
     __table_args__ = (
         UniqueConstraint("symbol", "rpt_date", name="uk_bds_fund_income"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["symbol", "rpt_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.rpt_date}"
+
+
+class FundCashflow(Base, BaseModel):
+    """现金流量表模型（对应表 bds_fund_cashflow）。"""
+
+    __tablename__ = "bds_fund_cashflow"
+
+    # ---- 元数据字段 ----
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="股票代码")
+    pub_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="发布日期")
+    rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
+    rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
+    data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+
+    # ---- 经营活动现金流 ----
+    cash_rcv_sale: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="销售商品、提供劳务收到的现金")
+    cf_in_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="经营活动现金流入小计")
+    cash_pur_gds_svc: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="购买商品、接受劳务支付的现金")
+    cash_pay_emp: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="支付给职工以及为职工支付的现金")
+    cash_pay_tax: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="支付的各项税费")
+    cf_out_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="经营活动现金流出小计")
+    net_cf_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="经营活动产生的现金流量净额")
+    # ---- 投资活动现金流 ----
+    cash_rcv_sale_inv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="收回投资收到的现金")
+    cf_in_inv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="投资活动现金流入小计")
+    pur_fix_intg_ast: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="购建固定资产、无形资产和其他长期资产支付的现金")
+    net_cf_inv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="投资活动产生的现金流量净额")
+    # ---- 筹资活动现金流 ----
+    brw_rcv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="取得借款收到的现金")
+    cf_in_fin: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="筹资活动现金流入小计")
+    cash_rpay_brw: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="偿还债务支付的现金")
+    net_cf_fin: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="筹资活动产生的现金流量净额")
+    # ---- 汇总 ----
+    net_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="净利润")
+    efct_er_chg_cash: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="汇率变动对现金及现金等价物的影响")
+    net_incr_cash_eq: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="现金及现金等价物净增加额")
+    cash_cash_eq_bgn: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="期初现金及现金等价物余额")
+    cash_cash_eq_end: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="期末现金及现金等价物余额")
+
+    # 联合唯一约束：按 symbol + rpt_date 去重
+    __table_args__ = (
+        UniqueConstraint("symbol", "rpt_date", name="uk_bds_fund_cashflow"),
     )
 
     # 供 upsert 使用的唯一键
