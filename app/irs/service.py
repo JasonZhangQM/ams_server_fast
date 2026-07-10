@@ -84,6 +84,9 @@ def upsert_model_excel_sql(folder, mdl):
     mdl: 数据库model
     engine: 数据库engine
     '''
+    # 文件夹不存在时提前报错，避免 iterdir 抛出难以理解的异常
+    if not folder.exists():
+        raise FileNotFoundError(f"Excel 文件夹不存在：{folder}")
     _engine = settings.DB_ENGINE
     file_names = [
         f.name for f in folder.iterdir()
@@ -485,9 +488,10 @@ def real_symbols_em(symbol_con_list) -> dict:
     {'CFFEX.IC2512':'CFFEX.IC00', 'CFFEX.IC2601':'CFFEX.IC01'}
     '''
     symbols_dict = {}  # 真实合约列表
+    # gm 终端不可用时 fut_get_continuous_contracts 会阻塞，加超时保护
+    _get_contracts = call_with_timeout(fut_get_continuous_contracts, timeout=30)
     for symbol_con in symbol_con_list:
-        real_symbol = fut_get_continuous_contracts(
-            csymbol=symbol_con)[0]['symbol']
+        real_symbol = _get_contracts(csymbol=symbol_con)[0]['symbol']
         symbols_dict[real_symbol] = symbol_con
     return symbols_dict
 
@@ -506,7 +510,8 @@ def symbol_infos_em(symbols_dict: dict) -> pd.DataFrame:
     delisted_date: 到期日
     symbol_con: 连续合约
     '''
-    df = get_symbol_infos(
+    # gm 终端不可用时 get_symbol_infos 会阻塞，加超时保护
+    df = call_with_timeout(get_symbol_infos, timeout=30)(
         sec_type1=1040, symbols=list(symbols_dict.keys()), df=True)
     df = df[['symbol', 'underlying_symbol', 'delisted_date']]
     df['symbol_con'] = df['symbol'].map(symbols_dict)
@@ -575,56 +580,6 @@ def upsert_discount_em_sql():
 
 
 # 计算标的升贴水收益率
-def discount_yield_em_sql():  # 有问题,不用
-    '''
-    1、分别获取期货及期货标的symbol合并之后一次调取em接口获取实时行情
-    2、计算贴水等相关指标
-    3、更新数据库
-    '''
-    _engine = settings.DB_ENGINE
-    _mdl_md = MonitorDiscount
-    _mdl_d = SymbolDiscount
-    sql = f'''
-        SELECT {','.join(_mdl_d.fields_yiels)}
-        FROM {_mdl_d.__table__.name};
-        '''
-    df = get_sql_to_df(sql, _engine)
-    df['symbol_real_id'] = df['id']
-    symbol_list = list(set(df['symbol_ud'])) + list(set(df['symbol']))
-    data = call_with_timeout(current, timeout=10)(  # 获取期货及期货标的实时行情（带超时保护）
-        symbol_list, fields=['symbol', 'price', 'cum_position'])
-    symbol_dict = {
-        item['symbol']: {'price': item['price'], 'position': item['cum_position']}
-        for item in data
-    }
-    df['price_ud'] = df['symbol_ud'].apply(
-        lambda x: symbol_dict[x]['price'])
-    df['price'] = df['symbol'].apply(
-        lambda x: symbol_dict[x]['price'])
-    df['position'] = df['symbol'].apply(
-        lambda x: symbol_dict[x]['position'])
-    # 计算指标
-    df['days_left'] = df['delisted_date'].apply(
-        lambda x: (x - date.today()).days)
-    df['discount'] = df['price_ud'] - df['price']
-    df['ratio'] = df['discount'] / df['price'] * 100
-    df['ratio_y'] = np.where(
-        df['days_left'] != 0,  # 条件：days_left不等于0
-        df['ratio'] * 365 / df['days_left'],  # 满足条件时的计算逻辑
-        None,  # 不满足条件时赋值为None
-    )
-    if not df.empty:
-        _table = _mdl_md.__table__.name
-        _unique_keys = _mdl_md.unique_keys
-        _update_columns = _mdl_md.fields_update_sql
-        df_in = df_init_model(df, _mdl_md)
-        result = upsert_df_to_db(
-            df_in, _table, _engine, _unique_keys, _update_columns)
-    else:
-        result = 0
-    return result
-
-
 def discount_yield_em_orm():
     '''
     1、分别获取期货及期货标的symbol合并之后一次调取em接口获取实时行情
@@ -649,7 +604,7 @@ def discount_yield_em_orm():
         sd_dict.keys()) + list(
         {v['symbol_ud'] for k, v in sd_dict.items()})
     try:
-        data = call_with_timeout(current, timeout=10)(  # 获取期货及期货标的实时行情（带超时保护）
+        data = call_with_timeout(current, timeout=30)(  # 获取期货及期货标的实时行情（带超时保护）
             symbol_list, fields=['symbol', 'price', 'cum_position'])
     except Exception as e:
         logger.error(f"******获取实时行情失败：{str(e)}")

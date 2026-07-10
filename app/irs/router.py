@@ -126,13 +126,32 @@ SYNC_MAP: Dict[str, List[Callable]] = {
 
 
 def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:
-    """依次执行同步函数链；任一函数抛异常即中止并返回 500。"""
+    """依次执行同步函数链；参照 bds 模块返回 status 字段。
+
+    - 任一函数抛异常：返回 status=error，前端显示红色提示并携带错误信息
+    - 全部成功：返回 status=success，message 包含返回值信息（如有）
+    """
     try:
+        counts = []  # 收集各函数返回值（如有）
         for func in funcs:
-            func()
-        return {"status": "ok", "message": f"{target} synced"}
+            result = func()
+            if result is not None:
+                counts.append(result)
+        # 构建含条数信息的 message（discount_yield_em_orm 返回 (insert, update) 元组）
+        if counts:
+            parts = []
+            for c in counts:
+                if isinstance(c, tuple) and len(c) == 2:
+                    parts.append(f"新增{c[0]}条，更新{c[1]}条")
+                elif isinstance(c, int):
+                    parts.append(f"处理{c}条")
+            detail = "；".join(parts) if parts else ""
+            message = f"同步完成：{target}，{detail}" if detail else f"同步完成：{target}"
+        else:
+            message = f"同步完成：{target}"
+        return {"status": "success", "message": message}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "error", "message": f"同步失败：{target}，{e}"}
 
 
 # =========================================================================
@@ -329,7 +348,7 @@ def list_monitor_option_ts(
 def list_symbol_discounts(
     symbol_type: Optional[str] = Query(None, description="合约类别精确匹配（list_filter）"),
     is_main: Optional[bool] = Query(None, description="是否主力精确匹配（list_filter）"),
-    symbol: Optional[str] = Query(None, description="真实合约代码精确匹配"),
+    symbol: Optional[str] = Query(None, description="真实合约代码模糊匹配"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -341,7 +360,8 @@ def list_symbol_discounts(
     if is_main is not None:
         query = query.filter(SymbolDiscount.is_main == is_main)
     if symbol:
-        query = query.filter(SymbolDiscount.symbol == symbol)
+        # 参照 bds 模块，symbol 使用 like 模糊匹配
+        query = query.filter(SymbolDiscount.symbol.like(f"%{symbol}%"))
     total = query.count()
     items = query.order_by(SymbolDiscount.symbol_con).offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
@@ -349,15 +369,24 @@ def list_symbol_discounts(
 
 @router.get("/monitor-discounts", response_model=PageResponse[MonitorDiscountOut])
 def list_monitor_discounts(
-    symbol: Optional[str] = Query(None, description="关联 SymbolDiscount.symbol 精确匹配"),
-    symbol_con: Optional[str] = Query(None, description="关联连续合约精确匹配"),
+    symbol: Optional[str] = Query(None, description="关联 SymbolDiscount.symbol 模糊匹配"),
+    symbol_con: Optional[str] = Query(None, description="关联连续合约模糊匹配"),
     symbol_type: Optional[str] = Query(None, description="关联合约类别精确匹配"),
     is_main: Optional[bool] = Query(None, description="关联是否主力精确匹配"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """贴水监测（对应 MonitorDiscountAdmin，含关联 SymbolDiscount 字段）。"""
+    """贴水监测（对应 MonitorDiscountAdmin，含关联 SymbolDiscount 字段）。
+
+    查询前先触发 discount_yield_em_orm() 同步实时贴水数据（失败不阻塞查询），
+    再返回最新数据。
+    """
+    # 查询前先同步实时贴水数据，失败不阻塞查询
+    try:
+        service.discount_yield_em_orm()
+    except Exception as e:
+        print(f"-->monitor-discounts 同步失败:{e}")
     query = db.query(MonitorDiscount)
     # 四个过滤均来自关联 SymbolDiscount，统一 join 一次
     if any(v is not None for v in (symbol, symbol_con, symbol_type, is_main)):
@@ -365,9 +394,11 @@ def list_monitor_discounts(
             SymbolDiscount, MonitorDiscount.symbol_real_id == SymbolDiscount.id
         )
         if symbol:
-            query = query.filter(SymbolDiscount.symbol == symbol)
+            # 参照 bds 模块，symbol 使用 like 模糊匹配
+            query = query.filter(SymbolDiscount.symbol.like(f"%{symbol}%"))
         if symbol_con:
-            query = query.filter(SymbolDiscount.symbol_con == symbol_con)
+            # 连续合约同样使用 like 模糊匹配
+            query = query.filter(SymbolDiscount.symbol_con.like(f"%{symbol_con}%"))
         if symbol_type:
             query = query.filter(SymbolDiscount.symbol_type == symbol_type)
         if is_main is not None:
@@ -377,9 +408,7 @@ def list_monitor_discounts(
     items = query.offset(offset).limit(limit).all()
     extra = {
         "symbol": "symbol_real__symbol",
-        "symbol_con": "symbol_real__symbol_con",
         "is_main": "symbol_real__is_main",
-        "symbol_type": "symbol_real__symbol_type",
         "symbol_ud": "symbol_real__symbol_ud",
         "delisted_date": "symbol_real__delisted_date",
     }

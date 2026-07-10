@@ -267,8 +267,6 @@ class MonitorDiscountOut(BaseModel):
     update_time: datetime                           # 更新时间
     # 扁平化嵌入 SymbolDiscount 字段（关联对象可能为 None）
     symbol: Optional[str] = None                    # 真实合约
-    symbol_con: Optional[str] = None                # 连续合约
     is_main: Optional[bool] = None                  # 主力
-    symbol_type: Optional[str] = None               # 合约类别
     symbol_ud: Optional[str] = None                 # 标的代码
     delisted_date: Optional[date] = None            # 到期日
