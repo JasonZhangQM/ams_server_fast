@@ -15,6 +15,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from server_fast.app.bds.models import FundBalance, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
 from server_fast.app.bds.schemas import (
@@ -73,8 +74,8 @@ def list_trade_dates(
 @router.get("/symbol-infos", response_model=PageResponse[SymbolInfoOut])
 def list_symbol_infos(
     symbol: Optional[str] = Query(None, description="代码模糊匹配（search_fields）"),
-    name: Optional[str] = Query(None, description="名称模糊匹配（search_fields）"),
     industry: Optional[str] = Query(None, description="行业精确匹配（list_filter）"),
+    keyword: Optional[str] = Query(None, description="代码或名称任一模糊匹配（OR，用于远程搜索）"),
     limit: int = Query(86, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -82,20 +83,45 @@ def list_symbol_infos(
     """查询证券基本信息，支持可选过滤。
 
     过滤规则（依据 admin.py）：
-    - search_fields(symbol, name) → contains 模糊匹配
-    - list_filter(industry)       → == 精确匹配
+    - search_fields(symbol)      → contains 模糊匹配
+    - list_filter(industry)      → == 精确匹配
     - list_per_page 默认 86
+    - keyword → symbol/name 任一包含即命中（OR），用于前端远程搜索场景
     """
     query = db.query(SymbolInfo)
     if symbol:
         query = query.filter(SymbolInfo.symbol.contains(symbol))
-    if name:
-        query = query.filter(SymbolInfo.name.contains(name))
     if industry:
         query = query.filter(SymbolInfo.industry == industry)
+    if keyword:
+        # 关键字对 symbol 和 name 做 OR 模糊匹配，支持输入代码或名称搜索
+        query = query.filter(
+            or_(
+                SymbolInfo.symbol.contains(keyword),
+                SymbolInfo.name.contains(keyword),
+            )
+        )
     total = query.count()  # 应用所有过滤条件后的总记录数
     items = query.offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/symbol-industries")
+def list_symbol_industries(db: Session = Depends(get_db)):
+    """返回证券信息表中去重后的行业列表。
+
+    数据源为 bds_symbol_info 表的 industry 字段（DISTINCT 去重，排除 NULL 与空串），
+    按行业名称升序排序，供前端行业筛选下拉使用。无需分页。
+    """
+    rows = (
+        db.query(SymbolInfo.industry)
+        .filter(SymbolInfo.industry.isnot(None), SymbolInfo.industry != "")
+        .distinct()
+        .order_by(SymbolInfo.industry.asc())
+        .all()
+    )
+    industries = [r[0] for r in rows]
+    return {"industries": industries}
 
 
 @router.post("/sync/trade-date")
@@ -350,12 +376,11 @@ def list_fund_balances(
     symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
-    end_date: Optional[date] = Query(default=None, description="报告日期结束日"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询资产负债表数据，支持代码模糊匹配、报表类型和报告日期范围筛选。
+    """查询资产负债表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。
 
     排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
     """
@@ -366,11 +391,9 @@ def list_fund_balances(
     # rpt_type 精确匹配
     if rpt_type is not None:
         query = query.filter(FundBalance.rpt_type == rpt_type)
-    # 报告日期范围过滤
+    # 报告日期起始日过滤
     if start_date:
         query = query.filter(FundBalance.rpt_date >= start_date)
-    if end_date:
-        query = query.filter(FundBalance.rpt_date <= end_date)
     total = query.count()
     items = (
         query.order_by(FundBalance.rpt_date.desc(), FundBalance.pub_date.desc())
