@@ -297,3 +297,105 @@ class FundCashflow(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.symbol}-{self.rpt_date}"
+
+
+class FinanceDeriv(Base, BaseModel):
+    """财务指标模型（对应表 bds_finance_deriv）。"""
+
+    __tablename__ = "bds_finance_deriv"
+
+    # ---- 元数据字段 ----
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="股票代码")
+    pub_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="发布日期")
+    rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
+    rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
+    data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+
+    # ---- 收益率字段 ----
+    roe: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="净资产收益率ROE(摊薄)")
+    roe_weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="净资产收益率ROE(加权)")
+    roe_avg: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="净资产收益率ROE(平均)")
+    roa: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="总资产报酬率ROA")
+    roic: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="投入资本回报率ROIC")
+    # ---- 盈利能力字段 ----
+    sale_gpm: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="销售毛利率")
+    sale_npm: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="销售净利率")
+    ebitda_toi: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="EBITDA/营业总收入")
+    ebit_toi: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="息税前利润/营业总收入")
+    # ---- 偿债能力字段 ----
+    ast_liab_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="资产负债率")
+    curr_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="流动比率")
+    quick_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="速动比率")
+    liab_eqy_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="产权比率")
+    # ---- 营运能力字段 ----
+    ttl_ast_turnover_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="总资产周转率")
+    acct_rcv_turnover_days: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="应收账款周转天数(含应收票据)")
+    inv_turnover_days: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="存货周转天数")
+    # ---- 增长能力字段 ----
+    net_prof_pcom_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="归属母公司股东的净利润同比增长率")
+    ttl_inc_oper_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="营业总收入同比增长率")
+    net_prof_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="净利润同比增长率")
+    ttl_asset_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="总资产同比增长率")
+
+    # 联合唯一约束：按 symbol + rpt_date 去重
+    __table_args__ = (
+        UniqueConstraint("symbol", "rpt_date", name="uk_bds_finance_deriv"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["symbol", "rpt_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.rpt_date}"
+
+
+class DailyValuation(Base, BaseModel):
+    """估值指标模型（对应表 bds_daily_valuation）。
+
+    每日交易数据（非财报周期数据），元数据仅 symbol + trade_date，
+    无 rpt_type/data_type/pub_date。
+    """
+
+    __tablename__ = "bds_daily_valuation"
+
+    # ---- 元数据字段（每日交易数据，无 rpt_type/data_type/pub_date） ----
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="股票代码")
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
+
+    # ---- 市盈率 PE 字段 ----
+    pe_ttm: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市盈率(TTM)")
+    pe_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市盈率(最新年报LYR)")
+    pe_mrq: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市盈率(最新报告期MRQ)")
+    pe_ttm_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市盈率(TTM)扣除非经常性损益")
+    pe_lyr_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市盈率(最新年报LYR)扣除非经常性损益")
+    pe_mrq_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市盈率(最新报告期MRQ)扣除非经常性损益")
+    # ---- 市净率 PB 字段 ----
+    pb_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市净率(最新年报LYR)")
+    pb_mrq: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市净率(最新报告期MRQ)")
+    # ---- 市现率 PCF 字段 ----
+    pcf_ttm_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市现率(经营现金流,TTM)")
+    pcf_ttm_ncf: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市现率(现金净流量,TTM)")
+    pcf_lyr_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市现率(经营现金流,最新年报LYR)")
+    pcf_lyr_ncf: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市现率(现金净流量,最新年报LYR)")
+    # ---- 市销率 PS 字段 ----
+    ps_ttm: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市销率(TTM)")
+    ps_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市销率(最新年报LYR)")
+    ps_mrq: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="市销率(最新报告期MRQ)")
+    # ---- PEG 字段 ----
+    peg_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="历史PEG值(当年年报增长率)")
+    peg_1q: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="历史PEG值(当年1季*4较上年年报增长率)")
+    peg_3q: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="历史PEG值(当年3季*4/3较上年年报增长率)")
+    # ---- 股息率 DY 字段 ----
+    dy_ttm: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="股息率(滚动12月TTM)")
+    dy_lfy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="股息率(上一财年LFY)")
+
+    # 联合唯一约束：按 symbol + trade_date 去重（每日估值无修正概念）
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uk_bds_daily_valuation"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["symbol", "trade_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.trade_date}"

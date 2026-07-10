@@ -207,3 +207,89 @@ class FundCashflowOut(BaseModel):
     cash_cash_eq_end: Optional[Decimal] = Field(default=None, description="期末现金及现金等价物余额")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
+
+
+class FinanceDerivOut(BaseModel):
+    """财务指标响应 Schema（对应 bds.FinanceDeriv 模型）。
+
+    每个字段的 description 与 ORM 模型的 comment 保持一致，
+    以便 OpenAPI 文档与前端表头统一。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    symbol: str = Field(description="股票代码")
+    pub_date: Optional[date] = Field(default=None, description="发布日期")
+    rpt_date: Optional[date] = Field(default=None, description="报告日期")
+    rpt_type: Optional[int] = Field(default=None, description="报表类型")
+    data_type: Optional[int] = Field(default=None, description="数据类型")
+    # ---- 收益率字段 ----
+    roe: Optional[Decimal] = Field(default=None, description="净资产收益率ROE(摊薄)")
+    roe_weight: Optional[Decimal] = Field(default=None, description="净资产收益率ROE(加权)")
+    roe_avg: Optional[Decimal] = Field(default=None, description="净资产收益率ROE(平均)")
+    roa: Optional[Decimal] = Field(default=None, description="总资产报酬率ROA")
+    roic: Optional[Decimal] = Field(default=None, description="投入资本回报率ROIC")
+    # ---- 盈利能力字段 ----
+    sale_gpm: Optional[Decimal] = Field(default=None, description="销售毛利率")
+    sale_npm: Optional[Decimal] = Field(default=None, description="销售净利率")
+    ebitda_toi: Optional[Decimal] = Field(default=None, description="EBITDA/营业总收入")
+    ebit_toi: Optional[Decimal] = Field(default=None, description="息税前利润/营业总收入")
+    # ---- 偿债能力字段 ----
+    ast_liab_rate: Optional[Decimal] = Field(default=None, description="资产负债率")
+    curr_rate: Optional[Decimal] = Field(default=None, description="流动比率")
+    quick_rate: Optional[Decimal] = Field(default=None, description="速动比率")
+    liab_eqy_rate: Optional[Decimal] = Field(default=None, description="产权比率")
+    # ---- 营运能力字段 ----
+    ttl_ast_turnover_rate: Optional[Decimal] = Field(default=None, description="总资产周转率")
+    acct_rcv_turnover_days: Optional[Decimal] = Field(default=None, description="应收账款周转天数(含应收票据)")
+    inv_turnover_days: Optional[Decimal] = Field(default=None, description="存货周转天数")
+    # ---- 增长能力字段 ----
+    net_prof_pcom_yoy: Optional[Decimal] = Field(default=None, description="归属母公司股东的净利润同比增长率")
+    ttl_inc_oper_yoy: Optional[Decimal] = Field(default=None, description="营业总收入同比增长率")
+    net_prof_yoy: Optional[Decimal] = Field(default=None, description="净利润同比增长率")
+    ttl_asset_yoy: Optional[Decimal] = Field(default=None, description="总资产同比增长率")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")
+
+
+class DailyValuationOut(BaseModel):
+    """估值指标响应 Schema（对应 bds.DailyValuation 模型）。
+
+    每个字段的 description 与 ORM 模型的 comment 保持一致，
+    以便 OpenAPI 文档与前端表头统一。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    symbol: str = Field(description="股票代码")
+    trade_date: date = Field(description="交易日期")
+    # ---- 市盈率 PE 字段 ----
+    pe_ttm: Optional[Decimal] = Field(default=None, description="市盈率(TTM)")
+    pe_lyr: Optional[Decimal] = Field(default=None, description="市盈率(最新年报LYR)")
+    pe_mrq: Optional[Decimal] = Field(default=None, description="市盈率(最新报告期MRQ)")
+    pe_ttm_cut: Optional[Decimal] = Field(default=None, description="市盈率(TTM)扣除非经常性损益")
+    pe_lyr_cut: Optional[Decimal] = Field(default=None, description="市盈率(最新年报LYR)扣除非经常性损益")
+    pe_mrq_cut: Optional[Decimal] = Field(default=None, description="市盈率(最新报告期MRQ)扣除非经常性损益")
+    # ---- 市净率 PB 字段 ----
+    pb_lyr: Optional[Decimal] = Field(default=None, description="市净率(最新年报LYR)")
+    pb_mrq: Optional[Decimal] = Field(default=None, description="市净率(最新报告期MRQ)")
+    # ---- 市现率 PCF 字段 ----
+    pcf_ttm_oper: Optional[Decimal] = Field(default=None, description="市现率(经营现金流,TTM)")
+    pcf_ttm_ncf: Optional[Decimal] = Field(default=None, description="市现率(现金净流量,TTM)")
+    pcf_lyr_oper: Optional[Decimal] = Field(default=None, description="市现率(经营现金流,最新年报LYR)")
+    pcf_lyr_ncf: Optional[Decimal] = Field(default=None, description="市现率(现金净流量,最新年报LYR)")
+    # ---- 市销率 PS 字段 ----
+    ps_ttm: Optional[Decimal] = Field(default=None, description="市销率(TTM)")
+    ps_lyr: Optional[Decimal] = Field(default=None, description="市销率(最新年报LYR)")
+    ps_mrq: Optional[Decimal] = Field(default=None, description="市销率(最新报告期MRQ)")
+    # ---- PEG 字段 ----
+    peg_lyr: Optional[Decimal] = Field(default=None, description="历史PEG值(当年年报增长率)")
+    peg_1q: Optional[Decimal] = Field(default=None, description="历史PEG值(当年1季*4较上年年报增长率)")
+    peg_3q: Optional[Decimal] = Field(default=None, description="历史PEG值(当年3季*4/3较上年年报增长率)")
+    # ---- 股息率 DY 字段 ----
+    dy_ttm: Optional[Decimal] = Field(default=None, description="股息率(滚动12月TTM)")
+    dy_lfy: Optional[Decimal] = Field(default=None, description="股息率(上一财年LFY)")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")
