@@ -13,10 +13,12 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
 
-from server_fast.app.bds.models import IndexConstituent, IndexHistory, SymbolInfo, TradeDate
+from server_fast.app.bds.models import FundBalance, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
 from server_fast.app.bds.schemas import (
+    FundBalanceOut,
     IndexConstituentOut,
     IndexHistoryOut,
     SymbolInfoOut,
@@ -24,6 +26,7 @@ from server_fast.app.bds.schemas import (
 )
 from server_fast.app.bds.service import (
     insert_trade_date_em_sql,
+    upsert_fund_balance_sql,
     upsert_index_constituent_sql,
     upsert_index_history_sql,
     upsert_symbol_info_excel_sql,
@@ -326,3 +329,51 @@ def list_index_cum_returns(
     }
 
     return {"trade_dates": trade_dates, "series": series, "max_drawdown": max_drawdown}
+
+
+class FundBalanceSyncRequest(PydanticModel):
+    """资产负债表同步请求体（保留兼容，当前未使用）。"""
+    symbols: List[str]
+
+
+@router.post("/sync/fund-balance")
+def sync_fund_balance(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
+    """同步资产负债表数据，接收单个股票代码，获取并入库。"""
+    if not symbol:
+        return {"status": "error", "message": "symbol 不能为空"}
+    steps = upsert_fund_balance_sql([symbol])
+    return {"status": "success", "message": f"同步完成：{symbol}", "steps": steps}
+
+
+@router.get("/fund-balances", response_model=PageResponse[FundBalanceOut])
+def list_fund_balances(
+    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
+    rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
+    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    end_date: Optional[date] = Query(default=None, description="报告日期结束日"),
+    limit: int = Query(default=10, ge=1),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """查询资产负债表数据，支持代码模糊匹配、报表类型和报告日期范围筛选。
+
+    排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
+    """
+    query = db.query(FundBalance)
+    # symbol 模糊匹配
+    if symbol:
+        query = query.filter(FundBalance.symbol.like(f"%{symbol}%"))
+    # rpt_type 精确匹配
+    if rpt_type is not None:
+        query = query.filter(FundBalance.rpt_type == rpt_type)
+    # 报告日期范围过滤
+    if start_date:
+        query = query.filter(FundBalance.rpt_date >= start_date)
+    if end_date:
+        query = query.filter(FundBalance.rpt_date <= end_date)
+    total = query.count()
+    items = (
+        query.order_by(FundBalance.rpt_date.desc(), FundBalance.pub_date.desc())
+        .offset(offset).limit(limit).all()
+    )
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}

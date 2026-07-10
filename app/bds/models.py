@@ -13,7 +13,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Date, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import Date, Index, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
@@ -147,3 +147,53 @@ class IndexConstituent(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.index_code}-{self.symbol}-{self.trade_date}"
+
+
+class FundBalance(Base, BaseModel):
+    """资产负债表模型（对应表 bds_fund_balance）。"""
+
+    __tablename__ = "bds_fund_balance"
+
+    # ---- 元数据字段 ----
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="股票代码")
+    pub_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="发布日期")
+    rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
+    rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
+    data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+
+    # ---- 资产类字段 ----
+    mny_cptl: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="货币资金")
+    acct_rcv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="应收账款")
+    invt: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="存货")
+    ttl_cur_ast: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="流动资产合计")
+    fix_ast: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="固定资产")
+    lt_eqy_inv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="长期股权投资")
+    intg_ast: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="无形资产")
+    gw: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="商誉")
+    ttl_ncur_ast: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="非流动资产合计")
+    ttl_ast: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="资产总计")
+
+    # ---- 负债类字段 ----
+    sht_ln: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="短期借款")
+    acct_pay: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="应付账款")
+    ttl_cur_liab: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="流动负债合计")
+    lt_ln: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="长期借款")
+    ttl_ncur_liab: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="非流动负债合计")
+    ttl_liab: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="负债合计")
+
+    # ---- 权益类字段 ----
+    cptl_rsv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="资本公积")
+    ret_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="未分配利润")
+    ttl_eqy_pcom: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="归母股东权益合计")
+    ttl_eqy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="股东权益合计")
+
+    # 联合唯一约束：按 symbol + rpt_date 去重
+    __table_args__ = (
+        UniqueConstraint("symbol", "rpt_date", name="uk_bds_fund_balance"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["symbol", "rpt_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.rpt_date}"
