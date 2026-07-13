@@ -138,7 +138,6 @@ def list_bills(
     account: Optional[List[str]] = Query(default=None),
     category: Optional[List[str]] = Query(default=None),
     symbol: Optional[str] = None,
-    name: Optional[str] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -146,7 +145,7 @@ def list_bills(
     """返回 Bill 列表。
 
     account/category 支持多值 IN 匹配，
-    symbol/name 为 search_fields（模糊）。
+    symbol 为 search_fields（模糊）。
     """
     query = db.query(Bill)
     query = _filter_query(
@@ -155,7 +154,6 @@ def list_bills(
             (Bill.account, account, "in"),
             (Bill.category, category, "in"),
             (Bill.symbol, symbol, "contains"),
-            (Bill.name, name, "contains"),
         ],
     )
     # 过滤后总数（在 offset/limit 之前计算）
@@ -170,7 +168,6 @@ def list_profits(
     account: Optional[List[str]] = Query(default=None),
     category: Optional[List[str]] = Query(default=None),
     symbol: Optional[str] = None,
-    name: Optional[str] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -178,7 +175,7 @@ def list_profits(
     """返回 Profit 列表，含关联 Bill 的 account/symbol/name 字段。
 
     Profit 通过 bill_id 外键关联 Bill。原 Admin 的
-    search_fields=bill__symbol/bill__name、list_filter=bill__account
+    search_fields=bill__symbol、list_filter=bill__account
     均作用于关联 Bill；account/category 支持多值 IN 匹配，
     故此处通过 JOIN Bill 实现过滤，并在结果中补充关联字段。
 
@@ -187,7 +184,7 @@ def list_profits(
     """
     query = db.query(Profit)
     # 仅在存在关联过滤参数时才 JOIN，避免无谓联表
-    if any(v is not None for v in (account, category, symbol, name)):
+    if any(v is not None for v in (account, category, symbol)):
         query = query.join(Bill, Profit.bill_id == Bill.id)
         query = _filter_query(
             query,
@@ -195,7 +192,6 @@ def list_profits(
                 (Bill.account, account, "in"),
                 (Bill.category, category, "in"),
                 (Bill.symbol, symbol, "contains"),
-                (Bill.name, name, "contains"),
             ],
         )
     # COUNT 与数据查询过滤条件一致（JOIN 已包含在内），在 offset/limit 之前计算
