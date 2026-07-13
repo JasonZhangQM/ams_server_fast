@@ -299,44 +299,20 @@ def list_profit_years(
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-# SubTask 9.7: 三个同步路由，触发逻辑与原 middleware.py 一致
+# 合并后的同步路由：顺序执行实时估值 → 标的汇总 → 账户汇总
 @router.post("/sync/group")
 def sync_group():
-    """触发实时估值同步（对应中间件 /bills/group/）。"""
-    from server_fast.app.bills.services.value_calc import value_float_em_sql
+    """触发实时估值 + 标的汇总 + 账户汇总同步。
 
-    return _run_sync_steps([("value_float_em_sql", value_float_em_sql)])
-
-
-@router.post("/sync/group-symbol")
-def sync_group_symbol():
-    """触发实时估值 + 标的汇总同步（对应中间件 /bills/groupsymbol/）。
-
-    与原中间件一致：先 value_float_em_sql 再 upsert_group_symbol_sql。
+    顺序执行：value_float_em_sql → upsert_group_symbol_sql → upsert_group_acc_sql。
     """
     from server_fast.app.bills.services.value_calc import value_float_em_sql
-    from server_fast.app.bills.services.account_summary import upsert_group_symbol_sql
+    from server_fast.app.bills.services.account_summary import upsert_group_symbol_sql, upsert_group_acc_sql
 
     return _run_sync_steps(
         [
             ("value_float_em_sql", value_float_em_sql),
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
-        ]
-    )
-
-
-@router.post("/sync/group-acc")
-def sync_group_acc():
-    """触发实时估值 + 账户汇总同步（对应中间件 /bills/groupacc/）。
-
-    与原中间件一致：先 value_float_em_sql 再 upsert_group_acc_sql。
-    """
-    from server_fast.app.bills.services.value_calc import value_float_em_sql
-    from server_fast.app.bills.services.account_summary import upsert_group_acc_sql
-
-    return _run_sync_steps(
-        [
-            ("value_float_em_sql", value_float_em_sql),
             ("upsert_group_acc_sql", upsert_group_acc_sql),
         ]
     )
