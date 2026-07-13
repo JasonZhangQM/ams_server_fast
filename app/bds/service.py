@@ -891,3 +891,144 @@ def upsert_daily_valuation_sql(symbols):
             logger.error(f"->{symbol} 失败：{str(e)}")
             steps[symbol] = -1
     return steps
+
+
+def upsert_economic_indicator_sql(indicator_code):
+    """同步单个美国宏观经济指标数据并 upsert 入库。
+
+    采集流程：
+    1. 从 Config.ECONOMIC_INDICATORS 获取指标元信息（akshare 函数名、列模式等）
+    2. 根据 col_pattern 调用对应的 akshare 函数获取 DataFrame（带超时保护）
+    3. 根据 col_pattern 清洗列结构，统一为 ORM 字段名
+    4. 增量/全量过滤后 upsert 入库
+
+    增量策略：
+    - 月度/季度指标（模式A/B）：查询 DB 最大 report_date，仅导入新增行；无数据从 2010-01-01 全量
+    - 日度指标（模式C）：获取最近 365 天数据
+
+    返回值：插入/更新条数（int），异常返回 -1。
+    """
+    _engine = settings.DB_ENGINE
+    _mdl = EconomicIndicator
+
+    # 获取指标元信息
+    meta = dbsCfg.ECONOMIC_INDICATORS.get(indicator_code)
+    if meta is None:
+        logger.warning(f"未知经济指标代码：{indicator_code}")
+        return -1
+
+    logger.info(f"经济指标 {indicator_code}（{meta['name']}）获取并导入")
+    try:
+        # 函数内部导入 akshare，避免模块加载时强依赖
+        import akshare as ak
+        ak_func = getattr(ak, meta['akshare_func'])
+        col_pattern = meta['col_pattern']
+
+        # 根据 col_pattern 调用 akshare 函数获取 DataFrame
+        if col_pattern == 'C':
+            # 日度指标（bond_zh_us_rate）：获取最近 365 天数据
+            end_date = datetime.now().strftime("%Y%m%d")
+            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
+            df = call_with_timeout(ak_func, timeout=30)(
+                start_date=start_date, end_date=end_date)
+        else:
+            # 月度/季度指标：全量获取
+            df = call_with_timeout(ak_func, timeout=30)()
+
+        if df is None or df.empty:
+            logger.info(f"->{indicator_code} 无需导入")
+            return 0
+
+        # 根据 col_pattern 清洗 DataFrame 列结构，统一为 ORM 字段名
+        if col_pattern == 'A':
+            # 模式A：['商品','日期','今值','预测值','前值']
+            df = df.rename(columns={
+                '日期': 'report_date', '今值': 'value',
+                '预测值': 'value_expected', '前值': 'value_prev',
+            })
+            df['pub_date'] = None
+        elif col_pattern == 'B':
+            # 模式B：['时间','发布日期','现值','前值']
+            df = df.rename(columns={
+                '时间': 'report_date', '发布日期': 'pub_date',
+                '现值': 'value', '前值': 'value_prev',
+            })
+            df['value_expected'] = None
+        elif col_pattern == 'C':
+            # 模式C：bond_zh_us_rate，提取 '日期' 列和 col_name 指定的列
+            col_name = meta.get('col_name')
+            df = df.rename(columns={
+                '日期': 'report_date', col_name: 'value',
+            })
+            df['pub_date'] = None
+            df['value_expected'] = None
+            df['value_prev'] = None
+
+        # 添加元信息列
+        df['indicator_code'] = indicator_code
+        df['indicator_name'] = meta['name']
+        df['category'] = meta['category']
+        df['unit'] = meta['unit']
+        df['frequency'] = meta['frequency']
+
+        # 日期列转换（空值/异常值转为 NaT 后过滤）
+        df['report_date'] = pd.to_datetime(df['report_date'], errors='coerce').dt.date
+        if 'pub_date' in df.columns:
+            df['pub_date'] = pd.to_datetime(df['pub_date'], errors='coerce').dt.date
+
+        # 数值列转换（非数值转为 NaN 后过滤）
+        for col in ['value', 'value_prev', 'value_expected']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # 过滤掉 report_date 或 value 为 NaN 的行
+        df = df[df['report_date'].notna() & df['value'].notna()]
+
+        # 增量过滤：月度/季度指标查询 DB 最大 report_date
+        if col_pattern in ('A', 'B'):
+            with SessionLocal() as db:
+                max_date = (
+                    db.query(func.max(_mdl.report_date))
+                    .filter(_mdl.indicator_code == indicator_code)
+                    .scalar()
+                )
+            if max_date is not None:
+                df = df[df['report_date'] > max_date]
+            else:
+                # 无数据则从 2010-01-01 全量
+                df = df[df['report_date'] >= date(2010, 1, 1)]
+
+        if df.empty:
+            logger.info(f"->{indicator_code} 无需导入")
+            return 0
+
+        # 选择目标列并入库
+        cols = ['indicator_code', 'indicator_name', 'category', 'report_date',
+                'pub_date', 'value', 'value_prev', 'value_expected', 'unit', 'frequency']
+        df = df[[c for c in cols if c in df.columns]]
+        df = df.replace({np.nan: None})
+
+        upsert_df_to_db(df, _mdl.__table__.name, _engine, _mdl.unique_keys)
+        count = len(df)
+        logger.info(f"->{indicator_code} 成功：{count}")
+        return count
+    except Exception as e:
+        logger.error(f"->{indicator_code} 失败：{str(e)}")
+        return -1
+
+
+def upsert_all_economic_indicators_sql():
+    """遍历 Config.ECONOMIC_INDICATORS 全量同步所有经济指标。
+
+    单指标失败不中断（try/except 记录 -1），
+    返回 {indicator_code: count, ...} 结果字典。
+    """
+    steps = {}
+    logger.info("全量同步美国宏观经济指标")
+    for indicator_code in dbsCfg.ECONOMIC_INDICATORS:
+        try:
+            steps[indicator_code] = upsert_economic_indicator_sql(indicator_code)
+        except Exception as e:
+            logger.error(f"->{indicator_code} 失败：{str(e)}")
+            steps[indicator_code] = -1
+    return steps

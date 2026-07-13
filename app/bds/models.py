@@ -399,3 +399,40 @@ class DailyValuation(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.symbol}-{self.trade_date}"
+
+
+class EconomicIndicator(Base, BaseModel):
+    """美国宏观经济指标模型（对应表 bds_economic_indicator）。
+
+    存储 akshare 采集的美国核心宏观经济指标（利率/通胀/就业/增长/制造业/消费/收益率），
+    按 indicator_code + report_date 联合唯一去重。
+    """
+
+    __tablename__ = "bds_economic_indicator"
+
+    # ---- 元数据字段 ----
+    indicator_code: Mapped[str] = mapped_column(String(64), nullable=False, comment="指标代码")
+    indicator_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="指标名称")
+    category: Mapped[str] = mapped_column(String(32), nullable=False, comment="类别")
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, comment="报告日期")
+    pub_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="发布日期")
+    # ---- 数值字段 ----
+    value: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False, comment="数值")
+    value_prev: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="前值")
+    value_expected: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="预期值")
+    # ---- 单位与频率 ----
+    unit: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, comment="单位")
+    frequency: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="频率")
+
+    # 联合唯一约束 + 复合索引
+    __table_args__ = (
+        UniqueConstraint("indicator_code", "report_date", name="uk_bds_economic_indicator"),
+        Index("ix_economic_indicator_code_date", "indicator_code", "report_date"),
+        Index("ix_economic_indicator_category_date", "category", "report_date"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["indicator_code", "report_date"]
+
+    def __str__(self) -> str:
+        return f"{self.indicator_code}-{self.report_date}"

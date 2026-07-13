@@ -293,3 +293,27 @@ class DailyValuationOut(BaseModel):
     dy_lfy: Optional[Decimal] = Field(default=None, description="股息率(上一财年LFY)")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
+
+
+class EconomicIndicatorOut(BaseModel):
+    """美国宏观经济指标响应 Schema（对应 bds.EconomicIndicator 模型）。
+
+    每个字段的 description 与 ORM 模型的 comment 保持一致，
+    以便 OpenAPI 文档与前端表头统一。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    indicator_code: str = Field(description="指标代码")
+    indicator_name: str = Field(description="指标名称")
+    category: str = Field(description="类别")
+    report_date: date = Field(description="报告日期")
+    pub_date: Optional[date] = Field(default=None, description="发布日期")
+    value: Optional[Decimal] = Field(default=None, description="数值")
+    value_prev: Optional[Decimal] = Field(default=None, description="前值")
+    value_expected: Optional[Decimal] = Field(default=None, description="预期值")
+    unit: Optional[str] = Field(default=None, description="单位")
+    frequency: Optional[str] = Field(default=None, description="频率")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")
