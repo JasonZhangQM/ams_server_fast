@@ -202,7 +202,6 @@ def sync_index_history():
 def list_index_histories(
     symbol: Optional[List[str]] = Query(None, description="代码多选精确匹配"),
     start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
-    end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -216,8 +215,6 @@ def list_index_histories(
         query = query.filter(IndexHistory.symbol.in_(symbol))
     if start_date:
         query = query.filter(IndexHistory.trade_date >= start_date)
-    if end_date:
-        query = query.filter(IndexHistory.trade_date <= end_date)
     total = query.count()
     items = query.order_by(IndexHistory.trade_date.desc()).offset(offset).limit(limit).all()
     # 附加 sec_name 字段（从 Config.INDEX_CODE 查找，不存数据库）
@@ -561,7 +558,6 @@ def sync_daily_valuation(symbol: str = Query(..., description="股票代码，�
 def list_daily_valuations(
     symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
     start_date: Optional[date] = Query(default=None, description="交易日期起始日"),
-    end_date: Optional[date] = Query(default=None, description="交易日期结束日"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -577,9 +573,6 @@ def list_daily_valuations(
     # 交易日期起始日过滤
     if start_date:
         query = query.filter(DailyValuation.trade_date >= start_date)
-    # 交易日期结束日过滤
-    if end_date:
-        query = query.filter(DailyValuation.trade_date <= end_date)
     total = query.count()
     items = (
         query.order_by(DailyValuation.trade_date.desc())
