@@ -30,7 +30,7 @@ from server_fast.app.bds.schemas import (
     SymbolInfoOut,
     TradeDateOut,
 )
-from server_fast.app.bds.service import (
+from server_fast.app.bds.services import (
     insert_trade_date_em_sql,
     upsert_all_economic_indicators_sql,
     upsert_daily_valuation_sql,

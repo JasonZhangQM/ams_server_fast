@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     GM_TOKEN: str
     FOLDER_OUT: Path
     API_V1_PREFIX: str = "/api/v1"
+    # FRED API（圣路易斯联邦储备银行经济数据）
+    FRED_API_KEY: str = ""
+    FRED_API_BASE: str = "https://api.stlouisfed.org/fred"
 
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"

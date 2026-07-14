@@ -318,3 +318,66 @@ def call_with_timeout(func, timeout=10):
                     f"调用 {func.__name__} 超时（{timeout}秒），"
                     f"请检查 gm 终端服务是否启动")
     return wrapper
+
+
+def fetch_json_with_timeout(url: str, params: dict, timeout: int = 30,
+                            max_retries: int = 5) -> dict:
+    """带超时保护和自动重试的 HTTP GET 请求，返回解析后的 JSON 字典。
+
+    使用 httpx 同步客户端，通过 ThreadPoolExecutor 实现超时保护，
+    与 call_with_timeout 思路一致，但专为带 url+params 的 HTTP 请求设计。
+    针对网络抖动（如 FRED API 偶发 SSL EOF）采用指数退避重试。
+
+    :param url: 请求 URL
+    :param params: 查询参数字典
+    :param timeout: 单次请求超时秒数，默认 30 秒
+    :param max_retries: 最大重试次数，默认 3 次（含首次共 3 次）
+    :return: 解析后的 JSON 字典
+    :raises TimeoutError: 请求超时（重试后仍失败）
+    :raises RuntimeError: HTTP 错误或 JSON 解析失败（重试后仍失败）
+    """
+    import httpx
+    import ssl
+    import time
+
+    # 仅对可恢复的网络层错误重试；HTTP 4xx/5xx 属业务错误不重试
+    _RETRYABLE_EXC = (httpx.TransportError, httpx.NetworkError,
+                      ConnectionError, TimeoutError, OSError)
+
+    # 构建 SSL 上下文：禁用 TLS 1.3，兼容部分服务器（如 FRED）的 TLS 重协商
+    # 某些服务器在 TLS 1.3 握手时与 OpenSSL 存在兼容问题，降级到 TLS 1.2 可解决
+    _ssl_ctx = ssl.create_default_context()
+    _ssl_ctx.options |= ssl.OP_NO_TLSv1_3
+    _ssl_ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+
+    def _do_request() -> dict:
+        # verify 传入自定义 SSL 上下文；timeout 连接+读取各 30s
+        with httpx.Client(timeout=timeout, verify=_ssl_ctx) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            return resp.json()
+
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_do_request)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                last_exc = TimeoutError(f"HTTP 请求超时（{timeout}秒）：{url}")
+            except httpx.HTTPStatusError as e:
+                # HTTP 状态码错误不重试（业务层问题）
+                raise RuntimeError(
+                    f"HTTP 错误 {e.response.status_code}：{e.response.text[:200]}")
+            except _RETRYABLE_EXC as e:
+                last_exc = RuntimeError(f"请求失败：{url}，原因：{str(e)}")
+            except Exception as e:
+                # 其他异常（含 SSL EOF）按可重试处理
+                last_exc = RuntimeError(f"请求失败：{url}，原因：{str(e)}")
+
+        # 未成功且仍有重试次数：指数退避（1s, 2s, 4s...）
+        if attempt < max_retries:
+            backoff = 2 ** (attempt - 1)
+            time.sleep(backoff)
+
+    raise last_exc
