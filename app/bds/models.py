@@ -13,7 +13,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Date, Index, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import Date, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
@@ -418,9 +418,15 @@ class EconomicIndicator(Base, BaseModel):
     report_date: Mapped[date] = mapped_column(Date, nullable=False, comment="报告日期")
     pub_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="发布日期")
     # ---- 数值字段 ----
-    value: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False, comment="数值")
+    # value 允许为空：wscn 未发布数据（actual 为空）也入库，发布后下次同步覆盖
+    value: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="数值")
     value_prev: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="前值")
     value_expected: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="预期值")
+    # ---- wscn 扩展字段 ----
+    importance: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="重要性")
+    revised: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="修正值")
+    title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True, comment="标题")
+    foresight: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="前瞻")
     # ---- 单位与频率 ----
     unit: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, comment="单位")
     frequency: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="频率")

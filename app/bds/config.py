@@ -42,4 +42,32 @@ class Config:
         'YIELD_2Y':           {'name': '2年期美债收益率', 'country': '美国', 'category': '收益率',  'unit': '%',   'frequency': 'daily',     'fred_series_id': 'DGS2',     'fred_units': 'lin', 'akshare_func': 'bond_zh_us_rate',                  'col_pattern': 'C', 'col_name': '美国国债收益率2年'},
         'YIELD_10Y':          {'name': '10年期美债收益率','country': '美国', 'category': '收益率',  'unit': '%',   'frequency': 'daily',     'fred_series_id': 'DGS10',    'fred_units': 'lin', 'akshare_func': 'bond_zh_us_rate',                  'col_pattern': 'C', 'col_name': '美国国债收益率10年'},
         'YIELD_SPREAD_2Y10Y': {'name': '2Y-10Y利差',      'country': '美国', 'category': '收益率',  'unit': '%',   'frequency': 'daily',     'fred_series_id': 'T10Y2Y',   'fred_units': 'lin', 'akshare_func': 'bond_zh_us_rate',                  'col_pattern': 'C', 'col_name': '美国国债收益率10年-2年'},
+        # 中国宏观指标：FRED 不提供中国数据，仅通过 wscn 日历数据源同步
+        'CN_REAL_ESTATE_INVEST': {'name': '房地产开发投资同比', 'country': '中国', 'category': '投资', 'unit': '%', 'frequency': 'monthly'},
+        'CN_M1_YOY':           {'name': 'M1货币供应同比',   'country': '中国', 'category': '货币',   'unit': '%',   'frequency': 'monthly'},
+        'CN_M2_YOY':           {'name': 'M2货币供应同比',   'country': '中国', 'category': '货币',   'unit': '%',   'frequency': 'monthly'},
+        # 加拿大宏观指标：FRED 不提供加拿大数据，仅通过 wscn 日历数据源同步
+        'CA_POLICY_RATE':      {'name': '加拿大央行政策利率', 'country': '加拿大', 'category': '利率', 'unit': '%', 'frequency': 'per_boc'},
+    }
+
+    # 华尔街见闻日历数据源：wscn_ticker -> indicator_code 映射
+    # 数据源接口：GET https://api-one-wscn.awtmt.com/apiv1/finance/macrodatas?start={ts}&end={ts}
+    # 覆盖 11 个美国指标（3 个收益率指标 wscn 无对应，仍由 FRED 提供）+ 3 个中国指标 + 1 个加拿大指标
+    # importance/revised/forecast/public_date 由 wscn 接口返回，补充 FRED 缺失字段
+    WSCN_INDICATOR_MAP = {
+        'US191228': 'FED_FUNDS_RATE',      # FOMC利率决策
+        'US111017': 'CPI_YOY',             # CPI同比
+        'US111044': 'CPI_MOM',             # CPI环比
+        'US111045': 'CORE_CPI_MOM',        # 核心CPI环比
+        'US111034': 'CORE_PCE_YOY',        # 核心PCE物价指数同比
+        'US121058': 'NONFARM_PAYROLL',     # 非农就业人口变动
+        'US121050': 'UNEMPLOYMENT_RATE',   # 失业率
+        'US101000': 'GDP_QOQ',             # 实际GDP年化季环比
+        'US151132': 'ISM_MFG_PMI',         # ISM制造业指数
+        'US151146': 'CONSUMER_CONFIDENCE', # 谘商会消费者信心指数
+        'US171206': 'RETAIL_SALES_MOM',    # 零售销售环比
+        'CN161376': 'CN_REAL_ESTATE_INVEST', # 全国房地产开发投资
+        'CN191441': 'CN_M1_YOY',           # M1货币供应同比
+        'CN191442': 'CN_M2_YOY',           # M2货币供应同比
+        'CA193210': 'CA_POLICY_RATE',      # 加拿大央行政策利率
     }

@@ -50,13 +50,18 @@ def upsert_economic_indicator_sql(indicator_code):
     logger.info(f"经济指标 {indicator_code}（{meta['name']}）获取并导入")
     try:
         fred_series_id = meta.get('fred_series_id')
+        akshare_func = meta.get('akshare_func')
 
         if fred_series_id:
             # ===== FRED API 路径 =====
             df = _fetch_economic_indicator_from_fred(indicator_code, meta)
-        else:
+        elif akshare_func:
             # ===== akshare fallback 路径 =====
             df = _fetch_economic_indicator_from_akshare(indicator_code, meta)
+        else:
+            # 既无 FRED 也无 akshare 配置（如中国指标），仅通过 wscn 同步
+            logger.info(f"->{indicator_code} 无 FRED/akshare 配置，请通过 wscn 同步")
+            return 0
 
         if df is None or df.empty:
             logger.info(f"->{indicator_code} 无需导入")
@@ -261,3 +266,195 @@ def upsert_all_economic_indicators_sql():
             logger.error(f"->{indicator_code} 失败：{str(e)}")
             steps[indicator_code] = -1
     return steps
+
+
+# 华尔街见闻日历接口基础 URL
+_WSCN_API_BASE = "https://api-one-wscn.awtmt.com/apiv1/finance/macrodatas"
+
+
+def _fetch_wscn_batch(start_date: date, end_date: date) -> list:
+    """拉取 wscn 日历接口单批数据（自然月跨度，≤31 天安全）。
+
+    :param start_date: 批次起始日期（含）
+    :param end_date: 批次结束日期（含）
+    :return: items 列表，接口异常时返回空列表
+    """
+    import time
+
+    # 系统时区 UTC+8 与 wscn 一致，直接用 mktime 转换
+    start_ts = int(time.mktime(start_date.timetuple()))
+    end_ts = int(time.mktime(end_date.timetuple())) + 86399  # 当天 23:59:59
+
+    logger.info(f"->wscn 拉取 {start_date} ~ {end_date}")
+    try:
+        data = fetch_json_with_timeout(
+            _WSCN_API_BASE,
+            {"start": start_ts, "end": end_ts},
+            timeout=30,
+        )
+        return data.get("data", {}).get("items", [])
+    except Exception as e:
+        logger.warning(f"->wscn 拉取失败 {start_date}~{end_date}：{str(e)}")
+        return []
+
+
+def upsert_economic_indicator_from_wscn_sql():
+    """通过华尔街见闻日历接口同步经济指标数据并 upsert 入库。
+
+    数据源：GET https://api-one-wscn.awtmt.com/apiv1/finance/macrodatas
+    - 无需鉴权，start/end 为 Unix 时间戳（秒），最大跨度 31 天
+    - 接口不支持服务端过滤（country/wscn_ticker 参数均被忽略），需客户端过滤
+
+    增量策略：以 pub_date 为基准，按指标独立计算已发布记录的 max(pub_date)+1 天为起点
+    （无数据从 2015-01-01），全局起点取各指标起点最小值，按自然月分批调用 API，
+    今日为终点。客户端按指标级 pub_date 过滤，避免已入库指标重复 upsert。
+    未发布记录（value 为空）不参与 max 计算，确保下次拉取时能覆盖为已发布数据。
+
+    合并存储：wscn 补充 FRED 缺失的 forecast/importance/revised/pub_date 字段，
+    同 (indicator_code, report_date) 记录通过 upsert 覆盖更新。
+    未发布数据（actual 为空）也入库，value 置空，下次拉取已发布时 upsert 覆盖。
+
+    返回值：插入/更新条数（int），异常返回 -1。
+    """
+    _engine = settings.DB_ENGINE
+    _mdl = EconomicIndicator
+    wscn_map = dbsCfg.WSCN_INDICATOR_MAP  # wscn_ticker -> indicator_code
+
+    logger.info("华尔街见闻日历数据源同步经济指标")
+    try:
+        # 1. 按指标独立计算 max(pub_date)，全局起点取各指标起点最小值
+        #    避免跨指标 max 导致落后指标漏拉（如 A 已最新但 B 无数据时 B 不会被跳过）
+        #    仅以已发布记录（value IS NOT NULL）为基准，未发布记录不参与 max 计算，
+        #    确保未发布数据下次仍会被拉取并覆盖为已发布数据
+        mapped_codes = list(set(wscn_map.values()))
+        with SessionLocal() as db:
+            rows_db = (
+                db.query(_mdl.indicator_code, func.max(_mdl.pub_date))
+                .filter(_mdl.indicator_code.in_(mapped_codes))
+                .filter(_mdl.value.isnot(None))
+                .group_by(_mdl.indicator_code)
+                .all()
+            )
+        # 每个指标的 max(pub_date) 字典
+        code_to_max_pub: dict = {code: max_pub for code, max_pub in rows_db if max_pub is not None}
+
+        # 各指标起点 = max(pub_date)+1 或 2015-01-01，全局起点取最小值
+        code_starts: dict = {}
+        for code in mapped_codes:
+            max_pub = code_to_max_pub.get(code)
+            code_starts[code] = (max_pub + timedelta(days=1)) if max_pub else date(2015, 1, 1)
+        start_date = min(code_starts.values()) if code_starts else date(2015, 1, 1)
+
+        end_date = date.today()
+        if start_date > end_date:
+            logger.info("->wscn 无需导入（已是最新）")
+            return 0
+
+        logger.info(f"->wscn 增量范围：{start_date} ~ {end_date}")
+        logger.info(f"->wscn 各指标起点：{code_starts}")
+
+        # 2. 按自然月分批拉取（API 最大跨度 31 天，自然月 28-31 天均安全）
+        all_items: list = []
+        current = start_date
+        while current <= end_date:
+            # 计算当月最后一天
+            if current.month == 12:
+                next_first = date(current.year + 1, 1, 1)
+            else:
+                next_first = date(current.year, current.month + 1, 1)
+            batch_end = min(next_first - timedelta(days=1), end_date)
+
+            all_items.extend(_fetch_wscn_batch(current, batch_end))
+            current = batch_end + timedelta(days=1)
+
+        if not all_items:
+            logger.info("->wscn 无需导入")
+            return 0
+
+        # 3. 客户端过滤 + 字段映射
+        # 过滤条件：wscn_ticker 在映射表中 + calendar_type==FD
+        #          + pub_date > 该指标已入库 max(pub_date)（按指标独立增量，避免重复 upsert）
+        # 注意：actual 为空的未发布数据也入库（value 置 None），下次拉取已发布时 upsert 覆盖
+        rows = []
+        for item in all_items:
+            wscn_ticker = item.get("wscn_ticker", "")
+            if wscn_ticker not in wscn_map:
+                continue
+            if item.get("calendar_type") != "FD":
+                continue
+
+            indicator_code = wscn_map[wscn_ticker]
+            meta = dbsCfg.ECONOMIC_INDICATORS.get(indicator_code, {})
+
+            # pub_date: Unix 时间戳 -> date
+            pub_ts = item.get("public_date")
+            pub_date = None
+            if pub_ts:
+                try:
+                    pub_date = datetime.fromtimestamp(int(pub_ts)).date()
+                except (ValueError, TypeError):
+                    pass
+
+            # 按指标独立增量：跳过 pub_date <= 该指标已入库 max(pub_date) 的旧记录
+            # max(pub_date) 仅统计已发布记录（value IS NOT NULL），
+            # 因此未发布记录不会被跳过，确保下次拉取时能覆盖为已发布数据
+            max_pub_for_code = code_to_max_pub.get(indicator_code)
+            if max_pub_for_code is not None:
+                if pub_date is None or pub_date <= max_pub_for_code:
+                    continue
+
+            rows.append({
+                "indicator_code": indicator_code,
+                "indicator_name": meta.get("name", ""),
+                "category": meta.get("category", ""),
+                "country": meta.get("country", "美国"),
+                "report_date": item.get("observation_date", ""),
+                "pub_date": pub_date,
+                "value": item.get("actual", ""),
+                "value_prev": item.get("previous", ""),
+                "value_expected": item.get("forecast", ""),
+                "importance": item.get("importance"),
+                "revised": item.get("revised", ""),
+                "title": item.get("title", ""),
+                "foresight": item.get("foresight", ""),
+                "unit": meta.get("unit"),
+                "frequency": meta.get("frequency"),
+            })
+
+        if not rows:
+            logger.info("->wscn 无需导入（过滤后无数据）")
+            return 0
+
+        # 4. DataFrame 清洗
+        df = pd.DataFrame(rows)
+        df["report_date"] = pd.to_datetime(df["report_date"], errors="coerce").dt.date
+        # 数值列：空字符串/非数字 -> NaN
+        for col in ["value", "value_prev", "value_expected", "revised"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["importance"] = pd.to_numeric(df["importance"], errors="coerce")
+
+        # 过滤无效行：仅要求 report_date 有效，value 允许为空（未发布数据）
+        df = df[df["report_date"].notna()]
+        if df.empty:
+            logger.info("->wscn 无需导入（清洗后无数据）")
+            return 0
+
+        # 5. 去重：同 (indicator_code, report_date) 保留 pub_date 最新的一条
+        df = df.sort_values("pub_date", ascending=False, na_position="last").drop_duplicates(
+            subset=["indicator_code", "report_date"], keep="first"
+        )
+
+        # 6. 入库
+        cols = ['indicator_code', 'indicator_name', 'category', 'country', 'report_date',
+                'pub_date', 'value', 'value_prev', 'value_expected', 'importance', 'revised',
+                'title', 'foresight', 'unit', 'frequency']
+        df = df[cols]
+        df = df.replace({np.nan: None})
+
+        upsert_df_to_db(df, _mdl.__table__.name, _engine, _mdl.unique_keys)
+        count = len(df)
+        logger.info(f"->wscn 成功：{count}")
+        return count
+    except Exception as e:
+        logger.error(f"->wscn 失败：{str(e)}")
+        return -1

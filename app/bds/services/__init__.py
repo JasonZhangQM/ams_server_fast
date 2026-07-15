@@ -17,6 +17,7 @@ from server_fast.app.bds.services.data_sync import (
 )
 from server_fast.app.bds.services.economic_indicator import (
     upsert_all_economic_indicators_sql,
+    upsert_economic_indicator_from_wscn_sql,
     upsert_economic_indicator_sql,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     'upsert_index_history_sql',
     'upsert_symbol_info_excel_sql',
     'upsert_all_economic_indicators_sql',
+    'upsert_economic_indicator_from_wscn_sql',
     'upsert_economic_indicator_sql',
 ]

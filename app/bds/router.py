@@ -34,6 +34,7 @@ from server_fast.app.bds.services import (
     insert_trade_date_em_sql,
     upsert_all_economic_indicators_sql,
     upsert_daily_valuation_sql,
+    upsert_economic_indicator_from_wscn_sql,
     upsert_economic_indicator_sql,
     upsert_finance_deriv_sql,
     upsert_fund_balance_sql,
@@ -714,3 +715,24 @@ def sync_economic_indicators_all():
         return {"status": "success", "message": "经济指标全量同步完成", "results": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sync/economic-indicator-wscn")
+def sync_economic_indicator_wscn():
+    """通过华尔街见闻日历接口同步经济指标数据。
+
+    数据源：https://api-one-wscn.awtmt.com/apiv1/finance/macrodatas
+    覆盖 Config.WSCN_INDICATOR_MAP 中 11 个可映射的美国指标，
+    补充 FRED 缺失的 forecast/importance/revised/pub_date 字段。
+
+    返回值说明：
+    - status: success/no_data/error
+    - message: 同步结果描述信息
+    - count: 插入/更新条数（-1 表示失败）
+    """
+    count = upsert_economic_indicator_from_wscn_sql()
+    if count == -1:
+        return {"status": "error", "message": "wscn 同步失败，请查看后端日志", "count": count}
+    if count == 0:
+        return {"status": "no_data", "message": "wscn 无新数据可导入", "count": count}
+    return {"status": "success", "message": f"wscn 同步完成，更新 {count} 条", "count": count}
