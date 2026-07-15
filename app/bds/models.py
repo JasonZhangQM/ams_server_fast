@@ -402,9 +402,9 @@ class DailyValuation(Base, BaseModel):
 
 
 class EconomicIndicator(Base, BaseModel):
-    """美国宏观经济指标模型（对应表 bds_economic_indicator）。
+    """宏观经济指标模型（对应表 bds_economic_indicator）。
 
-    存储 akshare 采集的美国核心宏观经济指标（利率/通胀/就业/增长/制造业/消费/收益率），
+    存储 akshare/FRED 采集的各国核心宏观经济指标（利率/通胀/就业/增长/制造业/消费/收益率），
     按 indicator_code + report_date 联合唯一去重。
     """
 
@@ -414,6 +414,7 @@ class EconomicIndicator(Base, BaseModel):
     indicator_code: Mapped[str] = mapped_column(String(64), nullable=False, comment="指标代码")
     indicator_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="指标名称")
     category: Mapped[str] = mapped_column(String(32), nullable=False, comment="类别")
+    country: Mapped[str] = mapped_column(String(32), nullable=False, server_default="美国", comment="国别")
     report_date: Mapped[date] = mapped_column(Date, nullable=False, comment="报告日期")
     pub_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="发布日期")
     # ---- 数值字段 ----

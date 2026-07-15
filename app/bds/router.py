@@ -585,13 +585,14 @@ def list_daily_valuations(
 def list_economic_indicators(
     indicator_code: Optional[str] = Query(default=None, description="指标代码精确匹配"),
     category: Optional[List[str]] = Query(default=None, description="类别多选 IN 匹配"),
+    country: Optional[List[str]] = Query(default=None, description="国别多选 IN 匹配"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
     end_date: Optional[date] = Query(default=None, description="报告日期结束日"),
     limit: int = Query(default=100, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询经济指标数据，支持指标代码精确匹配、类别多选和报告日期范围筛选。
+    """查询经济指标数据，支持指标代码精确匹配、类别/国别多选和报告日期范围筛选。
 
     排序规则：report_date 降序，同 report_date 按 indicator_code 升序。
     """
@@ -602,6 +603,9 @@ def list_economic_indicators(
     # category 多选 IN 过滤
     if category:
         query = query.filter(EconomicIndicator.category.in_(category))
+    # country 多选 IN 过滤
+    if country:
+        query = query.filter(EconomicIndicator.country.in_(country))
     # 报告日期范围过滤
     if start_date:
         query = query.filter(EconomicIndicator.report_date >= start_date)
@@ -652,7 +656,7 @@ def list_economic_indicators_latest(db: Session = Depends(get_db)):
 def list_economic_indicator_codes():
     """返回经济指标配置列表（数据源 Config.ECONOMIC_INDICATORS，无数据库查询）。
 
-    每项包含 indicator_code、indicator_name、category、unit、frequency，
+    每项包含 indicator_code、indicator_name、category、country、unit、frequency，
     供前端下拉选项使用。
     """
     indicators = [
@@ -660,6 +664,7 @@ def list_economic_indicator_codes():
             "indicator_code": code,
             "indicator_name": info["name"],
             "category": info["category"],
+            "country": info["country"],
             "unit": info["unit"],
             "frequency": info["frequency"],
         }

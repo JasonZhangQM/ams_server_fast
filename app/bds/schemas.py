@@ -296,7 +296,7 @@ class DailyValuationOut(BaseModel):
 
 
 class EconomicIndicatorOut(BaseModel):
-    """美国宏观经济指标响应 Schema（对应 bds.EconomicIndicator 模型）。
+    """宏观经济指标响应 Schema（对应 bds.EconomicIndicator 模型）。
 
     每个字段的 description 与 ORM 模型的 comment 保持一致，
     以便 OpenAPI 文档与前端表头统一。
@@ -308,6 +308,7 @@ class EconomicIndicatorOut(BaseModel):
     indicator_code: str = Field(description="指标代码")
     indicator_name: str = Field(description="指标名称")
     category: str = Field(description="类别")
+    country: str = Field(description="国别")
     report_date: date = Field(description="报告日期")
     pub_date: Optional[date] = Field(default=None, description="发布日期")
     value: Optional[Decimal] = Field(default=None, description="数值")

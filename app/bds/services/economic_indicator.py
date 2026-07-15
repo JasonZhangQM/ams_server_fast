@@ -28,7 +28,7 @@ def upsert_economic_indicator_sql(indicator_code):
     数据源优先级：
     1. FRED API（圣路易斯联储聚合 Fed/BLS/BEA/Census/ISM/CB 等原始源）
        - 配置 fred_series_id 时使用 FRED
-       - fred_units: lin=原始值 pc1=月环比 pct pca=同比 pct
+       - fred_units: lin=原始值 pch=环比 pct pc1=同比 pct pca=复合年化 pct
        - FRED 不提供预期值（value_expected 置空），前值通过 shift(1) 计算
     2. akshare（fallback）：fred_series_id 缺失时回退到 akshare 三种列模式（A/B/C）
 
@@ -66,6 +66,7 @@ def upsert_economic_indicator_sql(indicator_code):
         df['indicator_code'] = indicator_code
         df['indicator_name'] = meta['name']
         df['category'] = meta['category']
+        df['country'] = meta['country']
         df['unit'] = meta['unit']
         df['frequency'] = meta['frequency']
 
@@ -105,7 +106,7 @@ def upsert_economic_indicator_sql(indicator_code):
             return 0
 
         # 选择目标列并入库
-        cols = ['indicator_code', 'indicator_name', 'category', 'report_date',
+        cols = ['indicator_code', 'indicator_name', 'category', 'country', 'report_date',
                 'pub_date', 'value', 'value_prev', 'value_expected', 'unit', 'frequency']
         df = df[[c for c in cols if c in df.columns]]
         df = df.replace({np.nan: None})
@@ -161,7 +162,7 @@ def _fetch_economic_indicator_from_fred(indicator_code, meta):
         'limit': 100000,  # FRED 单次最大 100000 条，足够覆盖 16 年月度数据
     }
     if units and units != 'lin':
-        # lin 为原始值，无需传 units 参数；pc1/pca 为 FRED 内置转换
+        # lin 为原始值，无需传 units 参数；pch/pc1/pca 为 FRED 内置转换
         params['units'] = units
 
     url = f"{settings.FRED_API_BASE}/series/observations"
@@ -187,7 +188,7 @@ def _fetch_economic_indicator_from_fred(indicator_code, meta):
     # pub_date：FRED 不提供发布日期，置空
     df['pub_date'] = None
 
-    # 若使用 pc1/pca 转换，第一条数据的 value_prev 为 NaN（无前序数据），属正常
+    # 若使用 pch/pc1/pca 转换，第一条数据的 value_prev 为 NaN（无前序数据），属正常
     # 对于月度指标的增量场景，shift(1) 会取到上次同步的最后一期作为前值，
     # 但本次只取增量部分，shift(1) 在增量数据内部计算前值。
     # 完整前值需查询 DB 最后一期——此处简化处理，依赖 upsert 覆盖。
