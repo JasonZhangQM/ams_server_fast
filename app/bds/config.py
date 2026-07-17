@@ -86,7 +86,7 @@ class Config:
         'CN_INDUSTRIAL_VALUE_ADDED_CUM_YOY':{'name': '规模以上工业增加值累计同比', 'country': '中国', 'category': '盈利基本面',   'unit': '%',    'frequency': 'monthly'},
         'CN_INDUSTRIAL_PROFIT_CUM_YOY':     {'name': '规模以上工业企业利润累计同比','country': '中国', 'category': '盈利基本面',   'unit': '%',    'frequency': 'monthly'},
         # ---- 流动性与信用 ----
-        'CN_M0_YOY':           {'name': 'M0货币供应同比',          'country': '中国', 'category': '流动性与信用', 'unit': '%',    'frequency': 'monthly'},
+        # 'CN_M0_YOY':           {'name': 'M0货币供应同比',          'country': '中国', 'category': '流动性与信用', 'unit': '%',    'frequency': 'monthly'},
         'CN_M1_YOY':           {'name': 'M1货币供应同比',          'country': '中国', 'category': '流动性与信用', 'unit': '%',    'frequency': 'monthly'},
         'CN_M2_YOY':           {'name': 'M2货币供应同比',          'country': '中国', 'category': '流动性与信用', 'unit': '%',    'frequency': 'monthly'},
         # 'CN_NEW_RMB_LOANS':    {'name': '新增人民币贷款',          'country': '中国', 'category': '流动性与信用', 'unit': '亿元', 'frequency': 'monthly'},
@@ -177,7 +177,7 @@ class Config:
         'CN141334': 'CN_INDUSTRIAL_VALUE_ADDED_CUM_YOY',# 规模以上工业增加值累计同比
         'CN191484': 'CN_INDUSTRIAL_PROFIT_CUM_YOY',     # 规模以上工业企业利润累计同比
         # 中国 - 流动性与信用
-        'CN191440': 'CN_M0_YOY',            # M0货币供应同比
+        # 'CN191440': 'CN_M0_YOY',            # M0货币供应同比
         'CN191441': 'CN_M1_YOY',            # M1货币供应同比
         'CN191442': 'CN_M2_YOY',            # M2货币供应同比
         'CN131335': 'CN_NEW_RMB_LOANS_CUM', # 新增人民币贷款累计
