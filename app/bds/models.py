@@ -413,6 +413,7 @@ class EconomicIndicator(Base, BaseModel):
     # ---- 元数据字段 ----
     indicator_code: Mapped[str] = mapped_column(String(64), nullable=False, comment="指标代码")
     indicator_name: Mapped[str] = mapped_column(String(128), nullable=False, comment="指标名称")
+    indicator_short_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="指标简称")
     category: Mapped[str] = mapped_column(String(32), nullable=False, comment="类别")
     country: Mapped[str] = mapped_column(String(32), nullable=False, server_default="美国", comment="国别")
     report_date: Mapped[date] = mapped_column(Date, nullable=False, comment="报告日期")

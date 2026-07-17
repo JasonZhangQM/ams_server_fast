@@ -70,6 +70,7 @@ def upsert_economic_indicator_sql(indicator_code):
         # 添加元信息列
         df['indicator_code'] = indicator_code
         df['indicator_name'] = meta['name']
+        df['indicator_short_name'] = meta['short_name']
         df['category'] = meta['category']
         df['country'] = meta['country']
         df['unit'] = meta['unit']
@@ -111,7 +112,7 @@ def upsert_economic_indicator_sql(indicator_code):
             return 0
 
         # 选择目标列并入库
-        cols = ['indicator_code', 'indicator_name', 'category', 'country', 'report_date',
+        cols = ['indicator_code', 'indicator_name', 'indicator_short_name', 'category', 'country', 'report_date',
                 'pub_date', 'value', 'value_prev', 'value_expected', 'unit', 'frequency']
         df = df[[c for c in cols if c in df.columns]]
         df = df.replace({np.nan: None})
@@ -406,6 +407,7 @@ def upsert_economic_indicator_from_wscn_sql():
             rows.append({
                 "indicator_code": indicator_code,
                 "indicator_name": meta.get("name", ""),
+                "indicator_short_name": meta.get("short_name", ""),
                 "category": meta.get("category", ""),
                 "country": meta.get("country", "美国"),
                 "report_date": item.get("observation_date", ""),
@@ -445,7 +447,7 @@ def upsert_economic_indicator_from_wscn_sql():
         )
 
         # 6. 入库
-        cols = ['indicator_code', 'indicator_name', 'category', 'country', 'report_date',
+        cols = ['indicator_code', 'indicator_name', 'indicator_short_name', 'category', 'country', 'report_date',
                 'pub_date', 'value', 'value_prev', 'value_expected', 'importance', 'revised',
                 'title', 'foresight', 'unit', 'frequency']
         df = df[cols]

@@ -15,7 +15,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 
 from server_fast.app.bds.models import DailyValuation, EconomicIndicator, FinanceDeriv, FundBalance, FundCashflow, FundIncome, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
 from server_fast.app.bds.schemas import (
@@ -664,6 +664,7 @@ def list_economic_indicator_codes():
         {
             "indicator_code": code,
             "indicator_name": info["name"],
+            "indicator_short_name": info["short_name"],
             "category": info["category"],
             "country": info["country"],
             "unit": info["unit"],
@@ -672,6 +673,56 @@ def list_economic_indicator_codes():
         for code, info in Config.ECONOMIC_INDICATORS.items()
     ]
     return indicators
+
+
+@router.post("/migrate/indicator-short-name")
+def migrate_indicator_short_name(db: Session = Depends(get_db)):
+    """一次性迁移：为 bds_economic_indicator 表添加 indicator_short_name 列并回填历史数据。
+
+    步骤：
+    1. 通过 information_schema 检查列是否存在，不存在则 ALTER TABLE 添加
+    2. 按 indicator_code 关联 Config.ECONOMIC_INDICATORS 批量 UPDATE 简称
+    3. 返回更新记录数
+
+    幂等：重复调用不报错，列已存在则跳过 ALTER，重新 UPDATE 简称
+    （用于 Config 简称变更后重新回填历史数据）。
+    """
+    table_name = EconomicIndicator.__table__.name
+
+    # 1. 检查列是否存在（通过 information_schema，兼容 MySQL 8.0+）
+    check_sql = text(
+        "SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() "
+        "AND table_name = :table_name AND column_name = 'indicator_short_name'"
+    )
+    col_exists = db.execute(check_sql, {"table_name": table_name}).scalar()
+
+    if not col_exists:
+        # 列不存在，执行 ALTER TABLE 添加
+        alter_sql = text(
+            f"ALTER TABLE {table_name} "
+            f"ADD COLUMN indicator_short_name VARCHAR(64) NULL COMMENT '指标简称'"
+        )
+        db.execute(alter_sql)
+        db.commit()
+
+    # 2. 按 indicator_code 批量 UPDATE 简称
+    total_updated = 0
+    for code, info in Config.ECONOMIC_INDICATORS.items():
+        short_name = info.get("short_name")
+        if not short_name:
+            continue
+        update_sql = text(
+            f"UPDATE {table_name} "
+            f"SET indicator_short_name = :short_name "
+            f"WHERE indicator_code = :code"
+        )
+        result = db.execute(update_sql, {"short_name": short_name, "code": code})
+        total_updated += result.rowcount
+
+    db.commit()
+
+    return {"status": "success", "updated_count": total_updated}
 
 
 @router.post("/sync/economic-indicator")

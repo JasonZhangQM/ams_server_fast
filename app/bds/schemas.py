@@ -307,6 +307,7 @@ class EconomicIndicatorOut(BaseModel):
     id: int = Field(description="主键")
     indicator_code: str = Field(description="指标代码")
     indicator_name: str = Field(description="指标名称")
+    indicator_short_name: Optional[str] = Field(default=None, description="指标简称")
     category: str = Field(description="类别")
     country: str = Field(description="国别")
     report_date: date = Field(description="报告日期")
