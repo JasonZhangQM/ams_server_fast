@@ -238,7 +238,7 @@ class DiscountMonitorOut(BaseModel):
     symbol: Optional[str] = None                    # 真实合约
     is_main: bool                                   # 主力
     symbol_type: Optional[str] = None               # 合约类别
-    con_name: Optional[str] = None                  # 连续合约名称
+    con_name: Optional[str] = None                  # 连续周期
     symbol_ud: Optional[str] = None                 # 标的代码
     delisted_date: Optional[date] = None            # 到期日
     days_left: Optional[int] = None                 # 剩余天数

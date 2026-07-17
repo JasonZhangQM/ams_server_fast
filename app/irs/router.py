@@ -354,7 +354,7 @@ def list_monitor_option_ts(
 @router.get("/discounts-monitor", response_model=PageResponse[DiscountMonitorOut])
 def list_discounts_monitor(
     symbol_type: Optional[str] = Query(None, description="合约类别精确匹配"),
-    con_name: Optional[str] = Query(None, description="连续合约名称精确匹配"),
+    con_name: Optional[str] = Query(None, description="连续周期精确匹配"),
     is_main: Optional[bool] = Query(None, description="是否主力精确匹配"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),

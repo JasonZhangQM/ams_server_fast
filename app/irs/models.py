@@ -365,7 +365,7 @@ class DiscountMonitor(Base, BaseModel):
         Boolean, nullable=False, default=OPTION_MINOR, comment="主力"
     )
     symbol_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="合约类别")
-    con_name: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="连续合约名称")
+    con_name: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="连续周期")
     symbol_ud: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="标的代码")
     delisted_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="到期日")
 
