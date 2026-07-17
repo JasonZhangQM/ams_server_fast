@@ -92,7 +92,7 @@ def _sync_symbol_underlying():
     service.upsert_model_excel_sql(IrsCfg.FOLDER_OPTION, SymbolUnderlying)
 
 
-def _sync_symbol_discount():
+def _sync_discount_symbol():
     """symbol-discount：从 Config 同步贴水配置 + 更新贴水数据。"""
     service.upsert_discount_monitor_config_sql()
     service.upsert_discount_em_sql()
@@ -120,7 +120,7 @@ SYNC_MAP: Dict[str, List[Callable]] = {
     "symbol-underlying": [_sync_symbol_underlying],
     "monitor-option":    [_sync_monitor_option],
     "monitor-option-t":  [_sync_monitor_option_t],
-    "symbol-discount":   [_sync_symbol_discount],
+    "symbol-discount":   [_sync_discount_symbol],
     "monitor-discount":  [service.discount_yield_em_orm],
 }
 
@@ -346,9 +346,8 @@ def list_monitor_option_ts(
 
 @router.get("/discounts-monitor", response_model=PageResponse[DiscountMonitorOut])
 def list_discounts_monitor(
-    symbol: Optional[str] = Query(None, description="真实合约模糊匹配"),
-    symbol_con: Optional[str] = Query(None, description="连续合约模糊匹配"),
     symbol_type: Optional[str] = Query(None, description="合约类别精确匹配"),
+    con_name: Optional[str] = Query(None, description="连续合约名称精确匹配"),
     is_main: Optional[bool] = Query(None, description="是否主力精确匹配"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -365,19 +364,30 @@ def list_discounts_monitor(
     except Exception as e:
         print(f"-->discounts-monitor 同步失败:{e}")
     query = db.query(DiscountMonitor)
-    if symbol:
-        # 参照 bds 模块，symbol 使用 like 模糊匹配
-        query = query.filter(DiscountMonitor.symbol.like(f"%{symbol}%"))
-    if symbol_con:
-        # 连续合约同样使用 like 模糊匹配
-        query = query.filter(DiscountMonitor.symbol_con.like(f"%{symbol_con}%"))
     if symbol_type:
         query = query.filter(DiscountMonitor.symbol_type == symbol_type)
+    if con_name:
+        query = query.filter(DiscountMonitor.con_name == con_name)
     if is_main is not None:
         query = query.filter(DiscountMonitor.is_main == is_main)
     total = query.count()
     items = query.order_by(DiscountMonitor.symbol_con).offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/discount-options")
+def list_discount_options():
+    """返回贴水监测下拉选项（数据源 Config.SYMBOL_CON_LIST，无数据库查询）。
+
+    从配置字典提取去重的 symbol_types 和 con_names 列表，供前端 NSelect 使用。
+    """
+    symbol_types = sorted({
+        v['symbol_type'] for v in IrsCfg.SYMBOL_CON_LIST.values()
+    })
+    con_names = sorted({
+        v['con_name'] for v in IrsCfg.SYMBOL_CON_LIST.values()
+    })
+    return {"symbol_types": symbol_types, "con_names": con_names}
 
 
 # =========================================================================
@@ -475,7 +485,7 @@ def migrate_merge_discount_tables():
             conn.execute(text("RENAME TABLE irs_symbol_discount TO irs_discount_monitor"))
             conn.commit()
 
-    # 2. ALTER TABLE ADD COLUMN（7 个新列，逐列检查容错）
+    # 2. ALTER TABLE ADD COLUMN（8 个新列，逐列检查容错）
     new_columns = [
         ("days_left", "INT NULL COMMENT '剩余天数'"),
         ("position", "INT NULL COMMENT '持仓量'"),
@@ -484,6 +494,7 @@ def migrate_merge_discount_tables():
         ("discount", "DECIMAL(12,2) NULL COMMENT '贴水'"),
         ("ratio", "DECIMAL(9,2) NULL COMMENT '贴水率(%)'"),
         ("ratio_y", "DECIMAL(9,2) NULL COMMENT '贴水率(%Y)'"),
+        ("con_name", "VARCHAR(16) NULL COMMENT '连续合约名称'"),
     ]
     for col_name, col_def in new_columns:
         if not _column_exists("irs_discount_monitor", col_name):
@@ -492,6 +503,24 @@ def migrate_merge_discount_tables():
                     f"ALTER TABLE irs_discount_monitor ADD COLUMN {col_name} {col_def}"
                 ))
                 conn.commit()
+
+    # 2.1 从 Config 回填 symbol_type（配置值如 '中证500'）和 con_name 到现有记录
+    #     覆盖旧的代码解析值（如 'CFFEX.IC'）
+    if _column_exists("irs_discount_monitor", "con_name"):
+        with engine.connect() as conn:
+            for symbol_con, info in IrsCfg.SYMBOL_CON_LIST.items():
+                conn.execute(text(
+                    "UPDATE irs_discount_monitor SET symbol_type = :st, con_name = :cn "
+                    "WHERE symbol_con = :sc"
+                ), {"st": info['symbol_type'], "cn": info['con_name'], "sc": symbol_con})
+            # 删除不在 Config 中的多余记录（如 IF04/IM04）
+            config_keys = list(IrsCfg.SYMBOL_CON_LIST.keys())
+            placeholders = ', '.join([f':k{i}' for i in range(len(config_keys))])
+            params = {f'k{i}': k for i, k in enumerate(config_keys)}
+            conn.execute(text(
+                f"DELETE FROM irs_discount_monitor WHERE symbol_con NOT IN ({placeholders})"
+            ), params)
+            conn.commit()
 
     # 3. UPDATE JOIN 从 irs_monitor_discount 迁移数据，然后 DROP TABLE
     if _table_exists("irs_monitor_discount"):

@@ -17,7 +17,7 @@ import logging
 import numpy as np
 import pandas as pd
 from gm.api import *  # noqa: F401,F403  保留原 gm SDK 通配导入（history/current/fut_get_continuous_contracts 等）
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm.attributes import flag_modified
 
 from server_fast.common.db import SessionLocal
@@ -523,21 +523,38 @@ def symbol_infos_em(symbols_dict: dict) -> pd.DataFrame:
     return df
 
 
-# 从 Config 同步贴水配置（仅 symbol_con 列，已存在记录不更新）
+# 从 Config 同步贴水配置（symbol_type/con_name 从配置取数，清理多余记录）
 def upsert_discount_monitor_config_sql():
     '''
-    从 Config.SYMBOL_CON_LIST 读取连续合约列表，UPSERT 到 irs_discount_monitor 表。
-    仅插入 symbol_con 字段；已存在的记录不更新（保留已有行情与计算字段）。
+    从 Config.SYMBOL_CON_LIST 读取连续合约字典，UPSERT 到 irs_discount_monitor 表。
+    写入 symbol_con/symbol_type/con_name 三列；已存在记录更新 symbol_type/con_name
+    （Config 变更可同步），其余字段保留。同时删除不在 Config 中的多余记录。
     '''
     _engine = settings.DB_ENGINE
     _mdl = DiscountMonitor
     _table = _mdl.__table__.name
     _unique_keys = _mdl.unique_keys
-    # 仅 symbol_con 列，从 Config 常量构建 DataFrame
-    df = pd.DataFrame({'symbol_con': IrsCfg.SYMBOL_CON_LIST})
-    # update_columns 传空列表：使用 INSERT IGNORE，已存在记录跳过不更新
-    result = upsert_df_to_db(df, _table, _engine, _unique_keys, update_columns=[])
+    # 从 Config 字典构造含 4 列的 DataFrame（is_main 为新记录提供默认值，不参与更新）
+    records = [
+        {'symbol_con': k, 'symbol_type': v['symbol_type'], 'con_name': v['con_name'], 'is_main': False}
+        for k, v in IrsCfg.SYMBOL_CON_LIST.items()
+    ]
+    df = pd.DataFrame(records)
+    # update_columns 指定 symbol_type/con_name：已存在记录更新这两列，is_main 仅用于新记录插入
+    result = upsert_df_to_db(
+        df, _table, _engine, _unique_keys, update_columns=['symbol_type', 'con_name'])
     logger.info(f'->成功:{result}')
+    # 清理数据库中不在 Config 的多余记录（如已删除的 IF04/IM04）
+    config_keys = list(IrsCfg.SYMBOL_CON_LIST.keys())
+    with _engine.connect() as conn:
+        placeholders = ', '.join([f':k{i}' for i in range(len(config_keys))])
+        params = {f'k{i}': k for i, k in enumerate(config_keys)}
+        delete_result = conn.execute(text(
+            f'DELETE FROM {_table} WHERE symbol_con NOT IN ({placeholders})'
+        ), params)
+        conn.commit()
+        if delete_result.rowcount > 0:
+            logger.info(f'->清理多余记录:{delete_result.rowcount}条')
     return result
 
 
@@ -557,8 +574,7 @@ def upsert_discount_monitor_em_sql():
         sd_dict = {row.symbol_con: row.id for row in rows}
     symbols_dict = real_symbols_em(list(sd_dict.keys()))  # 获取真实合约列表
     df = symbol_infos_em(symbols_dict)  # 获取合约基本信息
-    df['symbol_type'] = df['symbol_con'].apply(
-        lambda x: f'{x.split(".")[0]}.{x.split(".")[1][:2]}')
+    # symbol_type/con_name 由 Config 同步时写入（upsert_discount_monitor_config_sql），em 同步不覆盖
     df['is_main'] = False  # 重置主力标志
     if not df.empty:
         df = df_init_model(df, _mdl)

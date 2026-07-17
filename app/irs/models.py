@@ -365,6 +365,7 @@ class DiscountMonitor(Base, BaseModel):
         Boolean, nullable=False, default=OPTION_MINOR, comment="主力"
     )
     symbol_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="合约类别")
+    con_name: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="连续合约名称")
     symbol_ud: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="标的代码")
     delisted_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="到期日")
 
@@ -540,20 +541,17 @@ def _compute_monitor_option(mapper, connection, target):
 @_on_insert_update(DiscountMonitor)
 def _compute_discount_monitor(mapper, connection, target):
     """DiscountMonitor 计算逻辑（合并原 SymbolDiscount + MonitorDiscount 的 save()）：
-    - symbol_type：从 symbol_con 解析合约类别（例 'CFFEX.IC00' -> 'CFFEX.IC'）
+    - symbol_type/con_name：由 Config.SYMBOL_CON_LIST 配置取数（service 层写入），钩子不再解析
     - days_left：若 delisted_date 有值，计算 (delisted_date - today).days
     - discount/ratio/ratio_y：仅当 price 和 price_ud 均有值时计算，避免除零
       - discount  = price_ud - price  （基础现价 - 合约现价）
       - ratio     = discount / price * 100
       - ratio_y   = ratio * 365 / days_left （days_left 为 None/0 时置 0）
     """
-    # 1. 解析合约类别
-    parts = target.symbol_con.split(".")
-    target.symbol_type = f"{parts[0]}.{parts[1][:2]}"
-    # 2. 计算剩余天数（delisted_date 为空则跳过，保留原值）
+    # 1. 计算剩余天数（delisted_date 为空则跳过，保留原值）
     if target.delisted_date is not None:
         target.days_left = (target.delisted_date - date.today()).days
-    # 3. 计算贴水指标（price/price_ud 任一为空则跳过，避免除零）
+    # 2. 计算贴水指标（price/price_ud 任一为空则跳过，避免除零）
     if target.price is not None and target.price_ud is not None:
         target.discount = target.price_ud - target.price
         target.ratio = (target.discount / target.price) * Decimal("100")
