@@ -23,13 +23,22 @@ class Config:
     FOLDER_OPTION_PRICE = Path('C:\BaiduSyncdisk\账单\期权行情')
 
     # 贴水配置：连续合约代码列表（从 Excel 文件迁移为配置常量）
-    SYMBOL_CON_LIST = [
-        'CFFEX.IC00', 'CFFEX.IC01', 'CFFEX.IC02', 'CFFEX.IC03',
-        'CFFEX.IF00', 'CFFEX.IF01', 'CFFEX.IF02', 'CFFEX.IF03',
-        'CFFEX.IH',
-        'CFFEX.IM00', 'CFFEX.IM01', 'CFFEX.IM02', 'CFFEX.IM03',
-    ]
-
+    SYMBOL_CON_LIST = {
+        'CFFEX.IC00':{'symbol_type':'中证500', 'con_name':'当月'}, 
+        'CFFEX.IC01':{'symbol_type':'中证500', 'con_name':'次月'}, 
+        'CFFEX.IC02':{'symbol_type':'中证500', 'con_name':'当季'}, 
+        'CFFEX.IC03':{'symbol_type':'中证500', 'con_name':'隔季'}, 
+        'CFFEX.IF00':{'symbol_type':'沪深300', 'con_name':'当月'}, 
+        'CFFEX.IF01':{'symbol_type':'沪深300', 'con_name':'次月'}, 
+        'CFFEX.IF02':{'symbol_type':'沪深300', 'con_name':'当季'}, 
+        'CFFEX.IF03':{'symbol_type':'沪深300', 'con_name':'隔季'}, 
+        'CFFEX.IH':{'symbol_type':'上证50', 'con_name':'主连'}, 
+        'CFFEX.IM00':{'symbol_type':'中证1000', 'con_name':'当月'}, 
+        'CFFEX.IM01':{'symbol_type':'中证1000', 'con_name':'次月'}, 
+        'CFFEX.IM02':{'symbol_type':'中证1000', 'con_name':'当季'}, 
+        'CFFEX.IM03':{'symbol_type':'中证1000', 'con_name':'隔季'}, 
+    }
+        
     # 代码市场映射
     MAP_MARKET_UNDERLYING = {
         '0': 'SHSE', '5': 'SHSE',
