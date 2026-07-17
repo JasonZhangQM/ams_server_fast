@@ -23,7 +23,6 @@ from sqlalchemy.orm.attributes import flag_modified
 from server_fast.common.db import SessionLocal
 from server_fast.common.utils import (
     df_init_model,
-    get_sql_to_df,
     upsert_df_to_db,
     call_with_timeout,
 )
@@ -31,11 +30,10 @@ from server_fast.config import settings
 from server_fast.app.bds.models import SymbolInfo, TradeDate
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
-    MonitorDiscount,
+    DiscountMonitor,
     MonitorOption,
     MonitorOptionT,
     MonitorValue,
-    SymbolDiscount,
     SymbolKpi,
     SymbolOption,
     SymbolUnderlying,
@@ -475,7 +473,7 @@ def monitor_option_t_orm():
 
 
 # =========================================================================
-# 期货贴水相关（SymbolDiscount / MonitorDiscount）
+# 期货贴水相关（DiscountMonitor，合并配置+监测单表）
 # =========================================================================
 
 
@@ -486,12 +484,19 @@ def real_symbols_em(symbol_con_list) -> dict:
     symbol_con_list = ['CFFEX.IC00', 'CFFEX.IC01']
     --------------------->>>>>>>>>>>>>>>>>>>>>>>>>>
     {'CFFEX.IC2512':'CFFEX.IC00', 'CFFEX.IC2601':'CFFEX.IC01'}
+
+    注：部分远期连续合约（如 CFFEX.IF04/CFFEX.IM04）在 gm SDK 中可能返回空列表，
+    此处跳过并记录 warning，避免单个合约缺失导致整个同步中断。
     '''
     symbols_dict = {}  # 真实合约列表
     # gm 终端不可用时 fut_get_continuous_contracts 会阻塞，加超时保护
     _get_contracts = call_with_timeout(fut_get_continuous_contracts, timeout=30)
     for symbol_con in symbol_con_list:
-        real_symbol = _get_contracts(csymbol=symbol_con)[0]['symbol']
+        contracts = _get_contracts(csymbol=symbol_con)
+        if not contracts:  # 空列表容错：远期连续合约可能未生成
+            logger.warning(f"连续合约 {symbol_con} 未返回真实合约，已跳过")
+            continue
+        real_symbol = contracts[0]['symbol']
         symbols_dict[real_symbol] = symbol_con
     return symbols_dict
 
@@ -518,16 +523,34 @@ def symbol_infos_em(symbols_dict: dict) -> pd.DataFrame:
     return df
 
 
-# 更新贴水基础数据
-def upsert_symbol_discount_em_sql():
+# 从 Config 同步贴水配置（仅 symbol_con 列，已存在记录不更新）
+def upsert_discount_monitor_config_sql():
     '''
-    1、导出SymbolDiscount表数据所有数据
+    从 Config.SYMBOL_CON_LIST 读取连续合约列表，UPSERT 到 irs_discount_monitor 表。
+    仅插入 symbol_con 字段；已存在的记录不更新（保留已有行情与计算字段）。
+    '''
+    _engine = settings.DB_ENGINE
+    _mdl = DiscountMonitor
+    _table = _mdl.__table__.name
+    _unique_keys = _mdl.unique_keys
+    # 仅 symbol_con 列，从 Config 常量构建 DataFrame
+    df = pd.DataFrame({'symbol_con': IrsCfg.SYMBOL_CON_LIST})
+    # update_columns 传空列表：使用 INSERT IGNORE，已存在记录跳过不更新
+    result = upsert_df_to_db(df, _table, _engine, _unique_keys, update_columns=[])
+    logger.info(f'->成功:{result}')
+    return result
+
+
+# 更新贴水基础数据
+def upsert_discount_monitor_em_sql():
+    '''
+    1、导出DiscountMonitor表数据所有数据
     2、调取em接口获取真实合约列表(real_symbols_em)
     3、调取em接口获取合约基本信息(symbol_infos_em)
     4、调整数据并存入输入库
     '''
     _engine = settings.DB_ENGINE
-    _mdl = SymbolDiscount
+    _mdl = DiscountMonitor
     logger.info("真实合约及合约基本信息")
     with SessionLocal() as session:
         rows = session.query(_mdl.id, _mdl.symbol_con).all()
@@ -547,50 +570,46 @@ def upsert_symbol_discount_em_sql():
         logger.info("->无数据")
 
 
-# 更新主力合约标志
+# 更新主力合约标志（直接 UPDATE DiscountMonitor.is_main，不再通过 DataFrame UPSERT）
 def update_is_main_em_sql():
-    _engine = settings.DB_ENGINE
-    _mdl = SymbolDiscount
+    _mdl = DiscountMonitor
     _symbol_con_zl = IrsCfg.SYMBOL_CON_ZL
     logger.info("主力合约标识")
-    sql = f'''
-        SELECT symbol,symbol_con,is_main FROM {_mdl.__table__.name};
-        '''
-    df = get_sql_to_df(sql, _engine)  # 获取所有合约及主力标志
-    symbols_zl = real_symbols_em(_symbol_con_zl)  # 获取主力真实合约
-    df['is_main'] = False  # 重置主力标志
-    df.loc[df['symbol'].isin(  # 设置主力合约
-        set(symbols_zl.keys())), 'is_main'] = True
-    df = df_init_model(df, _mdl)
-    if not df.empty:
-        _table = _mdl.__table__.name
-        _unique_keys = _mdl.unique_keys
-        _update_clumns = _mdl.update_is_main
-        result = upsert_df_to_db(
-            df, _table, _engine, _unique_keys, _update_clumns)
-        logger.info(f'->成功:{result}')
-    else:
-        logger.info("->无数据")
+    # 查询所有合约的 id 与 symbol
+    with SessionLocal() as session:
+        rows = session.query(_mdl.id, _mdl.symbol).all()
+    # 获取主力真实合约集合
+    symbols_zl = real_symbols_em(_symbol_con_zl)
+    main_symbol_set = set(symbols_zl.keys())
+    # 直接批量 UPDATE is_main 字段（True/False）
+    count = 0
+    with SessionLocal() as session:
+        with session.begin():
+            for row in rows:
+                is_main = row.symbol in main_symbol_set
+                session.query(_mdl).filter(_mdl.id == row.id).update(
+                    {"is_main": is_main}, synchronize_session=False)
+                count += 1
+    logger.info(f'->成功:{count}')
 
 
 # 更新所有合约贴水数据并更新主力标志
 def upsert_discount_em_sql():
-    upsert_symbol_discount_em_sql()
+    upsert_discount_monitor_em_sql()
     update_is_main_em_sql()
 
 
-# 计算标的升贴水收益率
+# 计算标的升贴水收益率（操作 DiscountMonitor 单表，无 JOIN，合并后无 insert 仅 update）
 def discount_yield_em_orm():
     '''
     1、分别获取期货及期货标的symbol合并之后一次调取em接口获取实时行情
-    2、计算贴水等相关指标
-    3、更新数据库
+    2、更新price/price_ud/position，由事件钩子自动计算贴水等相关指标
+    3、合并后无insert，仅update
     '''
-    _mdl_md = MonitorDiscount
-    _mdl_d = SymbolDiscount
+    _mdl = DiscountMonitor
     with SessionLocal() as session:
         rows = session.query(
-            _mdl_d.id, _mdl_d.symbol, _mdl_d.symbol_ud
+            _mdl.id, _mdl.symbol, _mdl.symbol_ud
         ).all()
         sd_dict = {  # 贴水标的字典
             row.symbol: {
@@ -616,7 +635,6 @@ def discount_yield_em_orm():
         }
         for item in data
     }
-    count_insert = 0
     count_update = 0
     with SessionLocal() as session:
         with session.begin():
@@ -629,8 +647,8 @@ def discount_yield_em_orm():
                 position = Decimal(str(data_dict[symbol]['position']))
                 try:
                     monitor = (
-                        session.query(_mdl_md)
-                        .filter(_mdl_md.symbol_real_id == sd['id'])
+                        session.query(_mdl)
+                        .filter(_mdl.id == sd['id'])
                         .one_or_none()
                     )
                     if monitor is not None:
@@ -641,20 +659,7 @@ def discount_yield_em_orm():
                             monitor.position = position
                             session.flush()  # 触发 before_update 钩子计算 days_left/discount/ratio_*
                             count_update += 1
-                    else:
-                        # 不存在则新建记录
-                        symbol_discount = session.query(_mdl_d).filter(
-                            _mdl_d.id == sd['id']).one()
-                        monitor = _mdl_md(
-                            symbol_real=symbol_discount,  # 关联
-                            price=price,
-                            price_ud=price_ud,
-                            position=position,
-                        )
-                        session.add(monitor)
-                        session.flush()  # 触发 before_insert 钩子计算
-                        count_insert += 1
                 except Exception as e:
                     logger.error(f"处理 symbol {symbol} 失败：{str(e)}")
                     continue
-    return count_insert, count_update
+    return 0, count_update

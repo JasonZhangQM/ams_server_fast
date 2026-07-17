@@ -343,15 +343,22 @@ class MonitorOptionT(Base, BaseModel):
         )
 
 
-class SymbolDiscount(Base, BaseModel):
-    """贴水配置（原 irs.SymbolDiscount）。无外键。"""
+class DiscountMonitor(Base, BaseModel):
+    """贴水监测（合并原 SymbolDiscount 配置 + MonitorDiscount 监测为单表）。
 
-    __tablename__ = "irs_symbol_discount"
+    表名 irs_discount_monitor，兼具配置与监测功能：
+    - 配置字段：symbol_con/symbol/is_main/symbol_type/symbol_ud/delisted_date
+    - 监测字段：days_left/position/price/price_ud/discount/ratio/ratio_y
+    - price/price_ud 由原 MonitorDiscount 的 NotNull 改为 nullable=True（同步行情前可能无值）
+    """
+
+    __tablename__ = "irs_discount_monitor"
 
     # 期权主力标记常量（保留原 Django 类属性）
     OPTION_MAIN = True    # 是
     OPTION_MINOR = False  # 否
 
+    # ---- 原有配置字段 ----
     symbol_con: Mapped[str] = mapped_column(String(16), unique=True, nullable=False, comment="连续合约")
     symbol: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="真实合约")
     is_main: Mapped[bool] = mapped_column(
@@ -361,38 +368,11 @@ class SymbolDiscount(Base, BaseModel):
     symbol_ud: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="标的代码")
     delisted_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="到期日")
 
-    # ---- 保留的自定义类属性 ----
-    cols_map_fields = {
-        "symbol": ["代码"],
-        "symbol_ud": ["underlying_symbol"],
-        "delisted_date": ["delisted_date"],
-    }
-    unique_keys = ["symbol_con"]
-    update_is_main = ["is_main"]
-    fields_yiels = ["id", "symbol", "symbol_ud", "delisted_date"]
-
-    # 反向关系：一个 MonitorDiscount 指向本贴水配置
-    symbol_real_monitor: Mapped["MonitorDiscount"] = relationship(
-        "MonitorDiscount", uselist=False, back_populates="symbol_real"
-    )
-
-    def __str__(self):
-        return f"{self.symbol_con}({self.symbol})"
-
-
-class MonitorDiscount(Base, BaseModel):
-    """贴水监测（原 irs.MonitorDiscount）。OneToOne -> SymbolDiscount。"""
-
-    __tablename__ = "irs_monitor_discount"
-
-    # 外键列名 symbol_real_id（Django db_column 显式指定）
-    symbol_real_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_discount.id"), unique=True, nullable=False, comment="估值标的"
-    )
+    # ---- 新增监测字段（从 MonitorDiscount 合并） ----
     days_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="剩余天数")
     position: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="持仓量")
-    price: Mapped[Decimal] = mapped_column(Numeric(9, 2), nullable=False, comment="合约现价")
-    price_ud: Mapped[Decimal] = mapped_column(Numeric(9, 2), nullable=False, comment="基础现价")
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="合约现价")
+    price_ud: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="基础现价")
     discount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="贴水")
     ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="贴水率(%)")
     ratio_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="贴水率(%Y)")
@@ -400,21 +380,14 @@ class MonitorDiscount(Base, BaseModel):
     # ---- 保留的自定义类属性 ----
     cols_map_fields = {
         "symbol": ["代码"],
-        "price": ["最新"],
-        "position": ["cum_position"],
+        "symbol_ud": ["underlying_symbol"],
+        "delisted_date": ["delisted_date"],
     }
-    unique_keys = ["symbol_real_id"]
-    fields_update_sql = [
-        "position", "price", "price_ud",
-        "days_left", "discount", "ratio", "ratio_y",
-    ]
-
-    symbol_real: Mapped["SymbolDiscount"] = relationship(
-        "SymbolDiscount", back_populates="symbol_real_monitor"
-    )
+    unique_keys = ["symbol_con"]
+    fields_yiels = ["id", "symbol", "symbol_ud", "delisted_date"]
 
     def __str__(self):
-        return f"{self.symbol_real.symbol}({self.symbol_real.symbol_con})"
+        return f"{self.symbol_con}({self.symbol})"
 
 
 # =========================================================================
@@ -564,27 +537,27 @@ def _compute_monitor_option(mapper, connection, target):
         target.ratio_i_y = Decimal("0")
 
 
-@_on_insert_update(SymbolDiscount)
-def _compute_symbol_discount(mapper, connection, target):
-    """SymbolDiscount 计算逻辑（原 save()）：从 symbol_con 解析合约类别。
-    例：'IF2306.CCFX' -> 'IF.23'
+@_on_insert_update(DiscountMonitor)
+def _compute_discount_monitor(mapper, connection, target):
+    """DiscountMonitor 计算逻辑（合并原 SymbolDiscount + MonitorDiscount 的 save()）：
+    - symbol_type：从 symbol_con 解析合约类别（例 'CFFEX.IC00' -> 'CFFEX.IC'）
+    - days_left：若 delisted_date 有值，计算 (delisted_date - today).days
+    - discount/ratio/ratio_y：仅当 price 和 price_ud 均有值时计算，避免除零
+      - discount  = price_ud - price  （基础现价 - 合约现价）
+      - ratio     = discount / price * 100
+      - ratio_y   = ratio * 365 / days_left （days_left 为 None/0 时置 0）
     """
+    # 1. 解析合约类别
     parts = target.symbol_con.split(".")
     target.symbol_type = f"{parts[0]}.{parts[1][:2]}"
-
-
-@_on_insert_update(MonitorDiscount)
-def _compute_monitor_discount(mapper, connection, target):
-    """MonitorDiscount 计算逻辑（原 save()）：基于关联 SymbolDiscount 计算贴水。
-    - days_left = (delisted_date - today).days
-    - discount  = price_ud - price  （基础现价 - 合约现价）
-    - ratio     = discount / price * 100
-    - ratio_y   = ratio * 365 / days_left （年化贴水率，days_left=0 时置 0）
-    """
-    target.days_left = (target.symbol_real.delisted_date - date.today()).days
-    target.discount = target.price_ud - target.price
-    target.ratio = (target.discount / target.price) * Decimal("100")
-    if target.days_left != 0:
-        target.ratio_y = target.ratio * Decimal("365") / target.days_left
-    else:
-        target.ratio_y = Decimal("0")
+    # 2. 计算剩余天数（delisted_date 为空则跳过，保留原值）
+    if target.delisted_date is not None:
+        target.days_left = (target.delisted_date - date.today()).days
+    # 3. 计算贴水指标（price/price_ud 任一为空则跳过，避免除零）
+    if target.price is not None and target.price_ud is not None:
+        target.discount = target.price_ud - target.price
+        target.ratio = (target.discount / target.price) * Decimal("100")
+        if target.days_left not in (None, 0):
+            target.ratio_y = target.ratio * Decimal("365") / target.days_left
+        else:
+            target.ratio_y = Decimal("0")

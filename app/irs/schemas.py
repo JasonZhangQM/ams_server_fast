@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 """irs 应用 Pydantic v2 响应 Schema 定义。
 
-对应 router.py 中 8 个 GET 路由的返回结构：
+对应 router.py 中 7 个 GET 路由的返回结构：
 - SymbolValueOut      /irs/symbol-values        估值配置全字段
 - SymbolKpiOut        /irs/symbol-kpis          估值指标自身字段
 - MonitorValueOut     /irs/value-monitor        按 MonitorValue.fields_request 输出
 - SymbolOptionOut     /irs/symbol-options       期权配置 + 标的扁平化字段
 - MonitorOptionOut    /irs/monitor-options      期权监测 + 期权/标的扁平化字段
 - MonitorOptionTOut   /irs/monitor-option-ts    期权T价 + 期权/标的扁平化字段
-- SymbolDiscountOut   /irs/symbol-discounts     贴水配置全字段
-- MonitorDiscountOut  /irs/monitor-discounts    贴水监测 + 贴水配置扁平化字段
+- DiscountMonitorOut  /irs/monitor-discounts    贴水监测全字段（合并配置+监测）
 
 所有 Schema 均启用 from_attributes=True 以支持从 ORM 实例直接构造；
 MonitorValueOut 额外启用 populate_by_name=True，以同时接受双下划线别名与字段名入参。
@@ -228,10 +227,10 @@ class MonitorOptionTOut(BaseModel):
 
 
 # =========================================================================
-# 贴水配置：对应 SymbolDiscount 模型全字段（9 字段）
+# 贴水监测：对应 DiscountMonitor 模型全字段（16 字段，合并后单表）
 # =========================================================================
-class SymbolDiscountOut(BaseModel):
-    """贴水配置响应（对应 /irs/symbol-discounts）。"""
+class DiscountMonitorOut(BaseModel):
+    """贴水监测响应（对应 /irs/monitor-discounts，合并配置+监测全字段）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -241,32 +240,13 @@ class SymbolDiscountOut(BaseModel):
     symbol_type: Optional[str] = None               # 合约类别
     symbol_ud: Optional[str] = None                 # 标的代码
     delisted_date: Optional[date] = None            # 到期日
-    id: int                                         # 主键
-    create_time: datetime                           # 创建时间
-    update_time: datetime                           # 更新时间
-
-
-# =========================================================================
-# 贴水监测：MonitorDiscount 自身字段 + 贴水配置扁平化（17 字段）
-# =========================================================================
-class MonitorDiscountOut(BaseModel):
-    """贴水监测响应（对应 /irs/monitor-discounts）。"""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    symbol_real_id: int                             # 估值标的
     days_left: Optional[int] = None                 # 剩余天数
     position: Optional[int] = None                  # 持仓量
-    price: Decimal                                  # 合约现价
-    price_ud: Decimal                               # 基础现价
+    price: Optional[Decimal] = None                 # 合约现价
+    price_ud: Optional[Decimal] = None              # 基础现价
     discount: Optional[Decimal] = None              # 贴水
     ratio: Optional[Decimal] = None                 # 贴水率(%)
     ratio_y: Optional[Decimal] = None               # 贴水率(%Y)
     id: int                                         # 主键
     create_time: datetime                           # 创建时间
     update_time: datetime                           # 更新时间
-    # 扁平化嵌入 SymbolDiscount 字段（关联对象可能为 None）
-    symbol: Optional[str] = None                    # 真实合约
-    is_main: Optional[bool] = None                  # 主力
-    symbol_ud: Optional[str] = None                 # 标的代码
-    delisted_date: Optional[date] = None            # 到期日

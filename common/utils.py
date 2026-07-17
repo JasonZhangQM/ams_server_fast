@@ -72,26 +72,35 @@ def act_sql_engine(engine, sql: str, params=None):
             raise e
 
 
-def upsert_df_to_db(df: pd.DataFrame, table: str, engine, unique_keys: list, update_columns: list = []):
+def upsert_df_to_db(df: pd.DataFrame, table: str, engine, unique_keys: list, update_columns: list = None):
     """基于联合唯一键执行 UPSERT。
 
     :param df: 待同步 DataFrame
     :param table: 表名
     :param engine: 数据库连接引擎
     :param unique_keys: 联合唯一键列表（如 ["user_id", "order_no"]）
-    :param update_columns: 需更新的列；为空时默认更新除联合唯一键外的所有列
+    :param update_columns: 需更新的列；为 None 时默认更新除联合唯一键外的所有列；
+        传空列表 [] 表示仅插入、已存在记录不更新（使用 INSERT IGNORE）
     """
     df = df.replace({np.nan: None})
     columns = df.columns.tolist()
-    if not update_columns:  # 如果没有传入更新列，则默认更新除联合唯一键外的所有列
+    if update_columns is None:  # 未指定更新列时，默认更新除联合唯一键外的所有列
         update_columns = [col for col in columns if col not in unique_keys]
 
-    # 解析 DataFrame 列名，生成 SQL 占位符（:列名，适配字典参数）
-    sql = f'''
-        INSERT INTO {table} ({', '.join(columns)})
-        VALUES ({', '.join([f':{col}' for col in columns])})
-        ON DUPLICATE KEY UPDATE {", ".join([f"{col}=VALUES({col})" for col in update_columns])}
-        '''
+    cols_str = ', '.join(columns)
+    vals_str = ', '.join([f':{col}' for col in columns])
+    if update_columns:  # 有需更新的列：ON DUPLICATE KEY UPDATE
+        update_str = ", ".join([f"{col}=VALUES({col})" for col in update_columns])
+        sql = f'''
+            INSERT INTO {table} ({cols_str})
+            VALUES ({vals_str})
+            ON DUPLICATE KEY UPDATE {update_str}
+            '''
+    else:  # 无需更新的列：INSERT IGNORE（已存在记录跳过，不更新任何字段）
+        sql = f'''
+            INSERT IGNORE INTO {table} ({cols_str})
+            VALUES ({vals_str})
+            '''
     # 将 DataFrame 转为字典列表（每个字典的键是列名，值是对应行数据）
     data_dicts = df.to_dict('records')  # records 参数输出列名为键,每行为一个字典的列表
     result = act_sql_engine(engine, sql, data_dicts)

@@ -1,47 +1,47 @@
 # -*- coding: utf-8 -*-
 """irs 应用路由（从 server_dj/apps/irs/admin.py + middleware.py 迁移）。
 
-提供 8 个 GET 查询路由 + 1 个 POST 同步路由：
+提供 7 个 GET 查询路由 + 1 个 POST 同步路由 + 1 个迁移路由：
 - GET  /irs/value-monitor        估值监测（先同步实时估值再返回，对应 MonitorValueAdmin）
 - GET  /irs/symbol-values        估值配置（对应 SymbolValueAdmin）
 - GET  /irs/symbol-kpis          估值指标（对应 SymbolKpiAdmin）
 - GET  /irs/symbol-options       期权配置（对应 SymbolOptionAdmin）
 - GET  /irs/monitor-options      期权监测（对应 MonitorOptionAdmin）
 - GET  /irs/monitor-option-ts    期权T型报价（对应 MonitorOptionTAdmin）
-- GET  /irs/symbol-discounts     贴水配置（对应 SymbolDiscountAdmin）
-- GET  /irs/monitor-discounts    贴水监测（对应 MonitorDiscountAdmin）
+- GET  /irs/monitor-discounts    贴水监测（合并配置+监测，对应 DiscountMonitor）
 - POST /irs/sync/{target}        按 target 触发对应 service 函数链（9 种 target）
+- POST /irs/migrate/merge-discount-tables  一次性迁移：合并贴水双表
 """
 from typing import Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from server_fast.app.irs import service
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
-    MonitorDiscount,
+    DiscountMonitor,
     MonitorOption,
     MonitorOptionT,
     MonitorValue,
-    SymbolDiscount,
     SymbolKpi,
     SymbolOption,
     SymbolUnderlying,
     SymbolValue,
 )
 from server_fast.app.irs.schemas import (
-    MonitorDiscountOut,
+    DiscountMonitorOut,
     MonitorOptionOut,
     MonitorOptionTOut,
     MonitorValueOut,
-    SymbolDiscountOut,
     SymbolKpiOut,
     SymbolOptionOut,
     SymbolValueOut,
 )
 from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
+from server_fast.config import settings
 
 router = APIRouter(prefix="/irs", tags=["irs"])
 
@@ -93,8 +93,8 @@ def _sync_symbol_underlying():
 
 
 def _sync_symbol_discount():
-    """symbol-discount：Excel 导入贴水配置 + 更新贴水数据。"""
-    service.upsert_model_excel_sql(IrsCfg.FOLDER_SYMBOL_CON, SymbolDiscount)
+    """symbol-discount：从 Config 同步贴水配置 + 更新贴水数据。"""
+    service.upsert_discount_monitor_config_sql()
     service.upsert_discount_em_sql()
 
 
@@ -344,75 +344,40 @@ def list_monitor_option_ts(
     return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/symbol-discounts", response_model=PageResponse[SymbolDiscountOut])
-def list_symbol_discounts(
-    symbol_type: Optional[str] = Query(None, description="合约类别精确匹配（list_filter）"),
-    is_main: Optional[bool] = Query(None, description="是否主力精确匹配（list_filter）"),
-    symbol: Optional[str] = Query(None, description="真实合约代码模糊匹配"),
-    limit: int = Query(100, ge=1),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """贴水配置（对应 SymbolDiscountAdmin，支持 symbol_type/is_main/symbol 过滤）。"""
-    query = db.query(SymbolDiscount)
-    if symbol_type:
-        query = query.filter(SymbolDiscount.symbol_type == symbol_type)
-    if is_main is not None:
-        query = query.filter(SymbolDiscount.is_main == is_main)
-    if symbol:
-        # 参照 bds 模块，symbol 使用 like 模糊匹配
-        query = query.filter(SymbolDiscount.symbol.like(f"%{symbol}%"))
-    total = query.count()
-    items = query.order_by(SymbolDiscount.symbol_con).offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
-
-
-@router.get("/monitor-discounts", response_model=PageResponse[MonitorDiscountOut])
+@router.get("/monitor-discounts", response_model=PageResponse[DiscountMonitorOut])
 def list_monitor_discounts(
-    symbol: Optional[str] = Query(None, description="关联 SymbolDiscount.symbol 模糊匹配"),
-    symbol_con: Optional[str] = Query(None, description="关联连续合约模糊匹配"),
-    symbol_type: Optional[str] = Query(None, description="关联合约类别精确匹配"),
-    is_main: Optional[bool] = Query(None, description="关联是否主力精确匹配"),
+    symbol: Optional[str] = Query(None, description="真实合约模糊匹配"),
+    symbol_con: Optional[str] = Query(None, description="连续合约模糊匹配"),
+    symbol_type: Optional[str] = Query(None, description="合约类别精确匹配"),
+    is_main: Optional[bool] = Query(None, description="是否主力精确匹配"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """贴水监测（对应 MonitorDiscountAdmin，含关联 SymbolDiscount 字段）。
+    """贴水监测（合并配置+监测单表，对应 DiscountMonitor）。
 
     查询前先触发 discount_yield_em_orm() 同步实时贴水数据（失败不阻塞查询），
-    再返回最新数据。
+    再返回最新数据。过滤条件直接作用于 DiscountMonitor 字段（无 JOIN）。
     """
     # 查询前先同步实时贴水数据，失败不阻塞查询
     try:
         service.discount_yield_em_orm()
     except Exception as e:
         print(f"-->monitor-discounts 同步失败:{e}")
-    query = db.query(MonitorDiscount)
-    # 四个过滤均来自关联 SymbolDiscount，统一 join 一次
-    if any(v is not None for v in (symbol, symbol_con, symbol_type, is_main)):
-        query = query.join(
-            SymbolDiscount, MonitorDiscount.symbol_real_id == SymbolDiscount.id
-        )
-        if symbol:
-            # 参照 bds 模块，symbol 使用 like 模糊匹配
-            query = query.filter(SymbolDiscount.symbol.like(f"%{symbol}%"))
-        if symbol_con:
-            # 连续合约同样使用 like 模糊匹配
-            query = query.filter(SymbolDiscount.symbol_con.like(f"%{symbol_con}%"))
-        if symbol_type:
-            query = query.filter(SymbolDiscount.symbol_type == symbol_type)
-        if is_main is not None:
-            query = query.filter(SymbolDiscount.is_main == is_main)
-    # JOIN 与过滤条件已应用，count 对主表 MonitorDiscount 安全
+    query = db.query(DiscountMonitor)
+    if symbol:
+        # 参照 bds 模块，symbol 使用 like 模糊匹配
+        query = query.filter(DiscountMonitor.symbol.like(f"%{symbol}%"))
+    if symbol_con:
+        # 连续合约同样使用 like 模糊匹配
+        query = query.filter(DiscountMonitor.symbol_con.like(f"%{symbol_con}%"))
+    if symbol_type:
+        query = query.filter(DiscountMonitor.symbol_type == symbol_type)
+    if is_main is not None:
+        query = query.filter(DiscountMonitor.is_main == is_main)
     total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    extra = {
-        "symbol": "symbol_real__symbol",
-        "is_main": "symbol_real__is_main",
-        "symbol_ud": "symbol_real__symbol_ud",
-        "delisted_date": "symbol_real__delisted_date",
-    }
-    return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
+    items = query.order_by(DiscountMonitor.symbol_con).offset(offset).limit(limit).all()
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 # =========================================================================
@@ -454,15 +419,6 @@ def run_symbol_underlying_import():
     )
 
 
-@router.post("/run/symbol-discount-import")
-def run_symbol_discount_import():
-    """贴水标的(连续合约)导入（对应 run.py: upsert_model_excel_sql(FOLDER_SYMBOL_CON, SymbolDiscount)）。"""
-    return _run_sync_chain(
-        "symbol-discount-import",
-        [lambda: service.upsert_model_excel_sql(IrsCfg.FOLDER_SYMBOL_CON, SymbolDiscount)],
-    )
-
-
 @router.post("/run/discount-em")
 def run_discount_em():
     """连续合约信息完善（对应 run.py: upsert_discount_em_sql）。"""
@@ -473,3 +429,86 @@ def run_discount_em():
 def run_symbol_option_self():
     """SymbolOption 更新到期日（对应 run.py: symbol_option_update_self_orm）。"""
     return _run_sync_chain("symbol-option-self", [service.symbol_option_update_self_orm])
+
+
+# =========================================================================
+# 一次性迁移路由
+# =========================================================================
+
+@router.post("/migrate/merge-discount-tables")
+def migrate_merge_discount_tables():
+    """一次性迁移：合并 irs_symbol_discount + irs_monitor_discount 为 irs_discount_monitor。
+
+    步骤：
+    1. RENAME TABLE irs_symbol_discount TO irs_discount_monitor（IF EXISTS 容错）
+    2. ALTER TABLE irs_discount_monitor ADD COLUMN 7 个新列（IF NOT EXISTS 容错）
+    3. UPDATE JOIN 从 irs_monitor_discount 迁移数据，然后 DROP TABLE
+    4. 返回迁移记录数
+
+    重复调用不报错（使用 information_schema 检查表/列是否存在）。
+    """
+    engine = settings.DB_ENGINE
+    migrated_count = 0
+
+    def _table_exists(table_name: str) -> bool:
+        """通过 information_schema 检查表是否存在。"""
+        sql = text("""
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = DATABASE() AND table_name = :name
+        """)
+        with engine.connect() as conn:
+            return conn.execute(sql, {"name": table_name}).scalar() > 0
+
+    def _column_exists(table_name: str, column_name: str) -> bool:
+        """通过 information_schema 检查列是否存在。"""
+        sql = text("""
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = :table AND column_name = :col
+        """)
+        with engine.connect() as conn:
+            return conn.execute(sql, {"table": table_name, "col": column_name}).scalar() > 0
+
+    # 1. RENAME TABLE irs_symbol_discount -> irs_discount_monitor
+    if _table_exists("irs_symbol_discount"):
+        with engine.connect() as conn:
+            conn.execute(text("RENAME TABLE irs_symbol_discount TO irs_discount_monitor"))
+            conn.commit()
+
+    # 2. ALTER TABLE ADD COLUMN（7 个新列，逐列检查容错）
+    new_columns = [
+        ("days_left", "INT NULL COMMENT '剩余天数'"),
+        ("position", "INT NULL COMMENT '持仓量'"),
+        ("price", "DECIMAL(9,2) NULL COMMENT '合约现价'"),
+        ("price_ud", "DECIMAL(9,2) NULL COMMENT '基础现价'"),
+        ("discount", "DECIMAL(12,2) NULL COMMENT '贴水'"),
+        ("ratio", "DECIMAL(9,2) NULL COMMENT '贴水率(%)'"),
+        ("ratio_y", "DECIMAL(9,2) NULL COMMENT '贴水率(%Y)'"),
+    ]
+    for col_name, col_def in new_columns:
+        if not _column_exists("irs_discount_monitor", col_name):
+            with engine.connect() as conn:
+                conn.execute(text(
+                    f"ALTER TABLE irs_discount_monitor ADD COLUMN {col_name} {col_def}"
+                ))
+                conn.commit()
+
+    # 3. UPDATE JOIN 从 irs_monitor_discount 迁移数据，然后 DROP TABLE
+    if _table_exists("irs_monitor_discount"):
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                UPDATE irs_discount_monitor dm
+                JOIN irs_monitor_discount md ON dm.id = md.symbol_real_id
+                SET dm.days_left = md.days_left,
+                    dm.position = md.position,
+                    dm.price = md.price,
+                    dm.price_ud = md.price_ud,
+                    dm.discount = md.discount,
+                    dm.ratio = md.ratio,
+                    dm.ratio_y = md.ratio_y
+            """))
+            migrated_count = result.rowcount
+            conn.execute(text("DROP TABLE irs_monitor_discount"))
+            conn.commit()
+
+    return {"status": "success", "migrated": migrated_count}

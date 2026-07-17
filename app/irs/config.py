@@ -4,6 +4,7 @@
 保留所有原 Django Config 类的属性与方法：
 - FOLDER_*：各类 Excel 文件所在文件夹
 - MAP_MARKET_UNDERLYING：代码前缀 -> 交易所映射
+- SYMBOL_CON_LIST：贴水连续合约代码列表（从 Excel 迁移为常量）
 - SYMBOL_CON_LX / SYMBOL_CON_ZL：连续合约代码列表
 - MAP_OPTIONS_UD_MARKET + map_ud_market()：期权标的市场映射
 """
@@ -19,8 +20,15 @@ class Config:
     # 各类 Excel 文件所在文件夹
     FOLDER_SYMBOL_VALUE = Path('C:\BaiduSyncdisk\账单\估值分析')
     FOLDER_OPTION = Path('C:\BaiduSyncdisk\账单\期权标的')
-    FOLDER_SYMBOL_CON = Path('C:\BaiduSyncdisk\账单\连续合约')
     FOLDER_OPTION_PRICE = Path('C:\BaiduSyncdisk\账单\期权行情')
+
+    # 贴水配置：连续合约代码列表（从 Excel 文件迁移为配置常量）
+    SYMBOL_CON_LIST = [
+        'CFFEX.IC00', 'CFFEX.IC01', 'CFFEX.IC02', 'CFFEX.IC03',
+        'CFFEX.IF00', 'CFFEX.IF01', 'CFFEX.IF02', 'CFFEX.IF03',
+        'CFFEX.IH',
+        'CFFEX.IM00', 'CFFEX.IM01', 'CFFEX.IM02', 'CFFEX.IM03',
+    ]
 
     # 代码市场映射
     MAP_MARKET_UNDERLYING = {
