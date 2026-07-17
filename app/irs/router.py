@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """irs 应用路由（从 server_dj/apps/irs/admin.py + middleware.py 迁移）。
 
-提供 7 个 GET 查询路由 + 1 个 POST 同步路由 + 1 个迁移路由：
+提供 7 个 GET 查询路由 + 1 个 POST 同步路由：
 - GET  /irs/value-monitor        估值监测（先同步实时估值再返回，对应 MonitorValueAdmin）
 - GET  /irs/symbol-values        估值配置（对应 SymbolValueAdmin）
 - GET  /irs/symbol-kpis          估值指标（对应 SymbolKpiAdmin）
@@ -10,12 +10,10 @@
 - GET  /irs/monitor-option-ts    期权T型报价（对应 MonitorOptionTAdmin）
 - GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
 - POST /irs/sync/{target}        按 target 触发对应 service 函数链（9 种 target）
-- POST /irs/migrate/merge-discount-tables  一次性迁移：合并贴水双表
 """
 from typing import Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from server_fast.app.irs import service
@@ -41,7 +39,6 @@ from server_fast.app.irs.schemas import (
 )
 from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
-from server_fast.config import settings
 
 router = APIRouter(prefix="/irs", tags=["irs"])
 
@@ -93,9 +90,19 @@ def _sync_symbol_underlying():
 
 
 def _sync_discount_symbol():
-    """symbol-discount：从 Config 同步贴水配置 + 更新贴水数据。"""
+    """symbol-discount：从 Config 同步贴水配置 + 更新贴水数据 + 同步实时行情。
+
+    依次执行四步：
+    1. upsert_discount_monitor_config_sql：从 Config 写入 symbol_type/con_name
+    2. upsert_discount_monitor_em_sql：gm SDK 获取真实合约信息，更新 symbol/delisted_date
+    3. update_is_main_em_sql：gm SDK 获取主力合约集合，更新 is_main 标志
+    4. discount_yield_em_orm：gm SDK 获取实时行情，触发钩子计算 discount/ratio/ratio_y/days_left
+       （第 2 步更新 delisted_date 后需经 ORM flush 才能重算 days_left，故追加此步）
+    """
     service.upsert_discount_monitor_config_sql()
-    service.upsert_discount_em_sql()
+    service.upsert_discount_monitor_em_sql()
+    service.update_is_main_em_sql()
+    service.discount_yield_em_orm()
 
 
 def _sync_monitor_option():
@@ -429,115 +436,7 @@ def run_symbol_underlying_import():
     )
 
 
-@router.post("/run/discount-em")
-def run_discount_em():
-    """连续合约信息完善（对应 run.py: upsert_discount_em_sql）。"""
-    return _run_sync_chain("discount-em", [service.upsert_discount_em_sql])
-
-
 @router.post("/run/symbol-option-self")
 def run_symbol_option_self():
     """SymbolOption 更新到期日（对应 run.py: symbol_option_update_self_orm）。"""
     return _run_sync_chain("symbol-option-self", [service.symbol_option_update_self_orm])
-
-
-# =========================================================================
-# 一次性迁移路由
-# =========================================================================
-
-@router.post("/migrate/merge-discount-tables")
-def migrate_merge_discount_tables():
-    """一次性迁移：合并 irs_symbol_discount + irs_monitor_discount 为 irs_discount_monitor。
-
-    步骤：
-    1. RENAME TABLE irs_symbol_discount TO irs_discount_monitor（IF EXISTS 容错）
-    2. ALTER TABLE irs_discount_monitor ADD COLUMN 7 个新列（IF NOT EXISTS 容错）
-    3. UPDATE JOIN 从 irs_monitor_discount 迁移数据，然后 DROP TABLE
-    4. 返回迁移记录数
-
-    重复调用不报错（使用 information_schema 检查表/列是否存在）。
-    """
-    engine = settings.DB_ENGINE
-    migrated_count = 0
-
-    def _table_exists(table_name: str) -> bool:
-        """通过 information_schema 检查表是否存在。"""
-        sql = text("""
-            SELECT COUNT(*) FROM information_schema.tables
-            WHERE table_schema = DATABASE() AND table_name = :name
-        """)
-        with engine.connect() as conn:
-            return conn.execute(sql, {"name": table_name}).scalar() > 0
-
-    def _column_exists(table_name: str, column_name: str) -> bool:
-        """通过 information_schema 检查列是否存在。"""
-        sql = text("""
-            SELECT COUNT(*) FROM information_schema.columns
-            WHERE table_schema = DATABASE()
-              AND table_name = :table AND column_name = :col
-        """)
-        with engine.connect() as conn:
-            return conn.execute(sql, {"table": table_name, "col": column_name}).scalar() > 0
-
-    # 1. RENAME TABLE irs_symbol_discount -> irs_discount_monitor
-    if _table_exists("irs_symbol_discount"):
-        with engine.connect() as conn:
-            conn.execute(text("RENAME TABLE irs_symbol_discount TO irs_discount_monitor"))
-            conn.commit()
-
-    # 2. ALTER TABLE ADD COLUMN（8 个新列，逐列检查容错）
-    new_columns = [
-        ("days_left", "INT NULL COMMENT '剩余天数'"),
-        ("position", "INT NULL COMMENT '持仓量'"),
-        ("price", "DECIMAL(9,2) NULL COMMENT '合约现价'"),
-        ("price_ud", "DECIMAL(9,2) NULL COMMENT '基础现价'"),
-        ("discount", "DECIMAL(12,2) NULL COMMENT '贴水'"),
-        ("ratio", "DECIMAL(9,2) NULL COMMENT '贴水率(%)'"),
-        ("ratio_y", "DECIMAL(9,2) NULL COMMENT '贴水率(%Y)'"),
-        ("con_name", "VARCHAR(16) NULL COMMENT '连续合约名称'"),
-    ]
-    for col_name, col_def in new_columns:
-        if not _column_exists("irs_discount_monitor", col_name):
-            with engine.connect() as conn:
-                conn.execute(text(
-                    f"ALTER TABLE irs_discount_monitor ADD COLUMN {col_name} {col_def}"
-                ))
-                conn.commit()
-
-    # 2.1 从 Config 回填 symbol_type（配置值如 '中证500'）和 con_name 到现有记录
-    #     覆盖旧的代码解析值（如 'CFFEX.IC'）
-    if _column_exists("irs_discount_monitor", "con_name"):
-        with engine.connect() as conn:
-            for symbol_con, info in IrsCfg.SYMBOL_CON_LIST.items():
-                conn.execute(text(
-                    "UPDATE irs_discount_monitor SET symbol_type = :st, con_name = :cn "
-                    "WHERE symbol_con = :sc"
-                ), {"st": info['symbol_type'], "cn": info['con_name'], "sc": symbol_con})
-            # 删除不在 Config 中的多余记录（如 IF04/IM04）
-            config_keys = list(IrsCfg.SYMBOL_CON_LIST.keys())
-            placeholders = ', '.join([f':k{i}' for i in range(len(config_keys))])
-            params = {f'k{i}': k for i, k in enumerate(config_keys)}
-            conn.execute(text(
-                f"DELETE FROM irs_discount_monitor WHERE symbol_con NOT IN ({placeholders})"
-            ), params)
-            conn.commit()
-
-    # 3. UPDATE JOIN 从 irs_monitor_discount 迁移数据，然后 DROP TABLE
-    if _table_exists("irs_monitor_discount"):
-        with engine.connect() as conn:
-            result = conn.execute(text("""
-                UPDATE irs_discount_monitor dm
-                JOIN irs_monitor_discount md ON dm.id = md.symbol_real_id
-                SET dm.days_left = md.days_left,
-                    dm.position = md.position,
-                    dm.price = md.price,
-                    dm.price_ud = md.price_ud,
-                    dm.discount = md.discount,
-                    dm.ratio = md.ratio,
-                    dm.ratio_y = md.ratio_y
-            """))
-            migrated_count = result.rowcount
-            conn.execute(text("DROP TABLE irs_monitor_discount"))
-            conn.commit()
-
-    return {"status": "success", "migrated": migrated_count}

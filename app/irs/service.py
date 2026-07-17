@@ -609,12 +609,6 @@ def update_is_main_em_sql():
     logger.info(f'->成功:{count}')
 
 
-# 更新所有合约贴水数据并更新主力标志
-def upsert_discount_em_sql():
-    upsert_discount_monitor_em_sql()
-    update_is_main_em_sql()
-
-
 # 计算标的升贴水收益率（操作 DiscountMonitor 单表，无 JOIN，合并后无 insert 仅 update）
 def discount_yield_em_orm():
     '''
