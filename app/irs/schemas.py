@@ -8,7 +8,7 @@
 - SymbolOptionOut     /irs/symbol-options       期权配置 + 标的扁平化字段
 - MonitorOptionOut    /irs/monitor-options      期权监测 + 期权/标的扁平化字段
 - MonitorOptionTOut   /irs/monitor-option-ts    期权T价 + 期权/标的扁平化字段
-- DiscountMonitorOut  /irs/monitor-discounts    贴水监测全字段（合并配置+监测）
+- DiscountMonitorOut  /irs/discounts-monitor    贴水监测全字段（合并配置+监测）
 
 所有 Schema 均启用 from_attributes=True 以支持从 ORM 实例直接构造；
 MonitorValueOut 额外启用 populate_by_name=True，以同时接受双下划线别名与字段名入参。
@@ -230,7 +230,7 @@ class MonitorOptionTOut(BaseModel):
 # 贴水监测：对应 DiscountMonitor 模型全字段（16 字段，合并后单表）
 # =========================================================================
 class DiscountMonitorOut(BaseModel):
-    """贴水监测响应（对应 /irs/monitor-discounts，合并配置+监测全字段）。"""
+    """贴水监测响应（对应 /irs/discounts-monitor，合并配置+监测全字段）。"""
 
     model_config = ConfigDict(from_attributes=True)
 

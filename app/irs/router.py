@@ -8,7 +8,7 @@
 - GET  /irs/symbol-options       期权配置（对应 SymbolOptionAdmin）
 - GET  /irs/monitor-options      期权监测（对应 MonitorOptionAdmin）
 - GET  /irs/monitor-option-ts    期权T型报价（对应 MonitorOptionTAdmin）
-- GET  /irs/monitor-discounts    贴水监测（合并配置+监测，对应 DiscountMonitor）
+- GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
 - POST /irs/sync/{target}        按 target 触发对应 service 函数链（9 种 target）
 - POST /irs/migrate/merge-discount-tables  一次性迁移：合并贴水双表
 """
@@ -344,8 +344,8 @@ def list_monitor_option_ts(
     return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/monitor-discounts", response_model=PageResponse[DiscountMonitorOut])
-def list_monitor_discounts(
+@router.get("/discounts-monitor", response_model=PageResponse[DiscountMonitorOut])
+def list_discounts_monitor(
     symbol: Optional[str] = Query(None, description="真实合约模糊匹配"),
     symbol_con: Optional[str] = Query(None, description="连续合约模糊匹配"),
     symbol_type: Optional[str] = Query(None, description="合约类别精确匹配"),
@@ -363,7 +363,7 @@ def list_monitor_discounts(
     try:
         service.discount_yield_em_orm()
     except Exception as e:
-        print(f"-->monitor-discounts 同步失败:{e}")
+        print(f"-->discounts-monitor 同步失败:{e}")
     query = db.query(DiscountMonitor)
     if symbol:
         # 参照 bds 模块，symbol 使用 like 模糊匹配
