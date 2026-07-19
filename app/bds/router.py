@@ -381,11 +381,6 @@ def list_index_cum_returns(
     return {"trade_dates": trade_dates, "series": series, "max_drawdown": max_drawdown}
 
 
-class FundBalanceSyncRequest(PydanticModel):
-    """资产负债表同步请求体（保留兼容，当前未使用）。"""
-    symbols: List[str]
-
-
 @router.post("/sync/fund-balance")
 def sync_fund_balance(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
     """同步资产负债表数据，接收单个股票代码，获取并入库。"""
