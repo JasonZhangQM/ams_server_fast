@@ -32,6 +32,7 @@ from server_fast.app.bds.schemas import (
 )
 from server_fast.app.bds.services import (
     insert_trade_date_em_sql,
+    migrate_index_history_add_fields_sql,
     upsert_all_economic_indicators_sql,
     upsert_daily_valuation_sql,
     upsert_economic_indicator_from_wscn_sql,
@@ -196,6 +197,20 @@ def sync_index_history():
         return {"status": "ok", "message": "index-history synced", "updated_count": updated_count}
     except Exception as e:
         # 捕获异常并转换为 HTTP 500 错误响应
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/migrate/index-history-add-fields")
+def migrate_index_history_add_fields():
+    """一次性迁移：为 bds_index_history 表添加 amount/volume/position 列。
+
+    幂等：通过 information_schema 检查列是否存在，已存在则跳过。
+    返回 added_columns 列表（实际添加的列名），重复调用返回空列表。
+    """
+    try:
+        added = migrate_index_history_add_fields_sql()
+        return {"status": "success", "added_columns": added}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 

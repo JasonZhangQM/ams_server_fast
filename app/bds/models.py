@@ -105,6 +105,9 @@ class IndexHistory(Base, BaseModel):
     high: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最高价")
     low: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最低价")
     close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="收盘价")
+    amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="成交额")
+    volume: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="成交量")
+    position: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="持仓量")
 
     # 联合唯一约束 + 索引
     __table_args__ = (
@@ -120,6 +123,9 @@ class IndexHistory(Base, BaseModel):
         "high": ["最高价"],
         "low": ["最低价"],
         "close": ["收盘价"],
+        "amount": ["成交额"],
+        "volume": ["成交量"],
+        "position": ["持仓量"],
     }
     unique_keys = ["symbol", "trade_date"]
 

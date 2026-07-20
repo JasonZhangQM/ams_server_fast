@@ -128,12 +128,14 @@ def upsert_index_history_sql():
                 start_time = info['listed_date']
             end_time = date.today()
             # 调用 gm 接口获取历史行情（带超时保护，防止 gm 终端未启动时阻塞）
+            # fields 包含 amount/volume 用于量价分析；position 为期货专用字段，
+            # gm 对股票指数不返回，同步时该列缺失由 df_init_model 过滤后入库为 null
             df = call_with_timeout(history, timeout=30)(
                 symbol=symbol,
                 frequency='1d',
                 start_time=start_time,
                 end_time=end_time,
-                fields='eob,symbol,open,high,low,close',
+                fields='eob,symbol,open,high,low,close,amount,volume',
                 adjust=ADJUST_NONE,
                 df=True,
             )
@@ -160,6 +162,50 @@ def upsert_index_history_sql():
             logger.error(f"->{symbol} 失败：{str(e)}")
             steps[symbol] = -1
     return steps
+
+
+# 一次性迁移：为 bds_index_history 表添加 amount/volume/position 列
+def migrate_index_history_add_fields_sql():
+    """幂等迁移：为 bds_index_history 表添加 amount/volume/position 列。
+
+    通过 information_schema.columns 检查列是否存在，缺失则 ALTER TABLE 添加。
+    返回值：实际添加的列名列表（已存在列跳过），重复调用不报错。
+    """
+    from sqlalchemy import text
+
+    table_name = IndexHistory.__table__.name
+    # 三个新列的 (列名, comment) 配置，与 ORM 定义保持一致
+    new_columns = [
+        ("amount", "成交额"),
+        ("volume", "成交量"),
+        ("position", "持仓量"),
+    ]
+    added = []
+
+    with SessionLocal() as session:
+        for col_name, comment in new_columns:
+            # 检查列是否已存在（兼容 MySQL 8.0+）
+            check_sql = text(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() "
+                "AND table_name = :table_name AND column_name = :col_name"
+            )
+            col_exists = session.execute(
+                check_sql, {"table_name": table_name, "col_name": col_name}
+            ).scalar()
+            if col_exists:
+                continue
+            # 列不存在，执行 ALTER TABLE 添加
+            alter_sql = text(
+                f"ALTER TABLE {table_name} "
+                f"ADD COLUMN {col_name} DECIMAL(20,4) NULL COMMENT :comment"
+            )
+            session.execute(alter_sql, {"comment": comment})
+            added.append(col_name)
+        session.commit()
+
+    logger.info(f"bds_index_history 迁移完成，新增列：{added}")
+    return added
 
 
 # 循环获取 INDEX_CODE 中所有指数指定日期的成分股并追加入库

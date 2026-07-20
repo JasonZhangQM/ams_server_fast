@@ -62,6 +62,9 @@ class IndexHistoryOut(BaseModel):
     high: Optional[Decimal] = None  # 最高价
     low: Optional[Decimal] = None  # 最低价
     close: Optional[Decimal] = None  # 收盘价
+    amount: Optional[Decimal] = None  # 成交额
+    volume: Optional[Decimal] = None  # 成交量
+    position: Optional[Decimal] = None  # 持仓量
     sec_name: Optional[str] = None  # 指数名称（从 Config.INDEX_CODE 查找，不存数据库）
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间
