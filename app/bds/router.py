@@ -17,7 +17,7 @@ from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, text
 
-from server_fast.app.bds.models import DailyValuation, EconomicIndicator, FinanceDeriv, FundBalance, FundCashflow, FundIncome, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
+from server_fast.app.bds.models import DailyValuation, EconomicIndicator, FinanceDeriv, FundBalance, FundCashflow, FundIncome, GoldReserve, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
 from server_fast.app.bds.schemas import (
     DailyValuationOut,
     EconomicIndicatorOut,
@@ -25,6 +25,7 @@ from server_fast.app.bds.schemas import (
     FundBalanceOut,
     FundCashflowOut,
     FundIncomeOut,
+    GoldReserveOut,
     IndexConstituentOut,
     IndexHistoryOut,
     SymbolInfoOut,
@@ -34,6 +35,7 @@ from server_fast.app.bds.services import (
     insert_trade_date_em_sql,
     migrate_index_history_add_fields_sql,
     upsert_all_economic_indicators_sql,
+    upsert_all_gold_reserves_sql,
     upsert_daily_valuation_sql,
     upsert_economic_indicator_from_wscn_sql,
     upsert_economic_indicator_sql,
@@ -41,6 +43,7 @@ from server_fast.app.bds.services import (
     upsert_fund_balance_sql,
     upsert_fund_cashflow_sql,
     upsert_fund_income_sql,
+    upsert_gold_reserve_sql,
     upsert_index_constituent_sql,
     upsert_index_history_sql,
     upsert_symbol_info_excel_sql,
@@ -747,3 +750,77 @@ def sync_economic_indicator_wscn():
     if count == 0:
         return {"status": "no_data", "message": "wscn 无新数据可导入", "count": count}
     return {"status": "success", "message": f"wscn 同步完成，更新 {count} 条", "count": count}
+
+
+@router.get("/gold-reserve-countries")
+def list_gold_reserve_countries():
+    """返回央行黄金储备主要持有国列表。
+
+    数据源为 Config.GOLD_RESERVE_COUNTRIES 字典，确保前端下拉选项与后端配置
+    保持一致，无需依赖数据库查询。每项包含 country_code、country_name、imf_code。
+    """
+    countries = [
+        {"country_code": code, "country_name": info["country_name"], "imf_code": info["imf_code"]}
+        for code, info in Config.GOLD_RESERVE_COUNTRIES.items()
+    ]
+    return {"countries": countries}
+
+
+@router.get("/gold-reserves", response_model=PageResponse[GoldReserveOut])
+def list_gold_reserves(
+    country_code: Optional[List[str]] = Query(None, description="国家代码多选精确匹配"),
+    start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """查询黄金储备数据，支持国家多选和日期范围筛选。
+
+    按 rpt_date 降序、country_code 升序排序。
+    """
+    query = db.query(GoldReserve)
+    if country_code:
+        query = query.filter(GoldReserve.country_code.in_(country_code))
+    if start_date:
+        query = query.filter(GoldReserve.rpt_date >= start_date)
+    if end_date:
+        query = query.filter(GoldReserve.rpt_date <= end_date)
+    total = query.count()
+    items = query.order_by(GoldReserve.rpt_date.desc(), GoldReserve.country_code.asc()).offset(offset).limit(limit).all()
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+@router.post("/sync/gold-reserve")
+def sync_gold_reserve(country_code: str = Query(..., description="国家代码，精确匹配单个国家")):
+    """同步单个国家央行黄金储备数据。
+
+    返回值说明：
+    - status: success/no_data/error
+    - country_code: 同步的国家代码
+    - count: 更新条数（-1 表示失败）
+    """
+    if country_code not in Config.GOLD_RESERVE_COUNTRIES:
+        raise HTTPException(status_code=400, detail=f"未知国家代码：{country_code}")
+    try:
+        count = upsert_gold_reserve_sql(country_code)
+        if count == -1:
+            return {"status": "error", "country_code": country_code, "count": -1, "message": f"同步失败：{country_code}"}
+        if count == 0:
+            return {"status": "no_data", "country_code": country_code, "count": 0, "message": f"无数据可导入：{country_code}"}
+        return {"status": "success", "country_code": country_code, "count": count, "message": f"同步完成：{country_code}，更新 {count} 条"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sync/gold-reserves-all")
+def sync_gold_reserves_all():
+    """全量同步所有国家央行黄金储备数据。
+
+    单国家失败不中断，返回各国同步结果字典。
+    """
+    try:
+        steps = upsert_all_gold_reserves_sql()
+        return {"status": "ok", "steps": steps}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

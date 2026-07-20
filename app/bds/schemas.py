@@ -326,3 +326,23 @@ class EconomicIndicatorOut(BaseModel):
     frequency: Optional[str] = Field(default=None, description="频率")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
+
+
+class GoldReserveOut(BaseModel):
+    """黄金储备响应 Schema（对应 bds.GoldReserve 模型）。
+
+    每个字段的 description 与 ORM 模型的 comment 保持一致，
+    以便 OpenAPI 文档与前端表头统一。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    country_code: str = Field(description="国家代码")
+    country_name: str = Field(description="国家名称")
+    rpt_date: date = Field(description="报告日期")
+    gold_holdings_usd: Optional[Decimal] = Field(default=None, description="黄金储备(USD)")
+    unit: Optional[str] = Field(default=None, description="单位")
+    frequency: Optional[str] = Field(default=None, description="频率")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")

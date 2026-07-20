@@ -216,3 +216,28 @@ class Config:
         # 加拿大
         'CA193210': 'CA_POLICY_RATE',      # 加拿大央行政策利率
     }
+
+    # 央行黄金储备主要持有国（IMF SDMX IFS 数据集，RAXG_USD 指标）
+    # 国家代码 -> {country_name(中文), imf_code(ISO2 用于 IMF API)}
+    GOLD_RESERVE_COUNTRIES = {
+        'US': {'country_name': '美国',     'imf_code': 'US'},
+        'DE': {'country_name': '德国',     'imf_code': 'DE'},
+        'IT': {'country_name': '意大利',   'imf_code': 'IT'},
+        'FR': {'country_name': '法国',     'imf_code': 'FR'},
+        'RU': {'country_name': '俄罗斯',   'imf_code': 'RU'},
+        'CN': {'country_name': '中国',     'imf_code': 'CN'},
+        'CH': {'country_name': '瑞士',     'imf_code': 'CH'},
+        'JP': {'country_name': '日本',     'imf_code': 'JP'},
+        'IN': {'country_name': '印度',     'imf_code': 'IN'},
+        'TR': {'country_name': '土耳其',   'imf_code': 'TR'},
+        'TW': {'country_name': '中国台湾', 'imf_code': 'TW'},
+        'PT': {'country_name': '葡萄牙',   'imf_code': 'PT'},
+        'PL': {'country_name': '波兰',     'imf_code': 'PL'},
+        'KZ': {'country_name': '哈萨克斯坦','imf_code': 'KZ'},
+        'GB': {'country_name': '英国',     'imf_code': 'GB'},
+        'ES': {'country_name': '西班牙',   'imf_code': 'ES'},
+        'AT': {'country_name': '奥地利',   'imf_code': 'AT'},
+        'BE': {'country_name': '比利时',   'imf_code': 'BE'},
+        'TH': {'country_name': '泰国',     'imf_code': 'TH'},
+        'SG': {'country_name': '新加坡',   'imf_code': 'SG'},
+    }

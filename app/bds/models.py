@@ -450,3 +450,36 @@ class EconomicIndicator(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.indicator_code}-{self.report_date}"
+
+
+class GoldReserve(Base, BaseModel):
+    """黄金储备模型（对应表 bds_gold_reserve）。
+
+    存储 IMF SDMX IFS 数据集中各国央行月度黄金储备数据（RAXG_USD 指标，USD 计价），
+    按 country_code + rpt_date 联合唯一去重。
+    """
+
+    __tablename__ = "bds_gold_reserve"
+
+    # ---- 元数据字段 ----
+    country_code: Mapped[str] = mapped_column(String(8), nullable=False, comment="国家代码")
+    country_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="国家名称")
+    rpt_date: Mapped[date] = mapped_column(Date, nullable=False, comment="报告日期")
+    # ---- 数值字段 ----
+    gold_holdings_usd: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="黄金储备(USD)")
+    # ---- 单位与频率 ----
+    unit: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="单位")
+    frequency: Mapped[Optional[str]] = mapped_column(String(8), nullable=True, comment="频率")
+
+    # 联合唯一约束 + 复合索引
+    __table_args__ = (
+        UniqueConstraint("country_code", "rpt_date", name="uk_bds_gold_reserve"),
+        Index("k_bds_gold_reserve_country", "country_code"),
+        Index("k_bds_gold_reserve_date", "rpt_date"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["country_code", "rpt_date"]
+
+    def __str__(self) -> str:
+        return f"{self.country_code}-{self.rpt_date}"

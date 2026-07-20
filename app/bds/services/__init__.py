@@ -21,6 +21,10 @@ from server_fast.app.bds.services.economic_indicator import (
     upsert_economic_indicator_from_wscn_sql,
     upsert_economic_indicator_sql,
 )
+from server_fast.app.bds.services.gold_reserve import (
+    upsert_all_gold_reserves_sql,
+    upsert_gold_reserve_sql,
+)
 
 __all__ = [
     'insert_trade_date_em_sql',
@@ -36,4 +40,6 @@ __all__ = [
     'upsert_all_economic_indicators_sql',
     'upsert_economic_indicator_from_wscn_sql',
     'upsert_economic_indicator_sql',
+    'upsert_all_gold_reserves_sql',
+    'upsert_gold_reserve_sql',
 ]
