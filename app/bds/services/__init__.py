@@ -15,6 +15,9 @@ from server_fast.app.bds.services.data_sync import (
     upsert_index_history_sql,
     upsert_symbol_info_excel_sql,
 )
+from server_fast.app.bds.services.index_realtime import (
+    fetch_realtime_index_prices,
+)
 from server_fast.app.bds.services.economic_indicator import (
     upsert_all_economic_indicators_sql,
     upsert_economic_indicator_from_wscn_sql,
@@ -30,6 +33,7 @@ from server_fast.app.bds.services.yield_indicator import (
 )
 
 __all__ = [
+    'fetch_realtime_index_prices',
     'insert_trade_date_em_sql',
     'upsert_daily_valuation_sql',
     'upsert_finance_deriv_sql',

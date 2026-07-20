@@ -33,6 +33,7 @@ from server_fast.app.bds.schemas import (
     YieldIndicatorOut,
 )
 from server_fast.app.bds.services import (
+    fetch_realtime_index_prices,
     insert_trade_date_em_sql,
     upsert_all_economic_indicators_sql,
     upsert_all_gold_reserves_sql,
@@ -339,9 +340,18 @@ def list_index_cum_returns(
         .all()
     )
 
+    # 获取指数实时最新价（A 股走 gm，美股走 yfinance），用于拼接今日实时行
+    symbols = list(Config.INDEX_CODE.keys())
+    realtime_prices, realtime_source = fetch_realtime_index_prices(symbols)
+
     # 空数据直接返回空结构
     if not rows:
-        return {"trade_dates": [], "series": {}, "max_drawdown": {}}
+        return {
+            "trade_dates": [],
+            "series": {},
+            "max_drawdown": {},
+            "realtime_source": None,
+        }
 
     # 构造 DataFrame 并透视：行=trade_date，列=symbol，值=close
     df = pd.DataFrame(
@@ -355,10 +365,29 @@ def list_index_cum_returns(
         ]
     )
     df = df.pivot(index="trade_date", columns="symbol", values="close")
+    # 按 trade_date 升序排序（在 rename 前排序，便于后续以 symbol 列名拼接实时行情）
+    df = df.sort_index(ascending=True)
+
+    # 拼接当日实时行情：此时 df 列名仍为 symbol，可直接用 realtime_prices 匹配
+    today = date.today()
+    if realtime_prices:
+        # 构造今日实时行：每个 symbol 列填入实时价（缺失填 NaN）
+        today_row = pd.Series(
+            {sym: realtime_prices.get(sym, np.nan) for sym in df.columns},
+            name=today,
+        )
+        if today in df.index:
+            # 历史末尾已是今日：用实时价覆盖该行（仅覆盖有实时价的列）
+            for sym, price in realtime_prices.items():
+                if sym in df.columns:
+                    df.loc[today, sym] = price
+        else:
+            # 新增今日行
+            df = pd.concat([df, pd.DataFrame([today_row])])
+            df = df.sort_index(ascending=True)
+
     # 列名由 symbol 映射为 sec_name（指数名称）
     df = df.rename(columns={k: v["sec_name"] for k, v in Config.INDEX_CODE.items()})
-    # 按 trade_date 升序排序
-    df = df.sort_index(ascending=True)
 
     # 累计净值：当日收盘价 / 首日收盘价
     cum = df / df.iloc[0]
@@ -384,7 +413,12 @@ def list_index_cum_returns(
         for col_name in max_drawdown_df.columns
     }
 
-    return {"trade_dates": trade_dates, "series": series, "max_drawdown": max_drawdown}
+    return {
+        "trade_dates": trade_dates,
+        "series": series,
+        "max_drawdown": max_drawdown,
+        "realtime_source": realtime_source,
+    }
 
 
 @router.post("/sync/fund-balance")
