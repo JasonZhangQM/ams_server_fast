@@ -200,12 +200,18 @@ def upsert_index_history_sql():
                     .first()
                 )
             max_date = row[0] if row else None
+            # 优化：若最新日期已是今日，说明当日已收盘且数据已入库，跳过接口调用
+            today = date.today()
+            if max_date is not None and max_date >= today:
+                logger.info(f"->{symbol} 最新日期 {max_date} 已是今日，跳过同步")
+                steps[symbol] = 0
+                continue
             # 增量更新起点：有数据则从最新日期 + 1 天，否则从 listed_date 全量获取
             if max_date is not None:
                 start_time = max_date + timedelta(days=1)
             else:
                 start_time = info['listed_date']
-            end_time = date.today()
+            end_time = today
             # 根据 data_source 选择数据源：yfinance 走新路径，默认走 gm
             if info.get('data_source') == 'yfinance':
                 df = _fetch_index_history_from_yfinance(symbol, info, start_time, end_time)
