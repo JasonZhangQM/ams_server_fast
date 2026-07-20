@@ -489,10 +489,10 @@ class YieldIndicator(Base, BaseModel):
     """美债收益率指标模型（对应表 bds_yield_indicator）。
 
     存储 FRED API `/series/observations` 同步的 4 个日频收益率指标
-    （2Y/10Y/2Y-10Y 利差/10Y TIPS），字段严格根据 FRED observation
-    实际返回数据设计，按 indicator_code + report_date 联合唯一去重。
-    相比 EconomicIndicator 移除 wscn 专用字段（pub_date/value_prev 等），
-    新增 FRED 特有的 realtime_start/realtime_end 字段，便于追溯数据修订历史。
+    （2Y/10Y/2Y-10Y 利差/10Y TIPS），按 indicator_code + report_date
+    联合唯一去重。相比 EconomicIndicator 移除 wscn 专用字段
+    （pub_date/value_prev 等），仅保留 FRED observation 中的 date/value
+    两个字段（realtime_start/realtime_end 已废弃）。
     """
 
     __tablename__ = "bds_yield_indicator"
@@ -506,8 +506,6 @@ class YieldIndicator(Base, BaseModel):
     # ---- FRED 数据字段（来自 observation） ----
     report_date: Mapped[date] = mapped_column(Date, nullable=False, comment="报告日期")
     value: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="数值")
-    realtime_start: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="FRED 实时数据范围起点")
-    realtime_end: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="FRED 实时数据范围终点")
     # ---- 单位与频率 ----
     unit: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="单位")
     frequency: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="频率")

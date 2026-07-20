@@ -6,7 +6,6 @@
 """
 from server_fast.app.bds.services.data_sync import (
     insert_trade_date_em_sql,
-    migrate_index_history_add_fields_sql,
     upsert_daily_valuation_sql,
     upsert_finance_deriv_sql,
     upsert_fund_balance_sql,
@@ -32,7 +31,6 @@ from server_fast.app.bds.services.yield_indicator import (
 
 __all__ = [
     'insert_trade_date_em_sql',
-    'migrate_index_history_add_fields_sql',
     'upsert_daily_valuation_sql',
     'upsert_finance_deriv_sql',
     'upsert_fund_balance_sql',

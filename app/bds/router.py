@@ -34,7 +34,6 @@ from server_fast.app.bds.schemas import (
 )
 from server_fast.app.bds.services import (
     insert_trade_date_em_sql,
-    migrate_index_history_add_fields_sql,
     upsert_all_economic_indicators_sql,
     upsert_all_gold_reserves_sql,
     upsert_all_yield_indicators_sql,
@@ -203,20 +202,6 @@ def sync_index_history():
         return {"status": "ok", "message": "index-history synced", "updated_count": updated_count}
     except Exception as e:
         # 捕获异常并转换为 HTTP 500 错误响应
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/migrate/index-history-add-fields")
-def migrate_index_history_add_fields():
-    """一次性迁移：为 bds_index_history 表添加 amount/volume/position 列。
-
-    幂等：通过 information_schema 检查列是否存在，已存在则跳过。
-    返回 added_columns 列表（实际添加的列名），重复调用返回空列表。
-    """
-    try:
-        added = migrate_index_history_add_fields_sql()
-        return {"status": "success", "added_columns": added}
-    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -601,15 +586,15 @@ def list_daily_valuations(
 @router.get("/economic-indicators", response_model=PageResponse[EconomicIndicatorOut])
 def list_economic_indicators(
     indicator_code: Optional[str] = Query(default=None, description="指标代码精确匹配"),
-    category: Optional[List[str]] = Query(default=None, description="类别多选 IN 匹配"),
-    country: Optional[List[str]] = Query(default=None, description="国别多选 IN 匹配"),
+    category: Optional[str] = Query(default=None, description="类别精确匹配"),
+    country: Optional[str] = Query(default=None, description="国别精确匹配"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
     end_date: Optional[date] = Query(default=None, description="报告日期结束日"),
     limit: int = Query(default=100, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询经济指标数据，支持指标代码精确匹配、类别/国别多选和报告日期范围筛选。
+    """查询经济指标数据，支持指标代码/类别/国别精确匹配和报告日期范围筛选。
 
     排序规则：report_date 降序，同 report_date 按 indicator_code 升序。
     """
@@ -617,12 +602,12 @@ def list_economic_indicators(
     # indicator_code 精确匹配
     if indicator_code:
         query = query.filter(EconomicIndicator.indicator_code == indicator_code)
-    # category 多选 IN 过滤
+    # category 精确匹配
     if category:
-        query = query.filter(EconomicIndicator.category.in_(category))
-    # country 多选 IN 过滤
+        query = query.filter(EconomicIndicator.category == category)
+    # country 精确匹配
     if country:
-        query = query.filter(EconomicIndicator.country.in_(country))
+        query = query.filter(EconomicIndicator.country == country)
     # 报告日期范围过滤
     if start_date:
         query = query.filter(EconomicIndicator.report_date >= start_date)

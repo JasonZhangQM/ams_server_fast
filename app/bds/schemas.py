@@ -365,8 +365,6 @@ class YieldIndicatorOut(BaseModel):
     country: str = Field(description="国别")
     report_date: date = Field(description="报告日期")
     value: Optional[Decimal] = Field(default=None, description="数值")
-    realtime_start: Optional[date] = Field(default=None, description="FRED 实时数据范围起点")
-    realtime_end: Optional[date] = Field(default=None, description="FRED 实时数据范围终点")
     unit: Optional[str] = Field(default=None, description="单位")
     frequency: Optional[str] = Field(default=None, description="频率")
     create_time: datetime = Field(description="创建时间")

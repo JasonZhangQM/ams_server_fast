@@ -6,7 +6,7 @@
 
 与 economic_indicator.py 的差异：
 - 数据源仅 FRED API `/series/observations`，无 akshare/wscn 回退
-- 完整保留 FRED observation 返回的 4 个字段：date/value/realtime_start/realtime_end
+- 仅保留 FRED observation 中的 date/value 两个字段（realtime_start/realtime_end 已废弃）
 - 不计算 value_prev、不设 value_expected/pub_date 为 null（这些 wscn 专用字段新表不含）
 - 增量策略：DB 有数据时从 max(report_date)+1 起拉，无数据从 2010-01-01 起拉
 """
@@ -45,14 +45,13 @@ def _fetch_yield_from_fred(indicator_code, meta):
     FRED API `/series/observations` 每个 observation 含 4 个字段：
     - date: 报告日期（YYYY-MM-DD 字符串）
     - value: 数值（字符串，"." 表示缺失）
-    - realtime_start: FRED 实时数据范围起点（YYYY-MM-DD 字符串）
-    - realtime_end: FRED 实时数据范围终点（YYYY-MM-DD 字符串）
+    - realtime_start/realtime_end: FRED 实时数据范围（已废弃，不入库）
 
     增量策略：
     - DB 有数据时从 max(report_date)+1 起拉
     - 无数据时从 2010-01-01 起拉
 
-    :return: DataFrame，列包含 report_date/value/realtime_start/realtime_end
+    :return: DataFrame，列包含 report_date/value
     """
     series_id = meta['fred_series_id']
     units = meta.get('fred_units', 'lin')
@@ -96,10 +95,10 @@ def _fetch_yield_from_fred(indicator_code, meta):
     if not observations:
         return pd.DataFrame()
 
-    # 构建 DataFrame，完整保留 FRED observation 的 4 个字段
+    # 构建 DataFrame，仅保留 FRED observation 的 date/value 字段
     df = pd.DataFrame(observations)
 
-    # 字段映射：date -> report_date，value 保持原名，realtime_start/realtime_end 保持原名
+    # 字段映射：date -> report_date；realtime_start/realtime_end 已废弃，不入库
     df = df.rename(columns={'date': 'report_date'})
 
     # FRED 用 "." 表示缺失值，转为 NaN
@@ -148,10 +147,7 @@ def upsert_yield_indicator_sql(indicator_code):
         df['frequency'] = meta['frequency']
 
         # 日期列转换（FRED 返回 YYYY-MM-DD 字符串 -> date）
-        # report_date/realtime_start/realtime_end 均为 FRED observation 字段
-        for col in ['report_date', 'realtime_start', 'realtime_end']:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.date
+        df['report_date'] = pd.to_datetime(df['report_date'], errors='coerce').dt.date
 
         # 数值列转换（非数值转为 NaN 后过滤）
         df['value'] = pd.to_numeric(df['value'], errors='coerce')
@@ -164,8 +160,8 @@ def upsert_yield_indicator_sql(indicator_code):
 
         # 选择目标列并入库
         cols = ['indicator_code', 'indicator_name', 'indicator_short_name', 'category', 'country',
-                'report_date', 'value', 'realtime_start', 'realtime_end', 'unit', 'frequency']
-        df = df[[c for c in cols if c in df.columns]]
+                'report_date', 'value', 'unit', 'frequency']
+        df = df[cols]
         df = df.replace({np.nan: None})
 
         upsert_df_to_db(df, _mdl.__table__.name, _engine, _mdl.unique_keys)
