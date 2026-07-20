@@ -22,6 +22,8 @@ class Config:
         'SHSE.000852':{'sec_name':'中证1000','market_code':'SHSE','listed_date':'2014-10-17'},
         # 'SHSE.000688':{'sec_name':'科创50','market_code':'SHSE','listed_date':'2020-07-23'},
         'SZSE.399006':{'sec_name':'创业板指','market_code':'SZSE','listed_date':'2010-06-01'},
+        # 美股指数：gm 不支持，通过 yfinance 拉取
+        'SP500':{'sec_name':'S&P 500','market_code':'US','listed_date':'1957-01-01','data_source':'yfinance','yf_ticker':'^GSPC'},
     }
 
     ECONOMIC_INDICATORS = {  # 各国核心宏观经济指标配置（代码 -> 元信息）

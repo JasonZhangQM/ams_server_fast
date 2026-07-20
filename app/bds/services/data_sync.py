@@ -20,6 +20,12 @@ from server_fast.common.db import SessionLocal
 from server_fast.app.bds.config import Config as dbsCfg
 from server_fast.app.bds.models import *
 
+# yfinance 容错导入：未安装时设为 None，运行时再判断
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
+
 logger = logging.getLogger("uvicorn.error")  # 复用 uvicorn 的 logger，输出到 stderr 不被缓冲
 
 
@@ -95,6 +101,79 @@ def upsert_symbol_info_excel_sql():
             logger.info(f"->无需导入：{file_name}")
 
 
+def _fetch_index_history_from_yfinance(symbol, info, start_time, end_time):
+    """通过 yfinance 拉取指数历史行情，返回标准化 DataFrame。
+
+    yfinance 返回的 DataFrame 列映射：
+    - Date (index) → eob (保持 datetime 类型，与 gm 路径一致，由调用方统一转 trade_date)
+    - Open → open
+    - High → high
+    - Low → low
+    - Adj Close → close (优先使用复权价；若无则用 Close)
+    - Volume → volume
+    - amount = close * volume (yfinance 不直接提供成交额，用近似值)
+    - symbol 列填充为传入的 symbol 值
+
+    参数：
+    - symbol: 配置中的 symbol 键（如 'SP500'）
+    - info: 配置字典（含 yf_ticker）
+    - start_time: date 类型，开始日期
+    - end_time: date 类型，结束日期
+
+    返回：
+    - DataFrame，列包含 eob, symbol, open, high, low, close, volume, amount
+    - yfinance 不可用、调用失败或返回空时返回 None
+    """
+    try:
+        if yf is None:
+            logger.warning("yfinance 未安装，无法拉取 yfinance 数据源指数行情")
+            return None
+        # yfinance 默认在 ~/.cache/py-yfinance 维护 SQLite 时区缓存
+        # 某些环境下默认缓存路径无写权限会抛 OperationalError，改为项目可写目录
+        try:
+            import os
+            cache_dir = os.path.join(os.path.expanduser('~'), '.cache', 'py-yfinance')
+            os.makedirs(cache_dir, exist_ok=True)
+            yf.set_tz_cache_location(cache_dir)
+        except Exception:
+            pass  # 设置失败也继续尝试，可能旧版 yfinance 无此 API
+        # 使用 Ticker.history 而非 yf.download：后者依赖 requests-cache 写 SQLite
+        # 在某些环境下缓存路径无写权限会抛 OperationalError 导致下载失败
+        ticker = yf.Ticker(info['yf_ticker'])
+        df = ticker.history(
+            start=start_time.isoformat(),
+            end=end_time.isoformat(),
+            auto_adjust=False,
+            raise_errors=False,
+        )
+        if df is None or df.empty:
+            return None
+        df = df.reset_index()  # Date 索引转列
+        # 列重命名：Date → eob，OHLCV 标准化
+        df = df.rename(columns={
+            'Date': 'eob',
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Volume': 'volume',
+        })
+        # close 列：优先使用 Adj Close，否则用 Close
+        if 'Adj Close' in df.columns:
+            df['close'] = df['Adj Close']
+        elif 'Close' in df.columns:
+            df['close'] = df['Close']
+        # amount = close * volume（yfinance 不直接提供成交额，用近似值）
+        df['amount'] = df['close'] * df['volume']
+        # 填充 symbol 列
+        df['symbol'] = symbol
+        # 选取并顺序化目标列，eob 保持 datetime 类型，由调用方统一转 date
+        df = df[['eob', 'symbol', 'open', 'high', 'low', 'close', 'volume', 'amount']]
+        return df
+    except Exception as e:
+        logger.error(f"yfinance 拉取 {symbol} 失败：{str(e)}")
+        return None
+
+
 # 循环获取 INDEX_CODE 中所有指数的历史行情并 upsert 入库
 def upsert_index_history_sql():
     """循环获取 INDEX_CODE 中所有指数的历史行情并 upsert 入库。
@@ -127,18 +206,22 @@ def upsert_index_history_sql():
             else:
                 start_time = info['listed_date']
             end_time = date.today()
-            # 调用 gm 接口获取历史行情（带超时保护，防止 gm 终端未启动时阻塞）
-            # fields 包含 amount/volume 用于量价分析；position 为期货专用字段，
-            # gm 对股票指数不返回，同步时该列缺失由 df_init_model 过滤后入库为 null
-            df = call_with_timeout(history, timeout=30)(
-                symbol=symbol,
-                frequency='1d',
-                start_time=start_time,
-                end_time=end_time,
-                fields='eob,symbol,open,high,low,close,amount,volume',
-                adjust=ADJUST_NONE,
-                df=True,
-            )
+            # 根据 data_source 选择数据源：yfinance 走新路径，默认走 gm
+            if info.get('data_source') == 'yfinance':
+                df = _fetch_index_history_from_yfinance(symbol, info, start_time, end_time)
+            else:
+                # 调用 gm 接口获取历史行情（带超时保护，防止 gm 终端未启动时阻塞）
+                # fields 包含 amount/volume 用于量价分析；position 为期货专用字段，
+                # gm 对股票指数不返回，同步时该列缺失由 df_init_model 过滤后入库为 null
+                df = call_with_timeout(history, timeout=30)(
+                    symbol=symbol,
+                    frequency='1d',
+                    start_time=start_time,
+                    end_time=end_time,
+                    fields='eob,symbol,open,high,low,close,amount,volume',
+                    adjust=ADJUST_NONE,
+                    df=True,
+                )
             if df is None or df.empty:
                 logger.info(f"->{symbol} 无需导入")
                 steps[symbol] = 0
