@@ -351,11 +351,12 @@ def fetch_json_with_timeout(url: str, params: dict, timeout: int = 30,
 
     # 从项目配置读取代理（若 .env 中配置了 HTTP_PROXY/HTTPS_PROXY 则启用）
     # 用于访问被网络环境阻断的境外 API（如 IMF SDMX API: dataservices.imf.org）
+    # httpx 0.28+ 已移除 proxies 参数，改用 proxy= 单一字符串
     try:
         from server_fast.config import settings as _settings
-        _proxies = _settings.proxies
+        _proxy = _settings.proxy
     except Exception:
-        _proxies = None
+        _proxy = None
 
     # 仅对可恢复的网络层错误重试；HTTP 4xx/5xx 属业务错误不重试
     _RETRYABLE_EXC = (httpx.TransportError, httpx.NetworkError,
@@ -369,8 +370,8 @@ def fetch_json_with_timeout(url: str, params: dict, timeout: int = 30,
 
     def _do_request() -> dict:
         # verify 传入自定义 SSL 上下文；timeout 连接+读取各 30s
-        # proxies 为 None 时 httpx 直连，配置后走代理
-        with httpx.Client(timeout=timeout, verify=_ssl_ctx, proxies=_proxies) as client:
+        # proxy 为 None 时 httpx 直连，配置后走代理
+        with httpx.Client(timeout=timeout, verify=_ssl_ctx, proxy=_proxy) as client:
             resp = client.get(url, params=params)
             resp.raise_for_status()
             return resp.json()

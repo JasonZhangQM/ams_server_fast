@@ -49,18 +49,14 @@ class Settings(BaseSettings):
     )
 
     @property
-    def proxies(self):
-        """返回 httpx 代理字典，未配置时为 None。
+    def proxy(self):
+        """返回 httpx 代理 URL 字符串，未配置时为 None。
 
-        httpx 的 proxies 参数接受 {scheme: proxy_url} 字典，
-        例如 {'http://': 'http://127.0.0.1:7890', 'https://': 'http://127.0.0.1:7890'}
+        httpx 0.28+ 的 Client(proxy=...) 参数接受单一字符串 URL，
+        所有协议（http/https）共用同一代理。
+        优先 HTTPS_PROXY，其次 HTTP_PROXY。
         """
-        if not (self.HTTP_PROXY or self.HTTPS_PROXY):
-            return None
-        return {
-            "http://": self.HTTP_PROXY or None,
-            "https://": self.HTTPS_PROXY or self.HTTP_PROXY or None,
-        }
+        return self.HTTPS_PROXY or self.HTTP_PROXY or None
 
     @property
     def DB_ENGINE(self) -> Engine:

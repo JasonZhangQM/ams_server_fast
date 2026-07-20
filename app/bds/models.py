@@ -483,3 +483,44 @@ class GoldReserve(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.country_code}-{self.rpt_date}"
+
+
+class YieldIndicator(Base, BaseModel):
+    """美债收益率指标模型（对应表 bds_yield_indicator）。
+
+    存储 FRED API `/series/observations` 同步的 4 个日频收益率指标
+    （2Y/10Y/2Y-10Y 利差/10Y TIPS），字段严格根据 FRED observation
+    实际返回数据设计，按 indicator_code + report_date 联合唯一去重。
+    相比 EconomicIndicator 移除 wscn 专用字段（pub_date/value_prev 等），
+    新增 FRED 特有的 realtime_start/realtime_end 字段，便于追溯数据修订历史。
+    """
+
+    __tablename__ = "bds_yield_indicator"
+
+    # ---- Config 元信息字段 ----
+    indicator_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="指标代码")
+    indicator_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="指标名称")
+    indicator_short_name: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, comment="指标简称")
+    category: Mapped[str] = mapped_column(String(32), nullable=False, comment="类别")
+    country: Mapped[str] = mapped_column(String(32), nullable=False, server_default="美国", comment="国别")
+    # ---- FRED 数据字段（来自 observation） ----
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, comment="报告日期")
+    value: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="数值")
+    realtime_start: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="FRED 实时数据范围起点")
+    realtime_end: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="FRED 实时数据范围终点")
+    # ---- 单位与频率 ----
+    unit: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="单位")
+    frequency: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="频率")
+
+    # 联合唯一约束 + 单列索引
+    __table_args__ = (
+        UniqueConstraint("indicator_code", "report_date", name="uk_bds_yield_indicator"),
+        Index("k_bds_yield_indicator_code", "indicator_code"),
+        Index("k_bds_yield_indicator_date", "report_date"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["indicator_code", "report_date"]
+
+    def __str__(self) -> str:
+        return f"{self.indicator_code}-{self.report_date}"

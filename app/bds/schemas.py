@@ -346,3 +346,28 @@ class GoldReserveOut(BaseModel):
     frequency: Optional[str] = Field(default=None, description="频率")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
+
+
+class YieldIndicatorOut(BaseModel):
+    """美债收益率指标响应 Schema（对应 bds.YieldIndicator 模型）。
+
+    每个字段的 description 与 ORM 模型的 comment 保持一致，
+    以便 OpenAPI 文档与前端表头统一。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    indicator_code: str = Field(description="指标代码")
+    indicator_name: str = Field(description="指标名称")
+    indicator_short_name: Optional[str] = Field(default=None, description="指标简称")
+    category: str = Field(description="类别")
+    country: str = Field(description="国别")
+    report_date: date = Field(description="报告日期")
+    value: Optional[Decimal] = Field(default=None, description="数值")
+    realtime_start: Optional[date] = Field(default=None, description="FRED 实时数据范围起点")
+    realtime_end: Optional[date] = Field(default=None, description="FRED 实时数据范围终点")
+    unit: Optional[str] = Field(default=None, description="单位")
+    frequency: Optional[str] = Field(default=None, description="频率")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")

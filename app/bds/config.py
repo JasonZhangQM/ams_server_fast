@@ -26,18 +26,22 @@ class Config:
         'SP500':{'sec_name':'S&P 500','market_code':'US','listed_date':'1957-01-01','data_source':'yfinance','yf_ticker':'^GSPC'},
     }
 
+    # 收益率指标已拆分至 YIELD_INDICATORS 字典，通过 FRED API 同步到 bds_yield_indicator 表
+    # fred_units: lin=原始值 pch=环比百分比变化 pc1=同比百分比变化 pca=复合年化变化率
+    YIELD_INDICATORS = {  # 美债收益率指标配置（代码 -> 元信息），独立于 ECONOMIC_INDICATORS，仅通过 FRED API 同步
+        'YIELD_2Y':           {'name': '2年期美债收益率',  'short_name': '二年美债收益率',  'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DGS2',   'fred_units': 'lin'},
+        'YIELD_10Y':          {'name': '10年期美债收益率', 'short_name': '十年美债收益率', 'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DGS10',  'fred_units': 'lin'},
+        'YIELD_SPREAD_2Y10Y': {'name': '2Y-10Y利差',       'short_name': '2Y-10Y利差',     'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'T10Y2Y', 'fred_units': 'lin'},
+        'YIELD_TIPS_10Y':     {'name': '10年期TIPS收益率', 'short_name': '十年TIPS收益率', 'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DFII10', 'fred_units': 'lin'},
+    }
+
     ECONOMIC_INDICATORS = {  # 各国核心宏观经济指标配置（代码 -> 元信息）
         # 主数据源：wscn 日历 API（覆盖美国/中国/加拿大宏观指标）
-        # 收益率指标仍通过 FRED API 同步，保留 fred_series_id/akshare_func/fred_units/col_pattern/col_name
+        # 收益率指标已拆分至 YIELD_INDICATORS 字典，通过 FRED API 同步到 bds_yield_indicator 表
         # fred_units: lin=原始值 pch=环比百分比变化 pc1=同比百分比变化 pca=复合年化变化率
         # 美国宏观指标：按 category 分组整合排序（共 35 个）
-        # 非收益率指标仅通过 wscn 日历数据源同步；收益率指标保留 FRED 字段
+        # 非收益率指标仅通过 wscn 日历数据源同步
         # short_name: 5 字左右简称，供前端筛选框/表格首列使用
-        # ---- 收益率 ----（保留 FRED 字段，通过 FRED API 同步）
-        'YIELD_2Y':           {'name': '2年期美债收益率',  'short_name': '二年美债收益率',  'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DGS2',   'fred_units': 'lin', 'akshare_func': 'bond_zh_us_rate', 'col_pattern': 'C', 'col_name': '美国国债收益率2年'},
-        'YIELD_10Y':          {'name': '10年期美债收益率', 'short_name': '十年美债收益率', 'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DGS10',  'fred_units': 'lin', 'akshare_func': 'bond_zh_us_rate', 'col_pattern': 'C', 'col_name': '美国国债收益率10年'},
-        'YIELD_SPREAD_2Y10Y': {'name': '2Y-10Y利差',       'short_name': '2Y-10Y利差',     'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'T10Y2Y', 'fred_units': 'lin', 'akshare_func': 'bond_zh_us_rate', 'col_pattern': 'C', 'col_name': '美国国债收益率10年-2年'},
-        'YIELD_TIPS_10Y':     {'name': '10年期TIPS收益率', 'short_name': '十年TIPS收益率', 'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DFII10', 'fred_units': 'lin'},
         # ---- 利率与财政 ----
         'FED_FUNDS_RATE':        {'name': 'FOMC利率决策(下限)', 'short_name': '联邦利率下限', 'country': '美国', 'category': '利率与财政', 'unit': '%',    'frequency': 'per_fomc'},
         'FED_FUNDS_RATE_UPPER':  {'name': 'FOMC利率决策(上限)', 'short_name': '联邦利率上限', 'country': '美国', 'category': '利率与财政', 'unit': '%',    'frequency': 'per_fomc'},

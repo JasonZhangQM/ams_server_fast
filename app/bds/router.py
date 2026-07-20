@@ -17,7 +17,7 @@ from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, text
 
-from server_fast.app.bds.models import DailyValuation, EconomicIndicator, FinanceDeriv, FundBalance, FundCashflow, FundIncome, GoldReserve, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
+from server_fast.app.bds.models import DailyValuation, EconomicIndicator, FinanceDeriv, FundBalance, FundCashflow, FundIncome, GoldReserve, IndexConstituent, IndexHistory, SymbolInfo, TradeDate, YieldIndicator
 from server_fast.app.bds.schemas import (
     DailyValuationOut,
     EconomicIndicatorOut,
@@ -30,12 +30,14 @@ from server_fast.app.bds.schemas import (
     IndexHistoryOut,
     SymbolInfoOut,
     TradeDateOut,
+    YieldIndicatorOut,
 )
 from server_fast.app.bds.services import (
     insert_trade_date_em_sql,
     migrate_index_history_add_fields_sql,
     upsert_all_economic_indicators_sql,
     upsert_all_gold_reserves_sql,
+    upsert_all_yield_indicators_sql,
     upsert_daily_valuation_sql,
     upsert_economic_indicator_from_wscn_sql,
     upsert_economic_indicator_sql,
@@ -47,6 +49,7 @@ from server_fast.app.bds.services import (
     upsert_index_constituent_sql,
     upsert_index_history_sql,
     upsert_symbol_info_excel_sql,
+    upsert_yield_indicator_sql,
 )
 from server_fast.app.bds.config import Config
 from server_fast.common.db import get_db
@@ -838,5 +841,103 @@ def sync_gold_reserves_all():
         if all_failed:
             message = "全部国家同步失败，IMF SDMX API 不可达，请在 server_fast/.env 中配置 HTTPS_PROXY"
         return {"status": "ok", "steps": steps, "message": message}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/yield-indicator-codes")
+def list_yield_indicator_codes():
+    """返回美债收益率指标配置列表（数据源 Config.YIELD_INDICATORS，无数据库查询）。
+
+    每项包含 indicator_code、indicator_name、indicator_short_name、category、
+    country、unit、frequency，供前端下拉选项使用。
+    """
+    indicators = [
+        {
+            "indicator_code": code,
+            "indicator_name": info["name"],
+            "indicator_short_name": info["short_name"],
+            "category": info["category"],
+            "country": info["country"],
+            "unit": info["unit"],
+            "frequency": info["frequency"],
+        }
+        for code, info in Config.YIELD_INDICATORS.items()
+    ]
+    return indicators
+
+
+@router.get("/yield-indicators", response_model=PageResponse[YieldIndicatorOut])
+def list_yield_indicators(
+    indicator_code: Optional[List[str]] = Query(default=None, description="指标代码多选 IN 匹配"),
+    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    end_date: Optional[date] = Query(default=None, description="报告日期结束日"),
+    limit: int = Query(default=100, ge=1),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """查询美债收益率指标数据，支持指标代码多选 IN、报告日期范围筛选与分页。
+
+    排序规则：report_date 降序，同 report_date 按 indicator_code 升序。
+    """
+    query = db.query(YieldIndicator)
+    # indicator_code 多选 IN 过滤
+    if indicator_code:
+        query = query.filter(YieldIndicator.indicator_code.in_(indicator_code))
+    # 报告日期范围过滤
+    if start_date:
+        query = query.filter(YieldIndicator.report_date >= start_date)
+    if end_date:
+        query = query.filter(YieldIndicator.report_date <= end_date)
+    total = query.count()
+    items = (
+        query.order_by(YieldIndicator.report_date.desc(), YieldIndicator.indicator_code.asc())
+        .offset(offset).limit(limit).all()
+    )
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+@router.post("/sync/yield-indicator")
+def sync_yield_indicator(indicator_code: str = Query(..., description="指标代码，精确匹配单个指标")):
+    """同步单个美债收益率指标数据。
+
+    返回值说明：
+    - status: success/no_data/error
+    - message: 同步结果描述信息
+    - indicator_code: 指标代码
+    - count: 插入/更新条数（-1 表示失败）
+    """
+    if not indicator_code:
+        return {"status": "error", "message": "indicator_code 不能为空",
+                "indicator_code": indicator_code, "count": -1}
+    if indicator_code not in Config.YIELD_INDICATORS:
+        return {"status": "error", "message": f"未知收益率指标代码：{indicator_code}",
+                "indicator_code": indicator_code, "count": -1}
+    count = upsert_yield_indicator_sql(indicator_code)
+    if count == -1:
+        return {"status": "error", "message": f"同步失败：{indicator_code}",
+                "indicator_code": indicator_code, "count": -1}
+    if count == 0:
+        return {"status": "no_data", "message": f"无数据可导入：{indicator_code}",
+                "indicator_code": indicator_code, "count": 0}
+    return {"status": "success", "message": f"同步完成：{indicator_code}，更新 {count} 条",
+            "indicator_code": indicator_code, "count": count}
+
+
+@router.post("/sync/yield-indicators-all")
+def sync_yield_indicators_all():
+    """全量同步所有美债收益率指标数据。
+
+    遍历 Config.YIELD_INDICATORS 中 4 个指标代码，逐个调用同步函数。
+    单指标失败不中断，返回 steps 包含每个指标的结果。
+
+    返回值说明：
+    - status: success
+    - message: 同步结果描述信息
+    - steps: {indicator_code: count, ...} 各指标同步条数字典
+    """
+    try:
+        steps = upsert_all_yield_indicators_sql()
+        return {"status": "success", "message": "美债收益率指标全量同步完成", "steps": steps}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
