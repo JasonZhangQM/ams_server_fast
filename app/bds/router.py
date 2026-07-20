@@ -340,10 +340,6 @@ def list_index_cum_returns(
         .all()
     )
 
-    # 获取指数实时最新价（A 股走 gm，美股走 yfinance），用于拼接今日实时行
-    symbols = list(Config.INDEX_CODE.keys())
-    realtime_prices, realtime_source = fetch_realtime_index_prices(symbols)
-
     # 空数据直接返回空结构
     if not rows:
         return {
@@ -368,21 +364,37 @@ def list_index_cum_returns(
     # 按 trade_date 升序排序（在 rename 前排序，便于后续以 symbol 列名拼接实时行情）
     df = df.sort_index(ascending=True)
 
-    # 拼接当日实时行情：此时 df 列名仍为 symbol，可直接用 realtime_prices 匹配
+    # 优化：按列检查每个指数在今日是否有数据，仅对缺失的指数调用实时接口
+    # 场景：部分指数历史数据已更新到今日（如 A 股已收盘入库），另一部分未更新（如 SP500 时差延迟）
     today = date.today()
+    if today in df.index:
+        # 历史 index 含今日：检查每列在今日是否有非 NaN 值
+        today_row = df.loc[today]
+        missing_symbols = [sym for sym in df.columns if pd.isna(today_row[sym])]
+    else:
+        # 历史 index 不含今日：所有指数都缺今日数据
+        missing_symbols = list(df.columns)
+
+    if missing_symbols:
+        # 仅为缺失的指数调用实时接口，避免不必要的网络开销
+        realtime_prices, realtime_source = fetch_realtime_index_prices(missing_symbols)
+    else:
+        # 所有指数今日数据均已入库，无需调用实时接口
+        realtime_prices, realtime_source = {}, None
+
+    # 拼接当日实时行情：此时 df 列名仍为 symbol，可直接用 realtime_prices 匹配
     if realtime_prices:
         # 构造今日实时行：每个 symbol 列填入实时价（缺失填 NaN）
         today_row = pd.Series(
             {sym: realtime_prices.get(sym, np.nan) for sym in df.columns},
             name=today,
         )
+        # 历史末尾日期早于今日，必然走新增行分支（覆盖分支仅防御性保留）
         if today in df.index:
-            # 历史末尾已是今日：用实时价覆盖该行（仅覆盖有实时价的列）
             for sym, price in realtime_prices.items():
                 if sym in df.columns:
                     df.loc[today, sym] = price
         else:
-            # 新增今日行
             df = pd.concat([df, pd.DataFrame([today_row])])
             df = df.sort_index(ascending=True)
 
