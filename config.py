@@ -39,10 +39,28 @@ class Settings(BaseSettings):
     # FRED API（圣路易斯联邦储备银行经济数据）
     FRED_API_KEY: str = ""
     FRED_API_BASE: str = "https://api.stlouisfed.org/fred"
+    # HTTP/HTTPS 代理配置（可选，留空则直连）
+    # 用于访问被网络环境阻断的境外 API（如 IMF SDMX API: dataservices.imf.org）
+    HTTP_PROXY: str = ""
+    HTTPS_PROXY: str = ""
 
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
     )
+
+    @property
+    def proxies(self):
+        """返回 httpx 代理字典，未配置时为 None。
+
+        httpx 的 proxies 参数接受 {scheme: proxy_url} 字典，
+        例如 {'http://': 'http://127.0.0.1:7890', 'https://': 'http://127.0.0.1:7890'}
+        """
+        if not (self.HTTP_PROXY or self.HTTPS_PROXY):
+            return None
+        return {
+            "http://": self.HTTP_PROXY or None,
+            "https://": self.HTTPS_PROXY or self.HTTP_PROXY or None,
+        }
 
     @property
     def DB_ENGINE(self) -> Engine:

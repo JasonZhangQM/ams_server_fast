@@ -150,7 +150,15 @@ def upsert_gold_reserve_sql(country_code):
         logger.info(f"->gold[{country_code}] 成功：{count}")
         return count
     except Exception as e:
-        logger.error(f"->gold[{country_code}] 失败：{str(e)}")
+        err_msg = str(e)
+        logger.error(f"->gold[{country_code}] 失败：{err_msg}")
+        # DNS 解析失败时附加代理配置指引
+        if "getaddrinfo failed" in err_msg or "SSL" in err_msg or "EOF" in err_msg:
+            logger.error(
+                ">>> 网络无法访问 IMF SDMX API（dataservices.imf.org），"
+                "请在 server_fast/.env 中配置 HTTPS_PROXY 后重试。"
+                "示例：HTTPS_PROXY=http://127.0.0.1:7890"
+            )
         return -1
 
 
