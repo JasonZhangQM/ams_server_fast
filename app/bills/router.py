@@ -335,8 +335,9 @@ def run_batch_import():
     6. upsert_profit_group_sql     收益试算
     7. cash_update_group_sql       资金试算
     8. upsert_profit_year_sql      年度收益统计
-    9. upsert_group_acc_sql        账户汇总
-    10. upsert_group_symbol_sql     标的汇总
+    9. value_float_em_sql          市值更新
+    10. upsert_group_acc_sql        账户汇总
+    11. upsert_group_symbol_sql     标的汇总
     """
     from server_fast.app.bills.services.bill_import import insert_bill_all_excel_sql
     from server_fast.app.bills.services.group_summary import (
@@ -348,6 +349,7 @@ def run_batch_import():
     from server_fast.app.bills.services.profit_calc import upsert_profit_group_sql
     from server_fast.app.bills.services.cash_calc import cash_update_group_sql
     from server_fast.app.bills.services.profit_year import upsert_profit_year_sql
+    from server_fast.app.bills.services.value_calc import value_float_em_sql
     from server_fast.app.bills.services.account_summary import (
         upsert_group_acc_sql,
         upsert_group_symbol_sql,
@@ -363,6 +365,7 @@ def run_batch_import():
             ("upsert_profit_group_sql", upsert_profit_group_sql),
             ("cash_update_group_sql", cash_update_group_sql),
             ("upsert_profit_year_sql", upsert_profit_year_sql),
+            ("value_float_em_sql", value_float_em_sql),
             ("upsert_group_acc_sql", upsert_group_acc_sql),
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
         ]

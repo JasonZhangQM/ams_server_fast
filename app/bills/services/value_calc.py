@@ -62,12 +62,14 @@ def value_float_em_sql():
     df = df.fillna(0)
     df = df.astype(filter_dtypes(list(df.columns), _mdl.to_dtype()))
     # 获取实时数据（带超时保护，防止 gm 终端未启动时无限阻塞）
+    # 降级策略：实时行情获取失败时，使用空行情继续计算，
+    # value_float 会将无价格的标的市值降级为成本，已平仓标的市值将为0
+    current_data = []
     try:
         current_data = call_with_timeout(current, timeout=10)(
             list(df['symbol']), fields=['symbol', 'price'])
     except Exception as e:
-        logger.error(f'*****获取实时数据失败:{e}')
-        raise e
+        logger.warning(f'*****获取实时数据失败，启用降级策略:{e}')
     df = value_float(df, current_data, _multiplier)  # 计算市值与浮动盈亏
     # 更新bills_group表
     result = 0
