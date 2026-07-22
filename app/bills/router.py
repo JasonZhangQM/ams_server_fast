@@ -106,6 +106,7 @@ def list_groups(
     account: Optional[List[str]] = Query(default=None),
     category: Optional[List[str]] = Query(default=None),
     symbol: Optional[str] = None,
+    value_only: Optional[bool] = Query(default=None),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -115,6 +116,7 @@ def list_groups(
     原 Django index 视图使用 Group.objects.exclude(category='cash')，
     此处对应 SQLAlchemy 的 Group.category != 'cash'。
     account/category 支持多值 IN 匹配，symbol 为 search_fields（模糊）。
+    value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录。
     """
     # 核心：过滤掉 cash 类别（与原 index 视图一致）
     query = db.query(Group).filter(Group.category != "cash")
@@ -126,6 +128,9 @@ def list_groups(
             (Group.symbol, symbol, "contains"),
         ],
     )
+    # 仅保留当前市值不为 0 的记录
+    if value_only:
+        query = query.filter(Group.value_total != 0)
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
     items = query.offset(offset).limit(limit).all()
