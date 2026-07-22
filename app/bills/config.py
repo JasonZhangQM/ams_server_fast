@@ -144,19 +144,6 @@ class Config:
         'SZSE.371216': 'SZSE.123247',  # 万凯发债
     }
 
-    SYMBOL_CON_ZL = [  # 主力连续
-        'CFFEX.IH', 'CFFEX.IF', 'CFFEX.IC', 'CFFEX.IM',
-    ]
-    SYMBOL_CON_IF = [  # IC连续合约
-        'CFFEX.IF00', 'CFFEX.IF01', 'CFFEX.IF02', 'CFFEX.IF03',
-    ]
-    SYMBOL_CON_IC = [  # IC连续合约
-        'CFFEX.IC00', 'CFFEX.IC01', 'CFFEX.IC02', 'CFFEX.IC03',
-    ]
-    SYMBOL_CON_IM = [  # IM连续合约
-        'CFFEX.IM00', 'CFFEX.IM01', 'CFFEX.IM02', 'CFFEX.IM03',
-    ]
-
     # 交易类型映射转换
     @classmethod
     def to_exec_type(cls):
