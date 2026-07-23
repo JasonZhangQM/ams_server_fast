@@ -108,12 +108,14 @@ class Config:
         # ---- 外贸与外部 ----
         'CN_EXPORT_YOY_USD':       {'name': '出口同比(按美元计)',     'short_name': '出口同比(美元)',     'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
         'CN_IMPORT_YOY_USD':       {'name': '进口同比(按美元计)',     'short_name': '进口同比(美元)',     'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
-        'CN_EXPORT_YOY_CNY':       {'name': '出口同比(按人民币计)',   'short_name': '出口同比(人民币)',   'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
-        'CN_IMPORT_YOY_CNY':       {'name': '进口同比(按人民币计)',   'short_name': '进口同比(人民币)',   'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
+        # 'CN_EXPORT_YOY_CNY':       {'name': '出口同比(按人民币计)',   'short_name': '出口同比(人民币)',   'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
+        # 'CN_IMPORT_YOY_CNY':       {'name': '进口同比(按人民币计)',   'short_name': '进口同比(人民币)',   'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
         # 'CN_EXPORT_CUM_YOY_USD':   {'name': '出口累计同比(按美元计)', 'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
         # 'CN_IMPORT_CUM_YOY_USD':   {'name': '进口累计同比(按美元计)', 'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
         # 'CN_EXPORT_CUM_YOY_CNY':   {'name': '出口累计同比(按人民币计)', 'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
         # 'CN_IMPORT_CUM_YOY_CNY':   {'name': '进口累计同比(按人民币计)', 'country': '中国', 'category': '外贸与外部', 'unit': '%',    'frequency': 'monthly'},
+        'CN_TRADE_BALANCE_USD':    {'name': '贸易帐(按美元计)',       'short_name': '贸易顺差(美元)',         'country': '中国', 'category': '外贸与外部', 'unit': '亿美元',   'frequency': 'monthly'},
+        # 'CN_TRADE_BALANCE_CNY':    {'name': '贸易帐(按人民币计)',     'short_name': '贸易顺差(人民币)',       'country': '中国', 'category': '外贸与外部', 'unit': '亿人民币', 'frequency': 'monthly'},
         'CN_FX_RESERVES':          {'name': '外汇储备',               'short_name': '外汇储备',               'country': '中国', 'category': '外贸与外部', 'unit': '亿美元', 'frequency': 'monthly'},
         'CN_SWIFT_CNY_SHARE':      {'name': 'Swift人民币在全球支付中占比', 'short_name': 'Swift人民币占比',  'country': '中国', 'category': '外贸与外部', 'unit': '%', 'frequency': 'monthly'},
         # ---- 消费与投资 ----
@@ -199,13 +201,15 @@ class Config:
         # 中国 - 外贸与外部
         'CN131320': 'CN_EXPORT_YOY_USD',     # 出口同比(按美元计)
         'CN131321': 'CN_IMPORT_YOY_USD',     # 进口同比(按美元计)
-        'CN131326': 'CN_EXPORT_YOY_CNY',     # 出口同比(按人民币计)
-        'CN131327': 'CN_IMPORT_YOY_CNY',     # 进口同比(按人民币计)
+        # 'CN131326': 'CN_EXPORT_YOY_CNY',     # 出口同比(按人民币计)
+        # 'CN131327': 'CN_IMPORT_YOY_CNY',     # 进口同比(按人民币计)
         # 'CN131329': 'CN_EXPORT_CUM_YOY_USD', # 出口累计同比(按美元计)
         # 'CN131330': 'CN_IMPORT_CUM_YOY_USD', # 进口累计同比(按美元计)
         # 'CN131332': 'CN_EXPORT_CUM_YOY_CNY', # 出口累计同比(按人民币计)
         # 'CN131333': 'CN_IMPORT_CUM_YOY_CNY', # 进口累计同比(按人民币计)
         'CN191467': 'CN_FX_RESERVES',        # 外汇储备
+        'CN131317': 'CN_TRADE_BALANCE_USD',  # 贸易帐(按美元计)
+        # 'CN131323': 'CN_TRADE_BALANCE_CNY',  # 贸易帐(按人民币计)
         'CN191478': 'CN_SWIFT_CNY_SHARE',    # Swift人民币在全球支付中占比
         # 中国 - 消费与投资
         'CN141339': 'CN_URBAN_FIXED_ASSET_INVEST_YOY', # 城镇固定资产投资同比
