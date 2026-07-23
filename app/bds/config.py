@@ -19,7 +19,7 @@ class Config:
         'SHSE.000300':{'sec_name':'沪深300','market_code':'SHSE','listed_date':'2005-04-08'},
         # 'SHSE.000510':{'sec_name':'中证A500','market_code':'SHSE','listed_date':'2024-09-23'},
         'SHSE.000905':{'sec_name':'中证500','market_code':'SHSE','listed_date':'2007-01-15'},
-        'SHSE.000852':{'sec_name':'中证1000','market_code':'SHSE','listed_date':'2014-10-17'},
+        # 'SHSE.000852':{'sec_name':'中证1000','market_code':'SHSE','listed_date':'2014-10-17'},
         # 'SHSE.000688':{'sec_name':'科创50','market_code':'SHSE','listed_date':'2020-07-23'},
         'SZSE.399006':{'sec_name':'创业板指','market_code':'SZSE','listed_date':'2010-06-01'},
         # 美股指数：gm 不支持，通过 yfinance 拉取

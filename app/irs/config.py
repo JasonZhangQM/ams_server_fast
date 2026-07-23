@@ -3,9 +3,8 @@
 
 保留所有原 Django Config 类的属性与方法：
 - FOLDER_*：各类 Excel 文件所在文件夹
-- MAP_MARKET_UNDERLYING：代码前缀 -> 交易所映射
 - SYMBOL_CON_LIST：贴水连续合约代码列表（从 Excel 迁移为常量）
-- SYMBOL_CON_LX / SYMBOL_CON_ZL：连续合约代码列表
+- SYMBOL_CON_ZL：主力连续合约代码前缀
 - MAP_OPTIONS_UD_MARKET + map_ud_market()：期权标的市场映射
 """
 from pathlib import Path
@@ -39,18 +38,6 @@ class Config:
         'CFFEX.IM03':{'symbol_type':'中证1000', 'con_name':'隔季'}, 
     }
         
-    # 代码市场映射
-    MAP_MARKET_UNDERLYING = {
-        '0': 'SHSE', '5': 'SHSE',
-        '1': 'SZSE',
-    }
-
-    # 连续合约列表（连续主力）
-    SYMBOL_CON_LX = [
-        'CFFEX.IC00', 'CFFEX.IC01', 'CFFEX.IC02', 'CFFEX.IC03',
-        'CFFEX.IF00', 'CFFEX.IF01', 'CFFEX.IF02', 'CFFEX.IF03',
-        'CFFEX.IM00', 'CFFEX.IM01', 'CFFEX.IM02', 'CFFEX.IM03',
-    ]
     # 主力连续合约代码前缀
     SYMBOL_CON_ZL = [
         'CFFEX.IC', 'CFFEX.IF', 'CFFEX.IH', 'CFFEX.IM',
