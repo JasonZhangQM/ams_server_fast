@@ -310,7 +310,7 @@ def sync_index_constituent(trade_date: Optional[date] = None):
 @router.get("/index-cum-returns")
 def list_index_cum_returns(
     start_date: Optional[str] = Query(
-        default=None, description="起始日期 YYYY-MM-DD，默认当前日期前30天"
+        default=None, description="起始日期 YYYY-MM-DD，默认当前日期前10年"
     ),
     db: Session = Depends(get_db),
 ):
@@ -326,9 +326,9 @@ def list_index_cum_returns(
     5. 非空时构造响应：trade_dates 为日期字符串列表（YYYY-MM-DD），
        series 为 {指数名称: 累计收益率列表}，NaN 转 null。
     """
-    # 默认起始日：当前日期前 30 天
+    # 默认起始日：当前日期前 10 年
     if start_date is None:
-        start_date = (date.today() - timedelta(days=30)).strftime("%Y-%m-%d")
+        start_date = (date.today() - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
 
     # 查询满足条件的全部指数历史记录（symbol 限定在 Config.INDEX_CODE 键中）
     rows = (
