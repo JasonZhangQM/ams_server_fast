@@ -103,7 +103,7 @@ class Config:
         # 'CN_NEW_RMB_LOANS':    {'name': '新增人民币贷款',          'country': '中国', 'category': '流动性与信用', 'unit': '亿元', 'frequency': 'monthly'},
         'CN_NEW_RMB_LOANS_CUM':{'name': '新增人民币贷款累计',      'short_name': '新增贷款累计',    'country': '中国', 'category': '流动性与信用', 'unit': '亿元', 'frequency': 'monthly'},
         # 'CN_SOCIAL_FINANCING': {'name': '社会融资规模增量',        'country': '中国', 'category': '流动性与信用', 'unit': '亿元', 'frequency': 'monthly'},
-        'CN_SOCIAL_FINANCING_CUM': {'name': '社会融资规模增量累计','short_name': '社融累计',        'country': '中国', 'category': '流动性与信用', 'unit': '亿元', 'frequency': 'monthly'},
+        'CN_SOCIAL_FINANCING_CUM': {'name': '社会融资规模增量累计','short_name': '社融增量累计',    'country': '中国', 'category': '流动性与信用', 'unit': '亿元', 'frequency': 'monthly'},
         'CN_LPR_1Y':           {'name': '一年期贷款市场报价利率',  'short_name': '一年期LPR',       'country': '中国', 'category': '流动性与信用', 'unit': '%',    'frequency': 'monthly'},
         'CN_LPR_5Y':           {'name': '五年期贷款市场报价利率',  'short_name': '五年期LPR',       'country': '中国', 'category': '流动性与信用', 'unit': '%',    'frequency': 'monthly'},
         # 'CN_MLF_RATE_1Y':      {'name': '一年期MLF中标利率',       'country': '中国', 'category': '流动性与信用', 'unit': '%',    'frequency': 'monthly'},
