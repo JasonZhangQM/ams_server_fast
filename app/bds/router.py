@@ -17,8 +17,9 @@ from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, text
 
-from server_fast.app.bds.models import DailyValuation, EconomicIndicator, FinanceDeriv, FundBalance, FundCashflow, FundIncome, GoldReserve, IndexConstituent, IndexHistory, SymbolInfo, TradeDate, YieldIndicator
+from server_fast.app.bds.models import DailyIndicator, DailyValuation, EconomicIndicator, FinanceDeriv, FundBalance, FundCashflow, FundIncome, GoldReserve, IndexConstituent, IndexHistory, SymbolInfo, TradeDate
 from server_fast.app.bds.schemas import (
+    DailyIndicatorOut,
     DailyValuationOut,
     EconomicIndicatorOut,
     FinanceDerivOut,
@@ -30,7 +31,6 @@ from server_fast.app.bds.schemas import (
     IndexHistoryOut,
     SymbolInfoOut,
     TradeDateOut,
-    YieldIndicatorOut,
 )
 from server_fast.app.bds.services import (
     fetch_realtime_index_prices,
@@ -878,7 +878,7 @@ def sync_gold_reserves_all():
 
 @router.get("/yield-indicator-codes")
 def list_yield_indicator_codes():
-    """返回美债收益率指标配置列表（数据源 Config.YIELD_INDICATORS，无数据库查询）。
+    """返回美债收益率指标配置列表（数据源 Config.DAILY_INDICATORS，无数据库查询）。
 
     每项包含 indicator_code、indicator_name、indicator_short_name、category、
     country、unit、frequency，供前端下拉选项使用。
@@ -893,12 +893,12 @@ def list_yield_indicator_codes():
             "unit": info["unit"],
             "frequency": info["frequency"],
         }
-        for code, info in Config.YIELD_INDICATORS.items()
+        for code, info in Config.DAILY_INDICATORS.items()
     ]
     return indicators
 
 
-@router.get("/yield-indicators", response_model=PageResponse[YieldIndicatorOut])
+@router.get("/yield-indicators", response_model=PageResponse[DailyIndicatorOut])
 def list_yield_indicators(
     indicator_code: Optional[List[str]] = Query(default=None, description="指标代码多选 IN 匹配"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
@@ -911,18 +911,18 @@ def list_yield_indicators(
 
     排序规则：report_date 降序，同 report_date 按 indicator_code 升序。
     """
-    query = db.query(YieldIndicator)
+    query = db.query(DailyIndicator)
     # indicator_code 多选 IN 过滤
     if indicator_code:
-        query = query.filter(YieldIndicator.indicator_code.in_(indicator_code))
+        query = query.filter(DailyIndicator.indicator_code.in_(indicator_code))
     # 报告日期范围过滤
     if start_date:
-        query = query.filter(YieldIndicator.report_date >= start_date)
+        query = query.filter(DailyIndicator.report_date >= start_date)
     if end_date:
-        query = query.filter(YieldIndicator.report_date <= end_date)
+        query = query.filter(DailyIndicator.report_date <= end_date)
     total = query.count()
     items = (
-        query.order_by(YieldIndicator.report_date.desc(), YieldIndicator.indicator_code.asc())
+        query.order_by(DailyIndicator.report_date.desc(), DailyIndicator.indicator_code.asc())
         .offset(offset).limit(limit).all()
     )
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
@@ -941,7 +941,7 @@ def sync_yield_indicator(indicator_code: str = Query(..., description="指标代
     if not indicator_code:
         return {"status": "error", "message": "indicator_code 不能为空",
                 "indicator_code": indicator_code, "count": -1}
-    if indicator_code not in Config.YIELD_INDICATORS:
+    if indicator_code not in Config.DAILY_INDICATORS:
         return {"status": "error", "message": f"未知收益率指标代码：{indicator_code}",
                 "indicator_code": indicator_code, "count": -1}
     count = upsert_yield_indicator_sql(indicator_code)
@@ -959,7 +959,7 @@ def sync_yield_indicator(indicator_code: str = Query(..., description="指标代
 def sync_yield_indicators_all():
     """全量同步所有美债收益率指标数据。
 
-    遍历 Config.YIELD_INDICATORS 中 4 个指标代码，逐个调用同步函数。
+    遍历 Config.DAILY_INDICATORS 中 4 个指标代码，逐个调用同步函数。
     单指标失败不中断，返回 steps 包含每个指标的结果。
 
     返回值说明：

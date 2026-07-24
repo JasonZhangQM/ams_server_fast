@@ -26,18 +26,21 @@ class Config:
         'SP500':{'sec_name':'S&P 500','market_code':'US','listed_date':'1957-01-01','data_source':'yfinance','yf_ticker':'^GSPC'},
     }
 
-    # 收益率指标已拆分至 YIELD_INDICATORS 字典，通过 FRED API 同步到 bds_yield_indicator 表
+    # 收益率指标已拆分至 DAILY_INDICATORS 字典，通过 FRED API 同步到 bds_daily_indicator 表
     # fred_units: lin=原始值 pch=环比百分比变化 pc1=同比百分比变化 pca=复合年化变化率
-    YIELD_INDICATORS = {  # 美债收益率指标配置（代码 -> 元信息），独立于 ECONOMIC_INDICATORS，仅通过 FRED API 同步
+    DAILY_INDICATORS = {  # 美债收益率指标配置（代码 -> 元信息），独立于 ECONOMIC_INDICATORS，仅通过 FRED API 同步
         'YIELD_2Y':           {'name': '2年期美债收益率',  'short_name': '二年美债收益率',  'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DGS2',   'fred_units': 'lin'},
         'YIELD_10Y':          {'name': '10年期美债收益率', 'short_name': '十年美债收益率', 'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DGS10',  'fred_units': 'lin'},
-        'YIELD_SPREAD_2Y10Y': {'name': '2Y-10Y利差',       'short_name': '2Y-10Y利差',     'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'T10Y2Y', 'fred_units': 'lin'},
+        'YIELD_SPREAD_10Y2Y': {'name': '10Y-2Y利差',       'short_name': '10Y-2Y利差',     'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'T10Y2Y', 'fred_units': 'lin'},
         'YIELD_TIPS_10Y':     {'name': '10年期TIPS收益率', 'short_name': '十年TIPS收益率', 'country': '美国', 'category': '收益率', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'DFII10', 'fred_units': 'lin'},
+        # 信用利差（ICE BofA 穆迪评级利差）：投资级/高收益债相对美债的收益率溢价
+        'CREDIT_SPREAD_IG':   {'name': '投资级信用利差',     'short_name': '投资级信用利差',     'country': '美国', 'category': '信用利差', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'BAMLC0A4CBBB', 'fred_units': 'lin'},
+        'CREDIT_SPREAD_HY':   {'name': '高收益债信用利差',   'short_name': '高收益信用利差',   'country': '美国', 'category': '信用利差', 'unit': '%', 'frequency': 'daily', 'fred_series_id': 'BAMLH0A0HYM2', 'fred_units': 'lin'},
     }
 
     ECONOMIC_INDICATORS = {  # 各国核心宏观经济指标配置（代码 -> 元信息）
         # 主数据源：wscn 日历 API（覆盖美国/中国/加拿大宏观指标）
-        # 收益率指标已拆分至 YIELD_INDICATORS 字典，通过 FRED API 同步到 bds_yield_indicator 表
+        # 收益率指标已拆分至 DAILY_INDICATORS 字典，通过 FRED API 同步到 bds_daily_indicator 表
         # fred_units: lin=原始值 pch=环比百分比变化 pc1=同比百分比变化 pca=复合年化变化率
         # 美国宏观指标：按 category 分组整合排序（共 35 个）
         # 非收益率指标仅通过 wscn 日历数据源同步

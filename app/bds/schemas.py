@@ -348,8 +348,8 @@ class GoldReserveOut(BaseModel):
     update_time: datetime = Field(description="更新时间")
 
 
-class YieldIndicatorOut(BaseModel):
-    """美债收益率指标响应 Schema（对应 bds.YieldIndicator 模型）。
+class DailyIndicatorOut(BaseModel):
+    """美债收益率指标响应 Schema（对应 bds.DailyIndicator 模型）。
 
     每个字段的 description 与 ORM 模型的 comment 保持一致，
     以便 OpenAPI 文档与前端表头统一。

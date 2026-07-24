@@ -485,17 +485,17 @@ class GoldReserve(Base, BaseModel):
         return f"{self.country_code}-{self.rpt_date}"
 
 
-class YieldIndicator(Base, BaseModel):
-    """美债收益率指标模型（对应表 bds_yield_indicator）。
+class DailyIndicator(Base, BaseModel):
+    """美债收益率指标模型（对应表 bds_daily_indicator）。
 
     存储 FRED API `/series/observations` 同步的 4 个日频收益率指标
-    （2Y/10Y/2Y-10Y 利差/10Y TIPS），按 indicator_code + report_date
+    （2Y/10Y/10Y-2Y 利差/10Y TIPS），按 indicator_code + report_date
     联合唯一去重。相比 EconomicIndicator 移除 wscn 专用字段
     （pub_date/value_prev 等），仅保留 FRED observation 中的 date/value
     两个字段（realtime_start/realtime_end 已废弃）。
     """
 
-    __tablename__ = "bds_yield_indicator"
+    __tablename__ = "bds_daily_indicator"
 
     # ---- Config 元信息字段 ----
     indicator_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="指标代码")
@@ -512,9 +512,9 @@ class YieldIndicator(Base, BaseModel):
 
     # 联合唯一约束 + 单列索引
     __table_args__ = (
-        UniqueConstraint("indicator_code", "report_date", name="uk_bds_yield_indicator"),
-        Index("k_bds_yield_indicator_code", "indicator_code"),
-        Index("k_bds_yield_indicator_date", "report_date"),
+        UniqueConstraint("indicator_code", "report_date", name="uk_bds_daily_indicator"),
+        Index("k_bds_daily_indicator_code", "indicator_code"),
+        Index("k_bds_daily_indicator_date", "report_date"),
     )
 
     # 供 upsert 使用的唯一键

@@ -2,7 +2,7 @@
 """bds 收益率指标业务函数。
 
 独立于 economic_indicator.py，仅通过 FRED API 同步 4 个日频收益率指标
-（YIELD_2Y/YIELD_10Y/YIELD_SPREAD_2Y10Y/YIELD_TIPS_10Y）到 bds_yield_indicator 表。
+（YIELD_2Y/YIELD_10Y/YIELD_SPREAD_10Y2Y/YIELD_TIPS_10Y）到 bds_daily_indicator 表。
 
 与 economic_indicator.py 的差异：
 - 数据源仅 FRED API `/series/observations`，无 akshare/wscn 回退
@@ -21,22 +21,22 @@ from server_fast.config import settings
 from server_fast.common.utils import *  # noqa: F401,F403（upsert_df_to_db / call_with_timeout / fetch_json_with_timeout 等）
 from server_fast.common.db import SessionLocal
 from server_fast.app.bds.config import Config as dbsCfg
-from server_fast.app.bds.models import YieldIndicator
+from server_fast.app.bds.models import DailyIndicator
 
 logger = logging.getLogger("uvicorn.error")  # 复用 uvicorn 的 logger
 
 
 def _ensure_table():
-    """幂等创建 bds_yield_indicator 表（checkfirst=True，已存在则跳过）。
+    """幂等创建 bds_daily_indicator 表（checkfirst=True，已存在则跳过）。
 
     项目硬约束：不修改任何已有表，仅创建新表。
     在首次同步时调用，避免 import 时触发 DDL。
     """
     try:
-        YieldIndicator.__table__.create(settings.DB_ENGINE, checkfirst=True)
+        DailyIndicator.__table__.create(settings.DB_ENGINE, checkfirst=True)
     except Exception as e:
         # 表已存在或创建失败均不阻断同步流程，upsert_df_to_db 会进一步抛错
-        logger.warning(f"创建 bds_yield_indicator 表失败（可忽略已存在情况）：{e}")
+        logger.warning(f"创建 bds_daily_indicator 表失败（可忽略已存在情况）：{e}")
 
 
 def _fetch_yield_from_fred(indicator_code, meta):
@@ -59,8 +59,8 @@ def _fetch_yield_from_fred(indicator_code, meta):
     # 增量起点：DB 已有数据则从 max(report_date)+1 起拉，否则从 2010-01-01 起拉
     with SessionLocal() as db:
         max_date = (
-            db.query(func.max(YieldIndicator.report_date))
-            .filter(YieldIndicator.indicator_code == indicator_code)
+            db.query(func.max(DailyIndicator.report_date))
+            .filter(DailyIndicator.indicator_code == indicator_code)
             .scalar()
         )
     if max_date is not None:
@@ -111,7 +111,7 @@ def upsert_yield_indicator_sql(indicator_code):
     """同步单个收益率指标数据并 upsert 入库。
 
     流程：
-    1. 从 Config.YIELD_INDICATORS 获取元信息，不存在则 warning 返回 -1
+    1. 从 Config.DAILY_INDICATORS 获取元信息，不存在则 warning 返回 -1
     2. 调用 _fetch_yield_from_fred 获取数据（增量策略）
     3. 添加元信息列（indicator_code/indicator_name/indicator_short_name/category/country/unit/frequency）
     4. 使用 upsert_df_to_db 入库
@@ -119,10 +119,10 @@ def upsert_yield_indicator_sql(indicator_code):
     返回值：插入/更新条数（int），异常返回 -1。
     """
     _engine = settings.DB_ENGINE
-    _mdl = YieldIndicator
+    _mdl = DailyIndicator
 
     # 获取指标元信息
-    meta = dbsCfg.YIELD_INDICATORS.get(indicator_code)
+    meta = dbsCfg.DAILY_INDICATORS.get(indicator_code)
     if meta is None:
         logger.warning(f"未知收益率指标代码：{indicator_code}")
         return -1
@@ -174,14 +174,14 @@ def upsert_yield_indicator_sql(indicator_code):
 
 
 def upsert_all_yield_indicators_sql():
-    """遍历 Config.YIELD_INDICATORS 全量同步所有收益率指标。
+    """遍历 Config.DAILY_INDICATORS 全量同步所有收益率指标。
 
     单指标失败不中断（try/except 记录 -1），
     返回 {indicator_code: count, ...} 结果字典。
     """
     steps = {}
     logger.info("全量同步美债收益率指标")
-    for indicator_code in dbsCfg.YIELD_INDICATORS:
+    for indicator_code in dbsCfg.DAILY_INDICATORS:
         try:
             steps[indicator_code] = upsert_yield_indicator_sql(indicator_code)
         except Exception as e:
