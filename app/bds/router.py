@@ -876,7 +876,7 @@ def sync_gold_reserves_all():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/yield-indicator-codes")
+@router.get("/daily-indicator-codes")
 def list_daily_indicator_codes():
     """返回美债收益率指标配置列表（数据源 Config.DAILY_INDICATORS，无数据库查询）。
 
@@ -898,7 +898,7 @@ def list_daily_indicator_codes():
     return indicators
 
 
-@router.get("/yield-indicators", response_model=PageResponse[DailyIndicatorOut])
+@router.get("/daily-indicators", response_model=PageResponse[DailyIndicatorOut])
 def list_daily_indicators(
     indicator_code: Optional[List[str]] = Query(default=None, description="指标代码多选 IN 匹配"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
@@ -928,7 +928,7 @@ def list_daily_indicators(
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.post("/sync/yield-indicator")
+@router.post("/sync/daily-indicator")
 def sync_daily_indicator(indicator_code: str = Query(..., description="指标代码，精确匹配单个指标")):
     """同步单个美债收益率指标数据。
 
@@ -955,7 +955,7 @@ def sync_daily_indicator(indicator_code: str = Query(..., description="指标代
             "indicator_code": indicator_code, "count": count}
 
 
-@router.post("/sync/yield-indicators-all")
+@router.post("/sync/daily-indicators-all")
 def sync_daily_indicators_all():
     """全量同步所有美债收益率指标数据。
 

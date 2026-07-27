@@ -39,7 +39,7 @@ def _ensure_table():
         logger.warning(f"创建 bds_daily_indicator 表失败（可忽略已存在情况）：{e}")
 
 
-def _fetch_yield_from_fred(indicator_code, meta):
+def _fetch_daily_from_fred(indicator_code, meta):
     """通过 FRED API 获取单个收益率指标数据，返回标准化的 DataFrame。
 
     FRED API `/series/observations` 每个 observation 含 4 个字段：
@@ -112,7 +112,7 @@ def upsert_daily_indicator_sql(indicator_code):
 
     流程：
     1. 从 Config.DAILY_INDICATORS 获取元信息，不存在则 warning 返回 -1
-    2. 调用 _fetch_yield_from_fred 获取数据（增量策略）
+    2. 调用 _fetch_daily_from_fred 获取数据（增量策略）
     3. 添加元信息列（indicator_code/indicator_name/indicator_short_name/category/country/unit/frequency）
     4. 使用 upsert_df_to_db 入库
 
@@ -132,7 +132,7 @@ def upsert_daily_indicator_sql(indicator_code):
         # 首次同步时确保表存在（幂等）
         _ensure_table()
 
-        df = _fetch_yield_from_fred(indicator_code, meta)
+        df = _fetch_daily_from_fred(indicator_code, meta)
         if df is None or df.empty:
             logger.info(f"->{indicator_code} 无需导入")
             return 0
