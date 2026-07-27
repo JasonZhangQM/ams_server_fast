@@ -37,7 +37,7 @@ from server_fast.app.bds.services import (
     insert_trade_date_em_sql,
     upsert_all_economic_indicators_sql,
     upsert_all_gold_reserves_sql,
-    upsert_all_yield_indicators_sql,
+    upsert_all_daily_indicators_sql,
     upsert_daily_valuation_sql,
     upsert_economic_indicator_from_wscn_sql,
     upsert_economic_indicator_sql,
@@ -49,7 +49,7 @@ from server_fast.app.bds.services import (
     upsert_index_constituent_sql,
     upsert_index_history_sql,
     upsert_symbol_info_excel_sql,
-    upsert_yield_indicator_sql,
+    upsert_daily_indicator_sql,
 )
 from server_fast.app.bds.config import Config
 from server_fast.common.db import get_db
@@ -877,7 +877,7 @@ def sync_gold_reserves_all():
 
 
 @router.get("/yield-indicator-codes")
-def list_yield_indicator_codes():
+def list_daily_indicator_codes():
     """返回美债收益率指标配置列表（数据源 Config.DAILY_INDICATORS，无数据库查询）。
 
     每项包含 indicator_code、indicator_name、indicator_short_name、category、
@@ -899,7 +899,7 @@ def list_yield_indicator_codes():
 
 
 @router.get("/yield-indicators", response_model=PageResponse[DailyIndicatorOut])
-def list_yield_indicators(
+def list_daily_indicators(
     indicator_code: Optional[List[str]] = Query(default=None, description="指标代码多选 IN 匹配"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
     end_date: Optional[date] = Query(default=None, description="报告日期结束日"),
@@ -929,7 +929,7 @@ def list_yield_indicators(
 
 
 @router.post("/sync/yield-indicator")
-def sync_yield_indicator(indicator_code: str = Query(..., description="指标代码，精确匹配单个指标")):
+def sync_daily_indicator(indicator_code: str = Query(..., description="指标代码，精确匹配单个指标")):
     """同步单个美债收益率指标数据。
 
     返回值说明：
@@ -944,7 +944,7 @@ def sync_yield_indicator(indicator_code: str = Query(..., description="指标代
     if indicator_code not in Config.DAILY_INDICATORS:
         return {"status": "error", "message": f"未知收益率指标代码：{indicator_code}",
                 "indicator_code": indicator_code, "count": -1}
-    count = upsert_yield_indicator_sql(indicator_code)
+    count = upsert_daily_indicator_sql(indicator_code)
     if count == -1:
         return {"status": "error", "message": f"同步失败：{indicator_code}",
                 "indicator_code": indicator_code, "count": -1}
@@ -956,7 +956,7 @@ def sync_yield_indicator(indicator_code: str = Query(..., description="指标代
 
 
 @router.post("/sync/yield-indicators-all")
-def sync_yield_indicators_all():
+def sync_daily_indicators_all():
     """全量同步所有美债收益率指标数据。
 
     遍历 Config.DAILY_INDICATORS 中 4 个指标代码，逐个调用同步函数。
@@ -968,7 +968,7 @@ def sync_yield_indicators_all():
     - steps: {indicator_code: count, ...} 各指标同步条数字典
     """
     try:
-        steps = upsert_all_yield_indicators_sql()
+        steps = upsert_all_daily_indicators_sql()
         return {"status": "success", "message": "美债收益率指标全量同步完成", "steps": steps}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

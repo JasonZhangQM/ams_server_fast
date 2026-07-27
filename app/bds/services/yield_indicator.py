@@ -107,7 +107,7 @@ def _fetch_yield_from_fred(indicator_code, meta):
     return df
 
 
-def upsert_yield_indicator_sql(indicator_code):
+def upsert_daily_indicator_sql(indicator_code):
     """同步单个收益率指标数据并 upsert 入库。
 
     流程：
@@ -173,7 +173,7 @@ def upsert_yield_indicator_sql(indicator_code):
         return -1
 
 
-def upsert_all_yield_indicators_sql():
+def upsert_all_daily_indicators_sql():
     """遍历 Config.DAILY_INDICATORS 全量同步所有收益率指标。
 
     单指标失败不中断（try/except 记录 -1），
@@ -183,7 +183,7 @@ def upsert_all_yield_indicators_sql():
     logger.info("全量同步美债收益率指标")
     for indicator_code in dbsCfg.DAILY_INDICATORS:
         try:
-            steps[indicator_code] = upsert_yield_indicator_sql(indicator_code)
+            steps[indicator_code] = upsert_daily_indicator_sql(indicator_code)
         except Exception as e:
             logger.error(f"->{indicator_code} 失败：{str(e)}")
             steps[indicator_code] = -1
