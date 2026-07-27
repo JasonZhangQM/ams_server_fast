@@ -27,7 +27,7 @@ from server_fast.app.bds.services.gold_reserve import (
     upsert_all_gold_reserves_sql,
     upsert_gold_reserve_sql,
 )
-from server_fast.app.bds.services.yield_indicator import (
+from server_fast.app.bds.services.daily_indicator import (
     upsert_all_daily_indicators_sql,
     upsert_daily_indicator_sql,
 )
