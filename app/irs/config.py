@@ -32,10 +32,7 @@ class Config:
         'CFFEX.IF02':{'symbol_type':'沪深300', 'con_name':'当季'}, 
         'CFFEX.IF03':{'symbol_type':'沪深300', 'con_name':'隔季'}, 
         'CFFEX.IH':{'symbol_type':'上证50', 'con_name':'主连'}, 
-        'CFFEX.IM00':{'symbol_type':'中证1000', 'con_name':'当月'}, 
-        'CFFEX.IM01':{'symbol_type':'中证1000', 'con_name':'次月'}, 
-        'CFFEX.IM02':{'symbol_type':'中证1000', 'con_name':'当季'}, 
-        'CFFEX.IM03':{'symbol_type':'中证1000', 'con_name':'隔季'}, 
+        'CFFEX.IM':{'symbol_type':'中证1000', 'con_name':'主连'}, 
     }
         
     # 主力连续合约代码前缀
