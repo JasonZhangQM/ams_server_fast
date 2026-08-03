@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """irs 应用路由（从 server_dj/apps/irs/admin.py + middleware.py 迁移）。
 
-提供 7 个 GET 查询路由 + 1 个 POST 同步路由：
+提供 6 个 GET 查询路由 + 1 个 POST 同步路由：
 - GET  /irs/value-monitor        估值监测（先同步实时估值再返回，对应 MonitorValueAdmin）
 - GET  /irs/symbol-values        估值配置（对应 SymbolValueAdmin）
 - GET  /irs/symbol-kpis          估值指标（对应 SymbolKpiAdmin）
 - GET  /irs/symbol-options       期权配置（对应 SymbolOptionAdmin）
-- GET  /irs/monitor-options      期权监测（对应 MonitorOptionAdmin）
 - GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
-- POST /irs/sync/{target}        按 target 触发对应 service 函数链（9 种 target）
+- POST /irs/sync/{target}        按 target 触发对应 service 函数链（8 种 target）
 """
 from typing import Callable, Dict, List, Optional
 
@@ -19,7 +18,6 @@ from server_fast.app.irs import service
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
-    MonitorOption,
     MonitorValue,
     OptionMonitor,
     SymbolKpi,
@@ -29,7 +27,6 @@ from server_fast.app.irs.models import (
 )
 from server_fast.app.irs.schemas import (
     DiscountMonitorOut,
-    MonitorOptionOut,
     MonitorValueOut,
     OptionMonitorOut,
     SymbolKpiOut,
@@ -104,20 +101,13 @@ def _sync_discount_symbol():
     service.discount_yield_em_orm()
 
 
-def _sync_monitor_option():
-    """monitor-option：期权自更新(到期日) + Excel 期权/标的实时行情。"""
-    service.symbol_option_update_self_orm()
-    service.monitor_option_excel_orm()
-
-
-# 8 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
+# 7 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
 SYNC_MAP: Dict[str, List[Callable]] = {
     "symbol-value":      [_sync_symbol_value],
     "symbol-kpi":        [service.symbol_value_em_orm],
     "monitor-value":     [service.monitor_value_em_orm],
     "symbol-option":     [service.symbol_option_update_self_orm],
     "symbol-underlying": [_sync_symbol_underlying],
-    "monitor-option":    [_sync_monitor_option],
     "symbol-discount":   [_sync_discount_symbol],
     "monitor-discount":  [service.discount_yield_em_orm],
 }
@@ -153,7 +143,7 @@ def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:
 
 
 # =========================================================================
-# GET 查询路由（8 个，对应原 Admin 注册的 8 个模型）
+# GET 查询路由（7 个，对应原 Admin 注册的 7 个模型）
 # =========================================================================
 
 @router.get("/value-monitor", response_model=PageResponse[MonitorValueOut])
@@ -258,50 +248,6 @@ def list_symbol_options(
     return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-@router.get("/monitor-options", response_model=PageResponse[MonitorOptionOut])
-def list_monitor_options(
-    symbol: Optional[str] = Query(None, description="期权代码精确匹配"),
-    underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
-    underlying_name: Optional[str] = Query(None, description="标的名称精确匹配"),
-    option_type: Optional[str] = Query(None, description="期权类型(call/put)精确匹配"),
-    days_left: Optional[int] = Query(None, description="剩余天数精确匹配"),
-    limit: int = Query(100, ge=1),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """期权监测（对应 MonitorOptionAdmin，含关联 SymbolOption/SymbolUnderlying 字段）。"""
-    query = db.query(MonitorOption)
-    if symbol:
-        query = query.filter(MonitorOption.symbol == symbol)
-    if option_type:
-        query = query.filter(MonitorOption.option_type == option_type)
-    # 需要 SymbolOption 关联字段时统一 join
-    if days_left is not None or underlying_symbol or underlying_name:
-        query = query.join(SymbolOption, MonitorOption.option_id == SymbolOption.id)
-        if days_left is not None:
-            query = query.filter(SymbolOption.days_left == days_left)
-        if underlying_symbol or underlying_name:
-            query = query.join(
-                SymbolUnderlying, SymbolOption.underlying_id == SymbolUnderlying.id
-            )
-            if underlying_symbol:
-                query = query.filter(SymbolUnderlying.symbol == underlying_symbol)
-            if underlying_name:
-                query = query.filter(SymbolUnderlying.name == underlying_name)
-    # JOIN 与过滤条件已应用，count 对主表 MonitorOption 安全
-    total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    extra = {
-        "option_price_strike": "option__price_strike",
-        "option_delisted_date": "option__delisted_date",
-        "option_days_left": "option__days_left",
-        "option_value_per": "option__value_per",
-        "underlying_symbol": "option__underlying__symbol",
-        "underlying_name": "option__underlying__name",
-    }
-    return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
-
-
 @router.get("/discounts-monitor", response_model=PageResponse[DiscountMonitorOut])
 def list_discounts_monitor(
     symbol_type: Optional[str] = Query(None, description="合约类别精确匹配"),
@@ -394,7 +340,7 @@ def list_option_underlyings():
 
 @router.post("/sync/{target}")
 def sync_data(target: str):
-    """根据 target 触发对应同步逻辑（对应 middleware.py 中 9 种 Admin 路径触发）。
+    """根据 target 触发对应同步逻辑（对应 middleware.py 中 8 种 Admin 路径触发）。
 
     target 取值见 SYNC_MAP；service 函数内部自管理 session，无需注入 db。
     """

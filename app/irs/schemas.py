@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """irs 应用 Pydantic v2 响应 Schema 定义。
 
-对应 router.py 中 7 个 GET 路由的返回结构：
+对应 router.py 中 6 个 GET 路由的返回结构：
 - SymbolValueOut      /irs/symbol-values        估值配置全字段
 - SymbolKpiOut        /irs/symbol-kpis          估值指标自身字段
 - MonitorValueOut     /irs/value-monitor        按 MonitorValue.fields_request 输出
 - SymbolOptionOut     /irs/symbol-options       期权配置 + 标的扁平化字段
-- MonitorOptionOut    /irs/monitor-options      期权监测 + 期权/标的扁平化字段
 - DiscountMonitorOut  /irs/discounts-monitor    贴水监测全字段（合并配置+监测）
 
 所有 Schema 均启用 from_attributes=True 以支持从 ORM 实例直接构造；
@@ -154,39 +153,6 @@ class SymbolOptionOut(BaseModel):
     underlying_symbol: Optional[str] = None               # 代码
     underlying_name: Optional[str] = None                 # 名称
     underlying_multiplier: Optional[int] = None           # 期权乘数
-
-
-# =========================================================================
-# 期权监测：MonitorOption 自身字段 + 期权/标的扁平化（21 字段）
-# =========================================================================
-class MonitorOptionOut(BaseModel):
-    """期权监测响应（对应 /irs/monitor-options）。"""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    symbol: str                                          # 期权代码
-    option_id: int                                       # 期权配置
-    option_type: str                                     # 期权类型
-    price_ud: Optional[Decimal] = None                   # 标的现价
-    price: Optional[Decimal] = None                      # 期权现价
-    value_t: Optional[Decimal] = None                    # 时间价值
-    value_i: Optional[Decimal] = None                    # 内在价值
-    atm_i: Optional[Decimal] = None                      # 平值(%)
-    ratio_t: Optional[Decimal] = None                    # 时间(%)
-    ratio_i: Optional[Decimal] = None                    # 内在(%)
-    ratio_t_y: Optional[Decimal] = None                  # 时间(%Y)
-    ratio_i_y: Optional[Decimal] = None                  # 内在(%Y)
-    id: int                                              # 主键
-    create_time: datetime                                # 创建时间
-    update_time: datetime                                # 更新时间
-    # 扁平化嵌入 SymbolOption 字段
-    option_price_strike: Optional[Decimal] = None        # 行权价
-    option_delisted_date: Optional[date] = None          # 行权日
-    option_days_left: Optional[int] = None               # 剩余天数
-    option_value_per: Optional[Decimal] = None           # 单点价值
-    # 扁平化嵌入 SymbolUnderlying 字段
-    underlying_symbol: Optional[str] = None              # 代码
-    underlying_name: Optional[str] = None                # 名称
 
 
 # =========================================================================

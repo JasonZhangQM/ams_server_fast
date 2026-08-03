@@ -31,7 +31,6 @@ from server_fast.app.bds.models import SymbolInfo, TradeDate
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
-    MonitorOption,
     MonitorValue,
     SymbolKpi,
     SymbolOption,
@@ -279,65 +278,6 @@ def monitor_value_em_orm():
                     logger.error(f"处理 symbol {sv_symbol} 失败：{str(e)}")
                     continue
     return count_insert, count_update
-
-
-# =========================================================================
-# 期权实时行情相关（MonitorOption）
-# =========================================================================
-
-
-# 从excel获取期权和标的实时行情
-def monitor_option_excel_orm():
-    _folder = IrsCfg.FOLDER_OPTION_PRICE
-    _ud_market_dict = IrsCfg.map_ud_market()
-    with SessionLocal() as session:
-        queryset = session.query(MonitorOption).all()  # 获取所有期权
-        si_dict = {  # 期权字典
-            item.symbol: {
-                'id': item.id,
-                # 跨表访问：MonitorOption.option.underlying.symbol
-                'ud_symbol': item.option.underlying.symbol,
-            }
-            for item in queryset
-        }
-    file_names = [
-        f.name for f in _folder.iterdir()
-        if f.is_file() and f.suffix in ['.xlsx']
-        and (not f.name.startswith('~'))
-    ]
-    result = 0
-    with SessionLocal() as session:
-        for file_name in file_names:
-            df = pd.read_excel(_folder / file_name, dtype=str)
-            # 处理期权标的代码(交易所.代码)
-            df['代码'] = df['代码'].apply(
-                lambda x: _ud_market_dict[x] if x in _ud_market_dict.keys() else x)
-            sp_dict = df.set_index('代码')['最新'].to_dict()
-            for symbol, item in si_dict.items():
-                if symbol not in sp_dict:  # 无实时行情则跳过
-                    logger.warning(f"无实时行情：{symbol}")
-                    continue
-                price = Decimal(str(sp_dict[symbol]))
-                price_ud = Decimal(str(sp_dict[item['ud_symbol']]))
-                try:
-                    monitor = (
-                        session.query(MonitorOption)
-                        .filter(MonitorOption.id == item['id'])
-                        .one_or_none()
-                    )
-                    if monitor is None:
-                        logger.warning(f"{symbol},不存在")
-                        continue
-                    # 每次都更新
-                    monitor.price = price
-                    monitor.price_ud = price_ud
-                    session.flush()  # 触发 before_update 钩子计算
-                    result += 1
-                except Exception as e:
-                    logger.error(f"处理 symbol {symbol} 失败：{str(e)}")
-                    continue
-        session.commit()
-    return result
 
 
 # =========================================================================
