@@ -40,6 +40,14 @@ class Config:
         'CFFEX.IC', 'CFFEX.IF', 'CFFEX.IH', 'CFFEX.IM',
     ]
 
+    OPTIONS_MARCH = (
+        {'underlying_symbol':'SHSE.000300','underlying_name':'沪深300','multiplier':'100'},
+        {'underlying_symbol':'SHSE.510500','underlying_name':'南方中证500ETF','multiplier':'10000'},
+        )
+
+
+
+
     # 期权标的市场映射
     MAP_OPTIONS_UD_MARKET = {
         'SHSE': [
