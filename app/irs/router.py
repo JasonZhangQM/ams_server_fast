@@ -6,7 +6,7 @@
 - GET  /irs/symbol-values        估值配置（对应 SymbolValueAdmin）
 - GET  /irs/symbol-kpis          估值指标（对应 SymbolKpiAdmin）
 - GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
-- POST /irs/sync/{target}        按 target 触发对应 service 函数链（6 种 target）
+- POST /irs/sync/{target}        按 target 触发对应 service 函数链（5 种 target）
 """
 from typing import Callable, Dict, List, Optional
 
@@ -20,7 +20,6 @@ from server_fast.app.irs.models import (
     MonitorValue,
     OptionMonitor,
     SymbolKpi,
-    SymbolUnderlying,
     SymbolValue,
 )
 from server_fast.app.irs.schemas import (
@@ -64,11 +63,6 @@ def _sync_symbol_value():
     service.update_symbol_value_hlc_sql()
 
 
-def _sync_symbol_underlying():
-    """symbol-underlying：Excel 导入期权标的。"""
-    service.upsert_model_excel_sql(IrsCfg.FOLDER_OPTION, SymbolUnderlying)
-
-
 def _sync_discount_symbol():
     """symbol-discount：从 Config 同步贴水配置 + 更新贴水数据 + 同步实时行情。
 
@@ -85,12 +79,11 @@ def _sync_discount_symbol():
     service.discount_yield_em_orm()
 
 
-# 6 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
+# 5 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
 SYNC_MAP: Dict[str, List[Callable]] = {
     "symbol-value":      [_sync_symbol_value],
     "symbol-kpi":        [service.symbol_value_em_orm],
     "monitor-value":     [service.monitor_value_em_orm],
-    "symbol-underlying": [_sync_symbol_underlying],
     "symbol-discount":   [_sync_discount_symbol],
     "monitor-discount":  [service.discount_yield_em_orm],
 }
@@ -308,13 +301,4 @@ def run_symbol_value_import():
     return _run_sync_chain(
         "symbol-value-import",
         [lambda: service.upsert_model_excel_sql(IrsCfg.FOLDER_SYMBOL_VALUE, SymbolValue)],
-    )
-
-
-@router.post("/run/symbol-underlying-import")
-def run_symbol_underlying_import():
-    """期权标的导入（对应 run.py: upsert_model_excel_sql(FOLDER_OPTION, SymbolUnderlying)）。"""
-    return _run_sync_chain(
-        "symbol-underlying-import",
-        [lambda: service.upsert_model_excel_sql(IrsCfg.FOLDER_OPTION, SymbolUnderlying)],
     )

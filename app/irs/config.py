@@ -18,7 +18,6 @@ class Config:
 
     # 各类 Excel 文件所在文件夹
     FOLDER_SYMBOL_VALUE = Path('C:\BaiduSyncdisk\账单\估值分析')
-    FOLDER_OPTION = Path('C:\BaiduSyncdisk\账单\期权标的')
     FOLDER_OPTION_PRICE = Path('C:\BaiduSyncdisk\账单\期权行情')
 
     # 贴水配置：连续合约代码列表（从 Excel 文件迁移为配置常量）

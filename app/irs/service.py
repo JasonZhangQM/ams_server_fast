@@ -32,7 +32,6 @@ from server_fast.app.irs.models import (
     DiscountMonitor,
     MonitorValue,
     SymbolKpi,
-    SymbolUnderlying,
     SymbolValue,
 )
 
