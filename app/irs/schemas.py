@@ -7,7 +7,6 @@
 - MonitorValueOut     /irs/value-monitor        按 MonitorValue.fields_request 输出
 - SymbolOptionOut     /irs/symbol-options       期权配置 + 标的扁平化字段
 - MonitorOptionOut    /irs/monitor-options      期权监测 + 期权/标的扁平化字段
-- MonitorOptionTOut   /irs/monitor-option-ts    期权T价 + 期权/标的扁平化字段
 - DiscountMonitorOut  /irs/discounts-monitor    贴水监测全字段（合并配置+监测）
 
 所有 Schema 均启用 from_attributes=True 以支持从 ORM 实例直接构造；
@@ -185,42 +184,6 @@ class MonitorOptionOut(BaseModel):
     option_delisted_date: Optional[date] = None          # 行权日
     option_days_left: Optional[int] = None               # 剩余天数
     option_value_per: Optional[Decimal] = None           # 单点价值
-    # 扁平化嵌入 SymbolUnderlying 字段
-    underlying_symbol: Optional[str] = None              # 代码
-    underlying_name: Optional[str] = None                # 名称
-
-
-# =========================================================================
-# 期权T价：MonitorOptionT 自身字段 + 期权/标的扁平化（24 字段）
-# =========================================================================
-class MonitorOptionTOut(BaseModel):
-    """期权T型报价响应（对应 /irs/monitor-option-ts）。"""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    option_id: int                                       # 期权配置
-    price_ud: Optional[Decimal] = None                   # 标的现价
-    price_c: Optional[Decimal] = None                    # 认购现价
-    value_t_c: Optional[Decimal] = None                  # 时间价值c
-    value_i_c: Optional[Decimal] = None                  # 内在价值c
-    ratio_t_c: Optional[Decimal] = None                  # 时间(%)c
-    ratio_i_c: Optional[Decimal] = None                  # 内在(%)c
-    ratio_t_y_c: Optional[Decimal] = None                # 时间(%Y)c
-    ratio_i_y_c: Optional[Decimal] = None                # 内在(%Y)c
-    price_p: Optional[Decimal] = None                    # 认沽现价
-    value_t_p: Optional[Decimal] = None                  # 时间价值p
-    value_i_p: Optional[Decimal] = None                  # 内在价值p
-    ratio_t_p: Optional[Decimal] = None                  # 时间(%)p
-    ratio_i_p: Optional[Decimal] = None                  # 内在(%)p
-    ratio_t_y_p: Optional[Decimal] = None                # 时间(%Y)p
-    ratio_i_y_p: Optional[Decimal] = None                # 内在(%Y)p
-    id: int                                              # 主键
-    create_time: datetime                                # 创建时间
-    update_time: datetime                                # 更新时间
-    # 扁平化嵌入 SymbolOption 字段
-    option_price_strike: Optional[Decimal] = None        # 行权价
-    option_delisted_date: Optional[date] = None          # 行权日
-    option_days_left: Optional[int] = None               # 剩余天数
     # 扁平化嵌入 SymbolUnderlying 字段
     underlying_symbol: Optional[str] = None              # 代码
     underlying_name: Optional[str] = None                # 名称

@@ -235,12 +235,9 @@ class SymbolOption(Base, BaseModel):
     underlying: Mapped["SymbolUnderlying"] = relationship(
         "SymbolUnderlying", back_populates="underlying_symbol"
     )
-    # 反向：多个 MonitorOption + 一个 MonitorOptionT
+    # 反向：多个 MonitorOption
     symbol_option_option: Mapped[list["MonitorOption"]] = relationship(
         "MonitorOption", back_populates="option"
-    )
-    symbol_option_t: Mapped["MonitorOptionT"] = relationship(
-        "MonitorOptionT", uselist=False, back_populates="option"
     )
 
     def __str__(self):
@@ -295,51 +292,6 @@ class MonitorOption(Base, BaseModel):
             f"{self.option.underlying.name}.{self.option.underlying.symbol[:4]}"
             f"-{self.option.price_strike}-{self.option.delisted_date.year}"
             f"{self.option.delisted_date.month}-{self.option_type}"
-        )
-
-
-class MonitorOptionT(Base, BaseModel):
-    """期权T价（原 irs.MonitorOptionT）。OneToOne -> SymbolOption。
-
-    原 Django 模型无 save() 计算逻辑，故无事件钩子。
-    """
-
-    __tablename__ = "irs_monitor_option_t"
-
-    option_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_option.id"), unique=True, nullable=False, comment="期权配置"
-    )
-    price_ud: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, default=Decimal("1"), comment="标的现价"
-    )
-    price_c: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(9, 4), nullable=True, default=Decimal("1"), comment="认购现价"
-    )
-    value_t_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="时间价值c")
-    value_i_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="内在价值c")
-    ratio_t_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%)c")
-    ratio_i_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%)c")
-    ratio_t_y_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%Y)c")
-    ratio_i_y_c: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%Y)c")
-    price_p: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(9, 4), nullable=True, default=Decimal("1"), comment="认沽现价"
-    )
-    value_t_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="时间价值p")
-    value_i_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="内在价值p")
-    ratio_t_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%)p")
-    ratio_i_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%)p")
-    ratio_t_y_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%Y)p")
-    ratio_i_y_p: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%Y)p")
-
-    option: Mapped["SymbolOption"] = relationship(
-        "SymbolOption", back_populates="symbol_option_t"
-    )
-
-    def __str__(self):
-        return (
-            f"{self.option.underlying.name}.{self.option.underlying.symbol[:4]}"
-            f"-{self.option.price_strike}-{self.option.delisted_date.year}"
-            f"{self.option.delisted_date.month}"
         )
 
 

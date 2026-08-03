@@ -41,8 +41,8 @@ class Config:
     ]
 
     OPTIONS_MARCH = (
-        {'underlying_symbol':'SHSE.000300','underlying_name':'沪深300','multiplier':'100'},
-        {'underlying_symbol':'SHSE.510500','underlying_name':'南方中证500ETF','multiplier':'10000'},
+        {'underlying_symbol':'SHSE.000300','underlying_name':'沪深300','multiplier':'100','rule_exercise_date':'R1'},
+        {'underlying_symbol':'SHSE.510500','underlying_name':'南方中证500ETF','multiplier':'10000','rule_exercise_date':'R2'},
         )
 
 

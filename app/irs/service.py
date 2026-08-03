@@ -32,7 +32,6 @@ from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
     MonitorOption,
-    MonitorOptionT,
     MonitorValue,
     SymbolKpi,
     SymbolOption,
@@ -342,7 +341,7 @@ def monitor_option_excel_orm():
 
 
 # =========================================================================
-# 期权配置与 T 型报价相关（SymbolOption / MonitorOptionT）
+# 期权配置相关（SymbolOption）
 # =========================================================================
 
 
@@ -355,51 +354,6 @@ def symbol_option_update_self_orm():
             # 显式赋值（同值），并强制标记 dirty 以触发 before_update 钩子重算 days_left/value_per
             q.delisted_date = q.delisted_date
             _mark_dirty_and_flush(session, q)
-            result += 1
-        session.commit()
-    return result
-
-
-# 期权T型报价数据入库(MonitorOptionT)
-def monitor_option_t_orm():
-    with SessionLocal() as session:
-        query_t = session.query(MonitorOptionT).all()
-        result = 0
-        for t in query_t:  # 循环T型报价
-            # 查询对应的认购期权
-            option_c = (
-                session.query(MonitorOption)
-                .filter(
-                    MonitorOption.option_id == t.option_id,
-                    MonitorOption.option_type == 'call',
-                )
-                .one()
-            )
-            t.price_ud = option_c.price_ud
-            t.price_c = option_c.price
-            t.value_t_c = option_c.value_t
-            t.value_i_c = option_c.value_i
-            t.ratio_t_c = option_c.ratio_t
-            t.ratio_i_c = option_c.ratio_i
-            t.ratio_t_y_c = option_c.ratio_t_y
-            t.ratio_i_y_c = option_c.ratio_i_y
-            # 查询对应的认沽期权
-            option_p = (
-                session.query(MonitorOption)
-                .filter(
-                    MonitorOption.option_id == t.option_id,
-                    MonitorOption.option_type == 'put',
-                )
-                .one()
-            )
-            t.price_p = option_p.price
-            t.value_t_p = option_p.value_t
-            t.value_i_p = option_p.value_i
-            t.ratio_t_p = option_p.ratio_t
-            t.ratio_i_p = option_p.ratio_i
-            t.ratio_t_y_p = option_p.ratio_t_y
-            t.ratio_i_y_p = option_p.ratio_i_y
-            session.flush()  # 触发 before_update 钩子（MonitorOptionT 无计算逻辑，但仍 flush 保持一致）
             result += 1
         session.commit()
     return result

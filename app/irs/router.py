@@ -7,7 +7,6 @@
 - GET  /irs/symbol-kpis          估值指标（对应 SymbolKpiAdmin）
 - GET  /irs/symbol-options       期权配置（对应 SymbolOptionAdmin）
 - GET  /irs/monitor-options      期权监测（对应 MonitorOptionAdmin）
-- GET  /irs/monitor-option-ts    期权T型报价（对应 MonitorOptionTAdmin）
 - GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
 - POST /irs/sync/{target}        按 target 触发对应 service 函数链（9 种 target）
 """
@@ -21,7 +20,6 @@ from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
     MonitorOption,
-    MonitorOptionT,
     MonitorValue,
     SymbolKpi,
     SymbolOption,
@@ -31,7 +29,6 @@ from server_fast.app.irs.models import (
 from server_fast.app.irs.schemas import (
     DiscountMonitorOut,
     MonitorOptionOut,
-    MonitorOptionTOut,
     MonitorValueOut,
     SymbolKpiOut,
     SymbolOptionOut,
@@ -111,14 +108,7 @@ def _sync_monitor_option():
     service.monitor_option_excel_orm()
 
 
-def _sync_monitor_option_t():
-    """monitor-option-t：期权自更新 + Excel 行情 + T型报价入库。"""
-    service.symbol_option_update_self_orm()
-    service.monitor_option_excel_orm()
-    service.monitor_option_t_orm()
-
-
-# 9 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
+# 8 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
 SYNC_MAP: Dict[str, List[Callable]] = {
     "symbol-value":      [_sync_symbol_value],
     "symbol-kpi":        [service.symbol_value_em_orm],
@@ -126,7 +116,6 @@ SYNC_MAP: Dict[str, List[Callable]] = {
     "symbol-option":     [service.symbol_option_update_self_orm],
     "symbol-underlying": [_sync_symbol_underlying],
     "monitor-option":    [_sync_monitor_option],
-    "monitor-option-t":  [_sync_monitor_option_t],
     "symbol-discount":   [_sync_discount_symbol],
     "monitor-discount":  [service.discount_yield_em_orm],
 }
@@ -305,46 +294,6 @@ def list_monitor_options(
         "option_delisted_date": "option__delisted_date",
         "option_days_left": "option__days_left",
         "option_value_per": "option__value_per",
-        "underlying_symbol": "option__underlying__symbol",
-        "underlying_name": "option__underlying__name",
-    }
-    return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
-
-
-@router.get("/monitor-option-ts", response_model=PageResponse[MonitorOptionTOut])
-def list_monitor_option_ts(
-    underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
-    underlying_name: Optional[str] = Query(None, description="标的名称精确匹配"),
-    price_strike: Optional[float] = Query(None, description="行权价精确匹配"),
-    days_left: Optional[int] = Query(None, description="剩余天数精确匹配"),
-    limit: int = Query(100, ge=1),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """期权T型报价（对应 MonitorOptionTAdmin，含关联 SymbolOption/SymbolUnderlying 字段）。"""
-    query = db.query(MonitorOptionT)
-    # 所有过滤均经由关联 SymbolOption，统一 join
-    if any(v is not None for v in (underlying_symbol, underlying_name, price_strike, days_left)):
-        query = query.join(SymbolOption, MonitorOptionT.option_id == SymbolOption.id)
-        if price_strike is not None:
-            query = query.filter(SymbolOption.price_strike == price_strike)
-        if days_left is not None:
-            query = query.filter(SymbolOption.days_left == days_left)
-        if underlying_symbol or underlying_name:
-            query = query.join(
-                SymbolUnderlying, SymbolOption.underlying_id == SymbolUnderlying.id
-            )
-            if underlying_symbol:
-                query = query.filter(SymbolUnderlying.symbol == underlying_symbol)
-            if underlying_name:
-                query = query.filter(SymbolUnderlying.name == underlying_name)
-    # JOIN 与过滤条件已应用，count 对主表 MonitorOptionT 安全
-    total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    extra = {
-        "option_price_strike": "option__price_strike",
-        "option_delisted_date": "option__delisted_date",
-        "option_days_left": "option__days_left",
         "underlying_symbol": "option__underlying__symbol",
         "underlying_name": "option__underlying__name",
     }
