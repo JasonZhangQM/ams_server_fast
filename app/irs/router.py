@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """irs 应用路由（从 server_dj/apps/irs/admin.py + middleware.py 迁移）。
 
-提供 6 个 GET 查询路由 + 1 个 POST 同步路由：
+提供 5 个 GET 查询路由 + 1 个 POST 同步路由：
 - GET  /irs/value-monitor        估值监测（先同步实时估值再返回，对应 MonitorValueAdmin）
 - GET  /irs/symbol-values        估值配置（对应 SymbolValueAdmin）
 - GET  /irs/symbol-kpis          估值指标（对应 SymbolKpiAdmin）
-- GET  /irs/symbol-options       期权配置（对应 SymbolOptionAdmin）
 - GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
-- POST /irs/sync/{target}        按 target 触发对应 service 函数链（8 种 target）
+- POST /irs/sync/{target}        按 target 触发对应 service 函数链（6 种 target）
 """
 from typing import Callable, Dict, List, Optional
 
@@ -21,7 +20,6 @@ from server_fast.app.irs.models import (
     MonitorValue,
     OptionMonitor,
     SymbolKpi,
-    SymbolOption,
     SymbolUnderlying,
     SymbolValue,
 )
@@ -30,7 +28,6 @@ from server_fast.app.irs.schemas import (
     MonitorValueOut,
     OptionMonitorOut,
     SymbolKpiOut,
-    SymbolOptionOut,
     SymbolValueOut,
 )
 from server_fast.common.db import get_db
@@ -55,19 +52,6 @@ def _resolve_field(obj, field_path: str):
             return None
         current = getattr(current, part, None)
     return current
-
-
-def _serialize_with_related(item, extra_fields: Dict[str, str]) -> dict:
-    """序列化 ORM 实例，并按 extra_fields 追加关联字段。
-
-    :param extra_fields: {输出键: '关联路径'}，路径用双下划线分隔多级关系
-        例 {'underlying_symbol': 'underlying__symbol',
-            'ud_symbol': 'option__underlying__symbol'}
-    """
-    data = item.to_dict()
-    for out_key, path in extra_fields.items():
-        data[out_key] = _resolve_field(item, path)
-    return data
 
 
 # =========================================================================
@@ -101,12 +85,11 @@ def _sync_discount_symbol():
     service.discount_yield_em_orm()
 
 
-# 7 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
+# 6 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
 SYNC_MAP: Dict[str, List[Callable]] = {
     "symbol-value":      [_sync_symbol_value],
     "symbol-kpi":        [service.symbol_value_em_orm],
     "monitor-value":     [service.monitor_value_em_orm],
-    "symbol-option":     [service.symbol_option_update_self_orm],
     "symbol-underlying": [_sync_symbol_underlying],
     "symbol-discount":   [_sync_discount_symbol],
     "monitor-discount":  [service.discount_yield_em_orm],
@@ -143,7 +126,7 @@ def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:
 
 
 # =========================================================================
-# GET 查询路由（7 个，对应原 Admin 注册的 7 个模型）
+# GET 查询路由（6 个，对应原 Admin 注册的 6 个模型）
 # =========================================================================
 
 @router.get("/value-monitor", response_model=PageResponse[MonitorValueOut])
@@ -210,42 +193,6 @@ def list_symbol_kpis(
     total = query.count()
     items = query.offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
-
-
-@router.get("/symbol-options", response_model=PageResponse[SymbolOptionOut])
-def list_symbol_options(
-    underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
-    underlying_name: Optional[str] = Query(None, description="标的名称精确匹配"),
-    price_strike: Optional[float] = Query(None, description="行权价精确匹配"),
-    days_left: Optional[int] = Query(None, description="剩余天数精确匹配"),
-    limit: int = Query(100, ge=1),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """期权配置（对应 SymbolOptionAdmin，含关联 SymbolUnderlying 字段）。"""
-    query = db.query(SymbolOption)
-    # 需要关联标的信息时统一 join 一次
-    if underlying_symbol or underlying_name:
-        query = query.join(
-            SymbolUnderlying, SymbolOption.underlying_id == SymbolUnderlying.id
-        )
-        if underlying_symbol:
-            query = query.filter(SymbolUnderlying.symbol == underlying_symbol)
-        if underlying_name:
-            query = query.filter(SymbolUnderlying.name == underlying_name)
-    if price_strike is not None:
-        query = query.filter(SymbolOption.price_strike == price_strike)
-    if days_left is not None:
-        query = query.filter(SymbolOption.days_left == days_left)
-    # JOIN 与过滤条件已应用，count 对主表 SymbolOption 安全
-    total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    extra = {
-        "underlying_symbol": "underlying__symbol",
-        "underlying_name": "underlying__name",
-        "underlying_multiplier": "underlying__multiplier",
-    }
-    return {"items": [_serialize_with_related(item, extra) for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/discounts-monitor", response_model=PageResponse[DiscountMonitorOut])
@@ -371,9 +318,3 @@ def run_symbol_underlying_import():
         "symbol-underlying-import",
         [lambda: service.upsert_model_excel_sql(IrsCfg.FOLDER_OPTION, SymbolUnderlying)],
     )
-
-
-@router.post("/run/symbol-option-self")
-def run_symbol_option_self():
-    """SymbolOption 更新到期日（对应 run.py: symbol_option_update_self_orm）。"""
-    return _run_sync_chain("symbol-option-self", [service.symbol_option_update_self_orm])

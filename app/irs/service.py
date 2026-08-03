@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 from gm.api import *  # noqa: F401,F403  保留原 gm SDK 通配导入（history/current/fut_get_continuous_contracts 等）
 from sqlalchemy import func, text
-from sqlalchemy.orm.attributes import flag_modified
 
 from server_fast.common.db import SessionLocal
 from server_fast.common.utils import (
@@ -33,7 +32,6 @@ from server_fast.app.irs.models import (
     DiscountMonitor,
     MonitorValue,
     SymbolKpi,
-    SymbolOption,
     SymbolUnderlying,
     SymbolValue,
 )
@@ -56,16 +54,6 @@ def _flush_and_commit(session, obj=None):
         session.add(obj)
     session.flush()  # 触发 before_insert / before_update 事件钩子，计算衍生字段
     session.commit()
-
-
-def _mark_dirty_and_flush(session, obj):
-    """强制标记对象为 dirty 并 flush，触发 before_update 钩子。
-
-    适用于 SQLAlchemy 因字段值未变而不标记 dirty 的场景（如 q.delisted_date = q.delisted_date）。
-    """
-    # 显式标记任一字段为修改状态，确保 before_update 钩子被触发
-    flag_modified(obj, "id")
-    session.flush()
 
 
 # =========================================================================
@@ -278,25 +266,6 @@ def monitor_value_em_orm():
                     logger.error(f"处理 symbol {sv_symbol} 失败：{str(e)}")
                     continue
     return count_insert, count_update
-
-
-# =========================================================================
-# 期权配置相关（SymbolOption）
-# =========================================================================
-
-
-# SymbolOption更新到期日(通过触发orm的save方法)
-def symbol_option_update_self_orm():
-    with SessionLocal() as session:
-        query = session.query(SymbolOption).all()
-        result = 0
-        for q in query:  # 循环T型报价
-            # 显式赋值（同值），并强制标记 dirty 以触发 before_update 钩子重算 days_left/value_per
-            q.delisted_date = q.delisted_date
-            _mark_dirty_and_flush(session, q)
-            result += 1
-        session.commit()
-    return result
 
 
 # =========================================================================
