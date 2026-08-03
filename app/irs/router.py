@@ -21,6 +21,7 @@ from server_fast.app.irs.models import (
     DiscountMonitor,
     MonitorOption,
     MonitorValue,
+    OptionMonitor,
     SymbolKpi,
     SymbolOption,
     SymbolUnderlying,
@@ -30,6 +31,7 @@ from server_fast.app.irs.schemas import (
     DiscountMonitorOut,
     MonitorOptionOut,
     MonitorValueOut,
+    OptionMonitorOut,
     SymbolKpiOut,
     SymbolOptionOut,
     SymbolValueOut,
@@ -344,6 +346,46 @@ def list_discount_options():
         v['con_name'] for v in IrsCfg.SYMBOL_CON_LIST.values()
     })
     return {"symbol_types": symbol_types, "con_names": con_names}
+
+
+@router.get("/option-monitors", response_model=PageResponse[OptionMonitorOut])
+def list_option_monitors(
+    underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
+    option_type: Optional[str] = Query(None, description="期权类型(call/put)精确匹配"),
+    symbol: Optional[str] = Query(None, description="期权代码模糊匹配"),
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """期权监测合并（对应 OptionMonitor，合并配置+监测单表）。
+
+    过滤条件直接作用于 OptionMonitor 字段（无 JOIN，因 underlying_symbol 已是本表字符串字段）。
+    按 delisted_date 升序排列（近月合约优先）。
+    """
+    query = db.query(OptionMonitor)
+    if underlying_symbol:
+        query = query.filter(OptionMonitor.underlying_symbol == underlying_symbol)
+    if option_type:
+        query = query.filter(OptionMonitor.option_type == option_type)
+    if symbol:
+        query = query.filter(OptionMonitor.symbol.like(f"%{symbol}%"))
+    total = query.count()
+    items = query.order_by(OptionMonitor.delisted_date.asc()).offset(offset).limit(limit).all()
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/option-underlyings")
+def list_option_underlyings():
+    """返回期权标的下拉选项（数据源 Config.OPTIONS_MARCH，无数据库查询）。
+
+    从配置元组提取 underlying_symbol 列表，供前端 NSelect 使用。
+    label 格式为 `underlying_name`，value 为 underlying_symbol。
+    """
+    underlying_symbols = [
+        {"label": item['underlying_name'], "value": item['underlying_symbol']}
+        for item in IrsCfg.OPTIONS_MARCH
+    ]
+    return {"underlying_symbols": underlying_symbols}
 
 
 # =========================================================================

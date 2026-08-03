@@ -46,8 +46,6 @@ class Config:
         )
 
 
-
-
     # 期权标的市场映射
     MAP_OPTIONS_UD_MARKET = {
         'SHSE': [

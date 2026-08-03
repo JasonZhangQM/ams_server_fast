@@ -214,3 +214,32 @@ class DiscountMonitorOut(BaseModel):
     id: int                                         # 主键
     create_time: datetime                           # 创建时间
     update_time: datetime                           # 更新时间
+
+
+# =========================================================================
+# 期权监测合并：对应 OptionMonitor 模型全字段（19 字段，合并配置+监测单表）
+# =========================================================================
+class OptionMonitorOut(BaseModel):
+    """期权监测合并响应（对应 /irs/option-monitors，合并配置+监测全字段）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    underlying_symbol: str                           # 标的代码
+    price_strike: Decimal                            # 行权价
+    delisted_date: date                              # 行权日
+    days_left: Optional[int] = None                  # 剩余天数
+    multiplier: int                                  # 期权乘数
+    symbol: str                                      # 期权代码
+    option_type: str                                 # 期权类型
+    price_ud: Optional[Decimal] = None               # 标的现价
+    price: Optional[Decimal] = None                  # 期权现价
+    value_t: Optional[Decimal] = None                # 时间价值
+    value_i: Optional[Decimal] = None                # 内在价值
+    atm_i: Optional[Decimal] = None                  # 平值(%)
+    ratio_t: Optional[Decimal] = None                # 时间(%)
+    ratio_i: Optional[Decimal] = None                # 内在(%)
+    ratio_t_y: Optional[Decimal] = None              # 时间(%Y)
+    ratio_i_y: Optional[Decimal] = None              # 内在(%Y)
+    id: int                                          # 主键
+    create_time: datetime                            # 创建时间
+    update_time: datetime                            # 更新时间
