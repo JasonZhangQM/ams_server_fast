@@ -64,7 +64,7 @@ def _sync_symbol_value():
 
 
 def _sync_discount_symbol():
-    """symbol-discount：从 Config 同步贴水配置 + 更新贴水数据 + 同步实时行情。
+    """discount-symbol：从 Config 同步贴水配置 + 更新贴水数据 + 同步实时行情。
 
     依次执行四步：
     1. upsert_discount_monitor_config_sql：从 Config 写入 symbol_type/con_name
@@ -84,8 +84,8 @@ SYNC_MAP: Dict[str, List[Callable]] = {
     "symbol-value":      [_sync_symbol_value],
     "symbol-kpi":        [service.symbol_value_em_orm],
     "monitor-value":     [service.monitor_value_em_orm],
-    "symbol-discount":   [_sync_discount_symbol],
-    "monitor-discount":  [service.discount_yield_em_orm],
+    "discount-symbol":   [_sync_discount_symbol],
+    "discount-monitor":  [service.discount_yield_em_orm],
 }
 
 
