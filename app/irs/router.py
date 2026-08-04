@@ -265,10 +265,10 @@ def list_option_underlyings():
     """返回期权标的下拉选项（数据源 Config.OPTIONS_MARCH，无数据库查询）。
 
     从配置元组提取 underlying_symbol 列表，供前端 NSelect 使用。
-    label 格式为 `underlying_name`，value 为 underlying_symbol。
+    label 格式为 `option_name`，value 为 underlying_symbol。
     """
     underlying_symbols = [
-        {"label": item['underlying_name'], "value": item['underlying_symbol']}
+        {"label": item['option_name'], "value": item['underlying_symbol']}
         for item in IrsCfg.OPTIONS_MARCH
     ]
     return {"underlying_symbols": underlying_symbols}

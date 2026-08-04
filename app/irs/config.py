@@ -40,8 +40,8 @@ class Config:
     ]
 
     OPTIONS_MARCH = (
-        {'underlying_symbol':'SHSE.000300','underlying_name':'沪深300','multiplier':'100','rule_exercise_date':'R1'},
-        {'underlying_symbol':'SHSE.510500','underlying_name':'南方中证500ETF','multiplier':'10000','rule_exercise_date':'R2'},
+        {'underlying_symbol':'SHSE.000300','option_type':'股指期权','option_name':'沪深300股指期权','multiplier':'100','rule_exercise_date':'R1'},
+        {'underlying_symbol':'SHSE.510500','option_type':'ETF期权','option_name':'南方中证500ETF期权','multiplier':'10000','rule_exercise_date':'R2'},
         )
 
 
