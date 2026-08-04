@@ -273,6 +273,7 @@ def list_option_monitors(
     items = query.order_by(
         OptionMonitor.underlying_symbol.asc(),
         OptionMonitor.price_strike.desc(),
+        OptionMonitor.option_type.asc(),
     ).offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
