@@ -44,6 +44,15 @@ class Config:
         {'underlying_symbol':'SHSE.510500','option_type':'ETF期权','option_name':'南方中证500ETF期权','multiplier':'10000','rule_exercise_date':'R2'},
         )
 
+    # 到期日规则映射：rule_exercise_date -> (第几个星期, 星期几)
+    # 星期几：0=周一 ... 4=周五
+    # R1: 股指期权，合约月第三个周五；R2: ETF期权，合约月第四个周三
+    # 遇节假日顺延至下一交易日（由 service 层查 TradeDate 日历处理）
+    RULE_EXERCISE_DATE = {
+        'R1': (3, 4),  # 合约月第三个周五
+        'R2': (4, 2),  # 合约月第四个周三
+    }
+
 
     # 期权标的市场映射
     MAP_OPTIONS_UD_MARKET = {

@@ -169,7 +169,7 @@ class OptionMonitorOut(BaseModel):
 
     underlying_symbol: str                           # 标的代码
     price_strike: Decimal                            # 行权价
-    delisted_date: date                              # 行权日
+    delisted_date: date                              # 到期日
     days_left: Optional[int] = None                  # 剩余天数
     multiplier: int                                  # 期权乘数
     symbol: str                                      # 期权代码

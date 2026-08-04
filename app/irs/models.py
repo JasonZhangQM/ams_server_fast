@@ -209,7 +209,7 @@ class OptionMonitor(Base, BaseModel):
     # ---- 原 SymbolOption 配置字段 ----
     underlying_symbol: Mapped[str] = mapped_column(String(16), nullable=False, comment="标的代码")
     price_strike: Mapped[Decimal] = mapped_column(Numeric(9, 4), nullable=False, comment="行权价")
-    delisted_date: Mapped[date] = mapped_column(Date, nullable=False, comment="行权日")
+    delisted_date: Mapped[date] = mapped_column(Date, nullable=False, comment="到期日")
     days_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="剩余天数")
     multiplier: Mapped[int] = mapped_column(Integer, nullable=False, comment="期权乘数")
 
@@ -400,6 +400,16 @@ def _compute_option_monitor(mapper, connection, target):
     """
     # 来自 SymbolOption 钩子（仅 days_left，multiplier 直存不计算）
     target.days_left = (target.delisted_date - date.today()).days
+    # price_ud 或 price 为 None 时（如 gm 终端不可用），跳过衍生计算避免除以 None
+    if target.price_ud is None or target.price is None:
+        target.atm_i = None
+        target.value_i = None
+        target.value_t = None
+        target.ratio_t = None
+        target.ratio_i = None
+        target.ratio_t_y = None
+        target.ratio_i_y = None
+        return
     # 来自 MonitorOption 钩子（option.xxx 改为 target.xxx，直接读本表字段）
     target.atm_i = (target.price_strike / target.price_ud - Decimal("1")) * Decimal("100")
     # 内在价值：认购/认沽方向不同

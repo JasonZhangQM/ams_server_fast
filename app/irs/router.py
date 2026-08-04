@@ -8,6 +8,7 @@
 - GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
 - POST /irs/sync/{target}        按 target 触发对应 service 函数链（5 种 target）
 """
+from datetime import date
 from typing import Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -239,6 +240,7 @@ def list_option_monitors(
     underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
     option_type: Optional[str] = Query(None, description="期权类型(call/put)精确匹配"),
     symbol: Optional[str] = Query(None, description="期权代码模糊匹配"),
+    end_month: Optional[str] = Query(None, description="到期月(YYYYMM)，按 delisted_date 所在月范围筛选"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -246,7 +248,8 @@ def list_option_monitors(
     """期权监测合并（对应 OptionMonitor，合并配置+监测单表）。
 
     过滤条件直接作用于 OptionMonitor 字段（无 JOIN，因 underlying_symbol 已是本表字符串字段）。
-    按 delisted_date 升序排列（近月合约优先）。
+    end_month 按 delisted_date 所在月范围筛选（含顺延至下月初的情况，取该月第1天至下月第1天前）。
+    按标的代码、行权价升序排列。
     """
     query = db.query(OptionMonitor)
     if underlying_symbol:
@@ -255,8 +258,22 @@ def list_option_monitors(
         query = query.filter(OptionMonitor.option_type == option_type)
     if symbol:
         query = query.filter(OptionMonitor.symbol.like(f"%{symbol}%"))
+    if end_month:
+        # end_month 格式 "YYYYMM"，转为 delisted_date 所在月范围
+        year = int(end_month[:4])
+        month = int(end_month[4:])
+        month_start = date(year, month, 1)
+        # 下月第1天（12月则跨年至次年1月）
+        month_end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        query = query.filter(
+            OptionMonitor.delisted_date >= month_start,
+            OptionMonitor.delisted_date < month_end,
+        )
     total = query.count()
-    items = query.order_by(OptionMonitor.delisted_date.asc()).offset(offset).limit(limit).all()
+    items = query.order_by(
+        OptionMonitor.underlying_symbol.asc(),
+        OptionMonitor.price_strike.desc(),
+    ).offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
@@ -277,6 +294,36 @@ def list_option_underlyings():
 # =========================================================================
 # POST 同步路由
 # =========================================================================
+
+@router.post("/sync/option-monitor")
+def sync_option_monitor(
+    option_name: str = Query(..., description="期权品种名称（如 沪深300股指期权）"),
+    end_month: str = Query(..., description="到期年月，格式 YYYYMM（如 202608）"),
+):
+    """同步期权行情（akshare 获取期权行情 + gm 获取标的现价）。
+
+    需放在 /sync/{target} 之前注册：FastAPI 按注册顺序匹配，具体路径优先于路径参数。
+    不加入 SYNC_MAP（需额外参数，与其他无参数 target 不同）。
+    """
+    try:
+        result = service.option_monitor_sync_orm(option_name, end_month)
+        return {"status": "success", "message": f"同步完成：option-monitor，{result} 条"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"同步失败：{str(e)}")
+
+
+@router.post("/clean/option-monitor")
+def clean_option_monitor(db: Session = Depends(get_db)):
+    """清理已到期期权数据：删除剩余天数 days_left <= 0 的记录。
+
+    返回删除条数。days_left 由模型钩子按 delisted_date 实时计算，已到期合约保留无意义。
+    """
+    deleted = db.query(OptionMonitor).filter(OptionMonitor.days_left <= 0).delete(synchronize_session=False)
+    db.commit()
+    return {"status": "success", "message": f"清理完成：option-monitor，删除{deleted}条"}
+
 
 @router.post("/sync/{target}")
 def sync_data(target: str):
