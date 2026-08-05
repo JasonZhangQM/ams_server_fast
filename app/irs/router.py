@@ -33,6 +33,7 @@ from server_fast.app.irs.schemas import (
     SymbolValueOut,
     ValueMonitorCreate,
     ValueMonitorOut,
+    ValueMonitorUpdate,
 )
 from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
@@ -222,6 +223,55 @@ def create_value_monitor(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"新增失败：{str(e)}")
+
+
+@router.put("/value-monitors/{id_}")
+def update_value_monitor(
+    id_: int,
+    payload: ValueMonitorUpdate,
+    db: Session = Depends(get_db),
+):
+    """修改估值监测记录。
+
+    按 id 更新 6 个可编辑字段（symbol 不可改）。
+    id 不存在时返回 HTTP 404。
+    """
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        vm.name = payload.name
+        vm.pp_el = payload.pp_el
+        vm.pp_l = payload.pp_l
+        vm.pp_m = payload.pp_m
+        vm.pp_h = payload.pp_h
+        vm.pp_eh = payload.pp_eh
+        db.commit()
+        return {"status": "success", "message": "修改成功"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
+
+
+@router.delete("/value-monitors/{id_}")
+def delete_value_monitor(
+    id_: int,
+    db: Session = Depends(get_db),
+):
+    """删除估值监测记录。
+
+    按 id 删除记录。id 不存在时返回 HTTP 404。
+    """
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        db.delete(vm)
+        db.commit()
+        return {"status": "success", "message": "删除成功"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"删除失败：{str(e)}")
 
 
 @router.get("/symbol-kpis", response_model=PageResponse[SymbolKpiOut])

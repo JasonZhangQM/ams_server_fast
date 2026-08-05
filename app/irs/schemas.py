@@ -218,6 +218,22 @@ class ValueMonitorCreate(BaseModel):
 
 
 # =========================================================================
+# 估值监测修改：请求 Schema（6 个可编辑字段，symbol 不可改）
+# =========================================================================
+class ValueMonitorUpdate(BaseModel):
+    """估值监测修改请求（对应 PUT /irs/value-monitors/{id}）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str                                  # 名称
+    pp_el: Decimal                             # 极低
+    pp_l: Decimal                              # 低
+    pp_m: Decimal                              # 中
+    pp_h: Decimal                              # 高
+    pp_eh: Decimal                             # 极高
+
+
+# =========================================================================
 # 期权监测合并：对应 OptionMonitor 模型全字段（19 字段，合并配置+监测单表）
 # =========================================================================
 class OptionMonitorOut(BaseModel):
