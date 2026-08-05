@@ -184,6 +184,46 @@ class MonitorValue(Base, BaseModel):
     def __str__(self):
         return f"{self.symbol_value.symbol}"
 
+class ValueMonitor(Base, BaseModel):
+    """估值监测"""
+
+    __tablename__ = "irs_value_monitor"
+    __table_args__ = (
+        Index("k_irs_value_monitor_symbol", "symbol"),
+    )
+
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, comment="代码")
+    name: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="名称")
+    #估值区间
+    pp_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极低")
+    pp_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="低")
+    pp_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="中")
+    pp_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="高")
+    pp_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极高")
+    # 行情字段
+    py_close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="上年末")
+    y_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="年高")
+    y_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="年低")
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最新价")
+    # 行情监测字段
+    pv_yh: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="年高(%)")
+    pv_yl: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="年低(%)")
+    pv_yy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="最新(%)")
+    # 估值监测字段
+    pv_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极低(%)")
+    pv_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="低(%)")
+    pv_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="中(%)")
+    pv_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="高(%)")
+    pv_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极高(%)")
+    pv_el_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极低(y%)")
+    pv_l_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="低(y%)")
+    pv_m_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="中(y%)")
+    pv_h_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="高(y%)")
+    pv_eh_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极高(y%)")
+
+    def __str__(self):
+        return f"{self.name}"
+
 
 class OptionMonitor(Base, BaseModel):
     """期权监测合并表（合并原 SymbolOption 配置 + MonitorOption 监测为单表）。

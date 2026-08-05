@@ -160,6 +160,47 @@ class DiscountMonitorOut(BaseModel):
 
 
 # =========================================================================
+# 估值监测：对应 ValueMonitor 模型全字段（25 字段）
+# =========================================================================
+class ValueMonitorOut(BaseModel):
+    """估值监测响应（对应 /irs/value-monitors，独立表含估值区间+行情+监测字段）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    symbol: str                                # 代码
+    name: Optional[str] = None                 # 名称
+    # 估值区间
+    pp_el: Optional[Decimal] = None            # 极低
+    pp_l: Optional[Decimal] = None             # 低
+    pp_m: Optional[Decimal] = None             # 中
+    pp_h: Optional[Decimal] = None             # 高
+    pp_eh: Optional[Decimal] = None            # 极高
+    # 行情字段
+    py_close: Optional[Decimal] = None         # 上年末
+    y_high: Optional[Decimal] = None           # 年高
+    y_low: Optional[Decimal] = None            # 年低
+    price: Optional[Decimal] = None            # 最新价
+    # 行情监测字段
+    pv_yh: Optional[Decimal] = None            # 年高(%)
+    pv_yl: Optional[Decimal] = None            # 年低(%)
+    pv_yy: Optional[Decimal] = None            # 最新(%)
+    # 估值监测字段
+    pv_el: Optional[Decimal] = None            # 极低(%)
+    pv_l: Optional[Decimal] = None             # 低(%)
+    pv_m: Optional[Decimal] = None             # 中(%)
+    pv_h: Optional[Decimal] = None             # 高(%)
+    pv_eh: Optional[Decimal] = None            # 极高(%)
+    pv_el_y: Optional[Decimal] = None          # 极低(y%)
+    pv_l_y: Optional[Decimal] = None           # 低(y%)
+    pv_m_y: Optional[Decimal] = None           # 中(y%)
+    pv_h_y: Optional[Decimal] = None           # 高(y%)
+    pv_eh_y: Optional[Decimal] = None          # 极高(y%)
+    id: int                                    # 主键
+    create_time: datetime                      # 创建时间
+    update_time: datetime                      # 更新时间
+
+
+# =========================================================================
 # 期权监测合并：对应 OptionMonitor 模型全字段（19 字段，合并配置+监测单表）
 # =========================================================================
 class OptionMonitorOut(BaseModel):
