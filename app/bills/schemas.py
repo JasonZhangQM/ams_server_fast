@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class GroupOut(BaseModel):
-    """账单汇总响应（对应 Group 模型，共 33 字段）。"""
+    """账单汇总响应（对应 Group 模型，共 32 字段）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -30,7 +30,6 @@ class GroupOut(BaseModel):
     count: int  # 交易次数
     profit_time: Optional[datetime] = None  # 收益试算时间
     value_time: Optional[datetime] = None  # 市值更新时间
-    daily_time: Optional[datetime] = None  # 日结时间
 
     # 持仓
     p_long: Optional[int] = None  # 多头持仓

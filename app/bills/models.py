@@ -205,7 +205,6 @@ class Group(Base, BaseModel):
     count: Mapped[int] = mapped_column(Integer, comment="交易次数")
     profit_time: Mapped[Optional[datetime]] = mapped_column(DateTime, comment="收益试算时间")
     value_time: Mapped[Optional[datetime]] = mapped_column(DateTime, comment="市值更新时间")
-    daily_time: Mapped[Optional[datetime]] = mapped_column(DateTime, comment="日结时间")
 
     # 持仓
     p_long: Mapped[Optional[int]] = mapped_column(Integer, comment="多头持仓")
@@ -270,13 +269,6 @@ class Group(Base, BaseModel):
         'value_time',
         'value_long', 'value_short', 'value_total',
         'pf_long', 'pf_short', 'pf_total',
-    ]
-    fields_daily = [  # 收益日结试算所需字段
-        'id', 'account', 'category', 'symbol',
-        'start_time', 'end_time', 'count', 'daily_time',
-    ]
-    fields_d_update = [
-        'daily_time',
     ]
     fields_api_details = [  # 详情字段
         'account', 'category', 'symbol',
