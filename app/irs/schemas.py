@@ -201,6 +201,23 @@ class ValueMonitorOut(BaseModel):
 
 
 # =========================================================================
+# 估值监测新增：请求 Schema（7 个必填字段）
+# =========================================================================
+class ValueMonitorCreate(BaseModel):
+    """估值监测新增请求（对应 POST /irs/value-monitors）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    symbol: str                                # 代码
+    name: str                                  # 名称
+    pp_el: Decimal                             # 极低
+    pp_l: Decimal                              # 低
+    pp_m: Decimal                              # 中
+    pp_h: Decimal                              # 高
+    pp_eh: Decimal                             # 极高
+
+
+# =========================================================================
 # 期权监测合并：对应 OptionMonitor 模型全字段（19 字段，合并配置+监测单表）
 # =========================================================================
 class OptionMonitorOut(BaseModel):

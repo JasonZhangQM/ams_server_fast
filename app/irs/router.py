@@ -12,6 +12,7 @@ from datetime import date
 from typing import Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server_fast.app.irs import service
@@ -30,6 +31,7 @@ from server_fast.app.irs.schemas import (
     OptionMonitorOut,
     SymbolKpiOut,
     SymbolValueOut,
+    ValueMonitorCreate,
     ValueMonitorOut,
 )
 from server_fast.common.db import get_db
@@ -189,6 +191,37 @@ def list_value_monitors(
     total = query.count()
     items = query.order_by(ValueMonitor.symbol).offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+@router.post("/value-monitors")
+def create_value_monitor(
+    payload: ValueMonitorCreate,
+    db: Session = Depends(get_db),
+):
+    """新增估值监测记录。
+
+    接收 7 个必填字段，插入 irs_value_monitor 表。
+    symbol 重复时返回 HTTP 400。
+    """
+    try:
+        vm = ValueMonitor(
+            symbol=payload.symbol,
+            name=payload.name,
+            pp_el=payload.pp_el,
+            pp_l=payload.pp_l,
+            pp_m=payload.pp_m,
+            pp_h=payload.pp_h,
+            pp_eh=payload.pp_eh,
+        )
+        db.add(vm)
+        db.commit()
+        return {"status": "success", "message": "新增成功"}
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"代码已存在：{payload.symbol}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"新增失败：{str(e)}")
 
 
 @router.get("/symbol-kpis", response_model=PageResponse[SymbolKpiOut])
