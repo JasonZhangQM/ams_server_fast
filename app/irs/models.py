@@ -221,6 +221,11 @@ class ValueMonitor(Base, BaseModel):
     pv_h_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="高(y%)")
     pv_eh_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极高(y%)")
 
+    # ---- 保留的自定义类属性（与 SymbolValue 模式一致） ----
+    unique_keys = ["symbol"]
+    # 年度行情更新时仅覆盖这三列，保护 pp_* 等用户手动配置字段
+    fields_hlc_update = ["py_close", "y_high", "y_low"]
+
     def __str__(self):
         return f"{self.name}"
 

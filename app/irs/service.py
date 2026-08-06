@@ -34,6 +34,7 @@ from server_fast.app.irs.models import (
     OptionMonitor,
     SymbolKpi,
     SymbolValue,
+    ValueMonitor,
 )
 
 logger = logging.getLogger("uvicorn.error")  # 复用 uvicorn 的 logger，输出到 stderr 不被缓冲
@@ -151,6 +152,35 @@ def update_symbol_value_hlc_sql():
     history_data = get_history_em_df(list(sv_dict.keys()))
     hlc_df = handle_hlc_df(history_data)
     if not hlc_df.empty:  # 更新bills_group表
+        df_in = df_init_model(hlc_df, _mdl)
+        _table = _mdl.__table__.name
+        _unique_keys = _mdl.unique_keys
+        _fields_update = _mdl.fields_hlc_update
+        result = upsert_df_to_db(
+            df_in, _table, _engine, _unique_keys, _fields_update)
+        logger.info(f'->更新成功:{result}')
+    else:
+        logger.info("->无需更新")
+
+
+# 更新估值监测(ValueMonitor)的年度行情数据
+def update_value_monitor_hlc_sql():
+    """拉取 ValueMonitor 所有代码的年度行情，更新 py_close/y_high/y_low 三列。
+
+    复用 get_history_em_df + handle_hlc_df（与模型无关），仅更新 fields_hlc_update 指定的三列，
+    保护 pp_el/pp_l/pp_m/pp_h/pp_eh 等用户手动配置字段不被覆盖。
+    """
+    _engine = settings.DB_ENGINE
+    _mdl = ValueMonitor
+    with SessionLocal() as session:
+        queryset = session.query(_mdl.symbol).all()
+    symbols = [row[0] for row in queryset]
+    if not symbols:  # 空表跳过，避免无意义调用 gm 接口
+        logger.info("->无需更新")
+        return
+    history_data = get_history_em_df(symbols)
+    hlc_df = handle_hlc_df(history_data)
+    if not hlc_df.empty:
         df_in = df_init_model(hlc_df, _mdl)
         _table = _mdl.__table__.name
         _unique_keys = _mdl.unique_keys
