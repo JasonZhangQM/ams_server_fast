@@ -299,7 +299,7 @@ def sync_group():
     顺序执行：value_float_em_sql → upsert_group_symbol_sql → upsert_group_acc_sql。
     """
     from server_fast.app.bills.services.value_calc import value_float_em_sql
-    from server_fast.app.bills.services.account_summary import upsert_group_symbol_sql, upsert_group_acc_sql
+    from server_fast.app.bills.services.group_summary import upsert_group_symbol_sql, upsert_group_acc_sql
 
     return _run_sync_steps(
         [
@@ -337,15 +337,13 @@ def run_batch_import():
         del_old_symbol_group_sql,
         upsert_group_cash_sql,
         upsert_group_profit_sql,
+        upsert_group_acc_sql,
+        upsert_group_symbol_sql,
     )
     from server_fast.app.bills.services.profit_calc import upsert_profit_group_sql
     from server_fast.app.bills.services.cash_calc import cash_update_group_sql
     from server_fast.app.bills.services.profit_year import upsert_profit_year_sql
     from server_fast.app.bills.services.value_calc import value_float_em_sql
-    from server_fast.app.bills.services.account_summary import (
-        upsert_group_acc_sql,
-        upsert_group_symbol_sql,
-    )
 
     return _run_sync_steps(
         [

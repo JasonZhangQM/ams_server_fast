@@ -13,7 +13,6 @@ class Config:
         pass
 
     FOLDER_BILLS = Path(r'C:\BaiduSyncdisk\账单')
-    FOLDER_IO = Path(r'C:\BaiduSyncdisk\账单\出入金')
     FOLDER_QH = Path(r'C:\BaiduSyncdisk\账单\期货结单')
 
     ACCOUNT_INFO = {  # 账户信息
