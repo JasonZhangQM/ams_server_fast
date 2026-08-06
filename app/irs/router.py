@@ -93,6 +93,7 @@ SYNC_MAP: Dict[str, List[Callable]] = {
     "discount-symbol":   [_sync_discount_symbol],
     "discount-monitor":  [service.discount_yield_em_orm],
     "value-monitor-hlc": [service.update_value_monitor_hlc_sql],
+    "value-monitor":     [service.update_value_monitor_em_orm],
 }
 
 

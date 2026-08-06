@@ -192,9 +192,46 @@ def update_value_monitor_hlc_sql():
         logger.info("->无需更新")
 
 
-# =========================================================================
-# 估值指标入库（SymbolKpi / MonitorValue）
-# =========================================================================
+# 实时行情入库(ValueMonitor)，触发钩子计算 pv_* 指标
+def update_value_monitor_em_orm():
+    """通过 gm current 获取实时行情，ORM 更新 ValueMonitor.price 并 flush 触发钩子。
+
+    与 monitor_value_em_orm 的区别：ValueMonitor 是单表（无关联 SymbolValue），
+    钩子直接读本表 pp_*/py_close 字段计算指标。
+    返回 (count_insert, count_update)，其中 insert 恒为 0（记录已存在）。
+    """
+    _mdl = ValueMonitor
+    with SessionLocal() as session:
+        rows = session.query(_mdl.id, _mdl.symbol).all()
+        vm_dict = {row.symbol: row.id for row in rows}
+    if not vm_dict:  # 空表跳过，避免无意义调用 gm 接口
+        return 0, 0
+    # 获取实时行情（带超时保护，防止 gm 终端未启动时无限阻塞）
+    try:
+        vm_data = call_with_timeout(current, timeout=10)(
+            list(vm_dict.keys()), fields=['symbol', 'price'])
+    except Exception as e:
+        logger.error(f"******获取实时行情失败：{str(e)}")
+        raise e
+    vm_data_dict = {item['symbol']: item['price'] for item in vm_data}
+    count_update = 0
+    with SessionLocal() as session:
+        with session.begin():
+            for vm_symbol, vm_id in vm_dict.items():
+                if vm_symbol not in vm_data_dict:  # 无实时行情则跳过
+                    logger.warning(f"无实时行情：{vm_symbol}")
+                    continue
+                price_d = Decimal(str(vm_data_dict[vm_symbol]))
+                try:
+                    monitor = session.query(_mdl).filter(_mdl.id == vm_id).one_or_none()
+                    if monitor is not None:
+                        monitor.price = price_d
+                        session.flush()  # 触发 before_update 钩子计算 pv_*
+                        count_update += 1
+                except Exception as e:
+                    logger.error(f"处理 symbol {vm_symbol} 失败：{str(e)}")
+                    continue
+    return 0, count_update
 
 
 # 估值指标入库(SymbolKpi)

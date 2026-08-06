@@ -401,6 +401,33 @@ def _compute_symbol_kpi(mapper, connection, target):
         target.min_ratio = Decimal("0")
 
 
+@_on_insert_update(ValueMonitor)
+def _compute_value_monitor(mapper, connection, target):
+    """ValueMonitor 计算逻辑：基于本表 price/py_close/y_high/y_low/pp_* 计算监测指标(%)。
+
+    与 MonitorValue 钩子的区别：数据源为本表字段（无关联 SymbolValue）。
+    仅当 price 非空时执行计算，避免除零异常。
+    """
+    if not target.price:
+        return
+    # 相对上年末收益率 = (行情价/上年末 - 1) * 100
+    target.pv_yh = (target.y_high / target.py_close - Decimal("1")) * Decimal("100")
+    target.pv_yl = (target.y_low / target.py_close - Decimal("1")) * Decimal("100")
+    target.pv_yy = (target.price / target.py_close - Decimal("1")) * Decimal("100")
+    # 估值收益率 = (估值价/最新价 - 1) * 100
+    target.pv_el = (target.pp_el / target.price - Decimal("1")) * Decimal("100")
+    target.pv_l = (target.pp_l / target.price - Decimal("1")) * Decimal("100")
+    target.pv_m = (target.pp_m / target.price - Decimal("1")) * Decimal("100")
+    target.pv_h = (target.pp_h / target.price - Decimal("1")) * Decimal("100")
+    target.pv_eh = (target.pp_eh / target.price - Decimal("1")) * Decimal("100")
+    # 相对上年末收益率 = (估值价/上年末 - 1) * 100
+    target.pv_el_y = (target.pp_el / target.py_close - Decimal("1")) * Decimal("100")
+    target.pv_l_y = (target.pp_l / target.py_close - Decimal("1")) * Decimal("100")
+    target.pv_m_y = (target.pp_m / target.py_close - Decimal("1")) * Decimal("100")
+    target.pv_h_y = (target.pp_h / target.py_close - Decimal("1")) * Decimal("100")
+    target.pv_eh_y = (target.pp_eh / target.py_close - Decimal("1")) * Decimal("100")
+
+
 @_on_insert_update(MonitorValue)
 def _compute_monitor_value(mapper, connection, target):
     """MonitorValue 计算逻辑（原 save()）：基于关联 SymbolValue 和最新价计算估值收益率(%)。
