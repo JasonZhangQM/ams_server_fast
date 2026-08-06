@@ -5,7 +5,6 @@
 - 9 个 ORM 模型继承 (Base, BaseModel)，表名与原 Django class Meta.db_table 完全一致
 - 原 Django save() 中的自动计算逻辑改写为 SQLAlchemy before_insert / before_update 事件钩子
 - 保留所有自定义类属性（cols_map_fields / unique_keys / fields_request 等）
-- 外键列名统一以 _id 结尾（symbol_value_id / underlying_id / option_id / symbol_real_id）
 """
 from datetime import date
 from decimal import Decimal
@@ -14,7 +13,6 @@ from typing import Optional
 from sqlalchemy import (
     Boolean,
     Date,
-    ForeignKey,
     Index,
     Integer,
     Numeric,
@@ -22,7 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
 from server_fast.common.models import BaseModel
@@ -46,143 +44,6 @@ def _on_insert_update(model):
 # 模型定义
 # =========================================================================
 
-
-class SymbolValue(Base, BaseModel):
-    """估值配置（原 irs.SymbolValue）。"""
-
-    __tablename__ = "irs_symbol_value"
-    __table_args__ = (
-        # 索引名与原 Django models.Index(name=...) 一致
-        Index("k_bds_symbol_value_symbol", "symbol"),
-    )
-
-    symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, comment="代码")
-    name: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="名称")
-    pp_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极低")
-    pp_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="低")
-    pp_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="中")
-    pp_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="高")
-    pp_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极高")
-    vix: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 2), nullable=True, comment="波指")
-    p_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="目标量")
-    p_init: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="V1")
-    p_inc: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="增量")
-    v2: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="V2")
-    v3: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="V3")
-    m_tot: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="目标(万)")
-    m_init: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="首笔(万)")
-    bg_p_bid1: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="买点1")
-    bg_p_bid2: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="买点2")
-    bg_p_bid3: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="买点3")
-    py_close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="上年末")
-    y_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="年高")
-    y_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="年低")
-    last_close: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="昨收")
-
-    # ---- 保留的自定义类属性 ----
-    fields_hlc_update = ["py_close", "y_high", "y_low", "last_close"]
-    fields_value = [
-        "id", "symbol", "pp_el", "pp_l", "pp_m", "pp_h", "pp_eh",
-        "bg_p_bid1", "bg_p_bid2", "bg_p_bid3",
-    ]
-    unique_keys = ["symbol"]
-
-    # 反向关系：SymbolKpi / MonitorValue 通过 symbol_value_id 关联回本表
-    symbol_kpi: Mapped["SymbolKpi"] = relationship(
-        "SymbolKpi", uselist=False, back_populates="symbol_value"
-    )
-    symbol_value_monitor: Mapped["MonitorValue"] = relationship(
-        "MonitorValue", uselist=False, back_populates="symbol_value"
-    )
-
-    def __str__(self):
-        return f"{self.name}"
-
-
-class SymbolKpi(Base, BaseModel):
-    """估值指标（原 irs.SymbolKpi）。OneToOne -> SymbolValue。"""
-
-    __tablename__ = "irs_symbol_kpi"
-
-    # 外键列名 symbol_value_id（Django db_column 显式指定）
-    symbol_value_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_value.id"), unique=True, nullable=False, comment="估值标的"
-    )
-    last_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="昨收%")
-    max_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="年高%")
-    min_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="年低%")
-    roe_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="ROE(cut)")
-    inc_oper_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="营收yoy)")
-    net_prof_pcom_cut_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="净利yoy")
-    sale_gpm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="毛利率")
-    sale_npm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="净利率")
-    ast_liab_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="负债率")
-    pe_ttm_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PE(ttm)")
-    pe_lyr_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PE(lyr)")
-    pb_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PB(lyr)")
-    pcf_ttm_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PCo(ttm)")
-    peg_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="PEG(lyr)")
-    dy_ttm: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="DY(ttm)")
-    dy_lfy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="DY(lfy)")
-
-    # 关联对象（事件钩子通过 target.symbol_value 读取关联字段）
-    symbol_value: Mapped["SymbolValue"] = relationship(
-        "SymbolValue", back_populates="symbol_kpi"
-    )
-
-    def __str__(self):
-        return f"{self.symbol_value.symbol}"
-
-
-class MonitorValue(Base, BaseModel):
-    """估值监测（原 irs.MonitorValue）。OneToOne -> SymbolValue。"""
-
-    __tablename__ = "irs_monitor_value"
-
-    symbol_value_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("irs_symbol_value.id"), unique=True, nullable=False, comment="估值标的"
-    )
-    rh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="阶段高")
-    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最新价")
-    pv_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极低(%)")
-    pv_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="低(%)")
-    pv_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="中(%)")
-    pv_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="高(%)")
-    pv_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极高(%)")
-    pv_el_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极低(y%)")
-    pv_l_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="低(y%)")
-    pv_m_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="中(y%)")
-    pv_h_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="高(y%)")
-    pv_eh_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极高(y%)")
-    bg_d_bid1: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="买1(%)")
-    bg_d_bid2: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="买2(%)")
-    bg_d_bid3: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="买3(%)")
-    hd_diff: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="回撤值")
-    hd_target: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="回撤点")
-    hd_ratio: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="回撤(%)")
-
-    # ---- 保留的自定义类属性（路由层会使用） ----
-    fields_request = [
-        "symbol_value__symbol",
-        "symbol_value__pp_el",
-        "symbol_value__pp_l",
-        "symbol_value__pp_m",
-        "symbol_value__pp_h",
-        "symbol_value__pp_eh",
-        "symbol_value__bg_p_bid1",
-        "symbol_value__bg_p_bid2",
-        "symbol_value__bg_p_bid3",
-        "symbol_value__vr",
-        "rh",
-        "price",
-    ]
-
-    symbol_value: Mapped["SymbolValue"] = relationship(
-        "SymbolValue", back_populates="symbol_value_monitor"
-    )
-
-    def __str__(self):
-        return f"{self.symbol_value.symbol}"
 
 class ValueMonitor(Base, BaseModel):
     """估值监测"""
@@ -221,7 +82,7 @@ class ValueMonitor(Base, BaseModel):
     pv_h_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="高(y%)")
     pv_eh_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极高(y%)")
 
-    # ---- 保留的自定义类属性（与 SymbolValue 模式一致） ----
+    # ---- 保留的自定义类属性 ----
     unique_keys = ["symbol"]
     # 年度行情更新时仅覆盖这三列，保护 pp_* 等用户手动配置字段
     fields_hlc_update = ["py_close", "y_high", "y_low"]
@@ -343,69 +204,10 @@ class DiscountMonitor(Base, BaseModel):
 # =========================================================================
 
 
-@_on_insert_update(SymbolValue)
-def _compute_symbol_value(mapper, connection, target):
-    """SymbolValue 计算逻辑（原 save()）：
-    - pp_m = (pp_l + pp_h) / 2
-    - bg_p_bid1 = pp_l
-    - bg_p_bid2 = bg_p_bid1 * (0.1 - vix)
-    - bg_p_bid3 = bg_p_bid2 * (0.1 - vix)
-    - v2/v3 为分批买入量，m_init/m_tot 为对应金额(万)
-    """
-    target.pp_m = (target.pp_l + target.pp_h) * Decimal("0.5")
-    target.bg_p_bid1 = target.pp_l
-    target.bg_p_bid2 = target.bg_p_bid1 * (Decimal("0.1") - target.vix)
-    target.bg_p_bid3 = target.bg_p_bid2 * (Decimal("0.1") - target.vix)
-    # v2：若 p_init*2+p_inc > p_total 则取差额，否则取 p_init+p_inc
-    v2 = (
-        (target.p_total - target.p_init)
-        if target.p_init * 2 + target.p_inc - target.p_total > 0
-        else target.p_init + target.p_inc
-    )
-    # v3：剩余量，不能为负
-    v3 = (
-        (target.p_total - target.p_init - v2)
-        if target.p_total - target.p_init - v2 > 0
-        else Decimal("0")
-    )
-    # 首笔金额(万) = p_init * bg_p_bid1 * 0.0001
-    target.m_init = target.p_init * target.bg_p_bid1 * Decimal("0.0001")
-    # 总金额(万) = (m_init + v2*bg_p_bid2 + v3*bg_p_bid3) * 0.0001
-    target.m_tot = (
-        target.m_init + v2 * target.bg_p_bid2 + v3 * target.bg_p_bid3
-    ) * Decimal("0.0001")
-
-
-@_on_insert_update(SymbolKpi)
-def _compute_symbol_kpi(mapper, connection, target):
-    """SymbolKpi 计算逻辑（原 save()）：基于关联 SymbolValue 的价格计算涨跌幅(%)。
-    - last_ratio = (last_close - py_close) / py_close * 100
-    - max_ratio  = (y_high  - py_close) / py_close * 100
-    - min_ratio  = (y_low   - py_close) / py_close * 100
-    py_close 为 0 时所有 ratio 置 0，避免除零。
-    """
-    sv = target.symbol_value
-    if sv.py_close:
-        target.last_ratio = (
-            (sv.last_close - sv.py_close) / sv.py_close * Decimal("100")
-        )
-        target.max_ratio = (
-            (sv.y_high - sv.py_close) / sv.py_close * Decimal("100")
-        )
-        target.min_ratio = (
-            (sv.y_low - sv.py_close) / sv.py_close * Decimal("100")
-        )
-    else:
-        target.last_ratio = Decimal("0")
-        target.max_ratio = Decimal("0")
-        target.min_ratio = Decimal("0")
-
-
 @_on_insert_update(ValueMonitor)
 def _compute_value_monitor(mapper, connection, target):
     """ValueMonitor 计算逻辑：基于本表 price/py_close/y_high/y_low/pp_* 计算监测指标(%)。
 
-    与 MonitorValue 钩子的区别：数据源为本表字段（无关联 SymbolValue）。
     仅当 price 非空时执行计算，避免除零异常。
     """
     if not target.price:
@@ -426,41 +228,6 @@ def _compute_value_monitor(mapper, connection, target):
     target.pv_m_y = (target.pp_m / target.py_close - Decimal("1")) * Decimal("100")
     target.pv_h_y = (target.pp_h / target.py_close - Decimal("1")) * Decimal("100")
     target.pv_eh_y = (target.pp_eh / target.py_close - Decimal("1")) * Decimal("100")
-
-
-@_on_insert_update(MonitorValue)
-def _compute_monitor_value(mapper, connection, target):
-    """MonitorValue 计算逻辑（原 save()）：基于关联 SymbolValue 和最新价计算估值收益率(%)。
-    仅当 price 非空时执行计算。
-    """
-    if not target.price:
-        return
-    sv = target.symbol_value
-    # 估值收益率 = (估值价/最新价 - 1) * 100
-    target.pv_el = (sv.pp_el / target.price - Decimal("1")) * Decimal("100")
-    target.pv_l = (sv.pp_l / target.price - Decimal("1")) * Decimal("100")
-    target.pv_m = (sv.pp_m / target.price - Decimal("1")) * Decimal("100")
-    target.pv_h = (sv.pp_h / target.price - Decimal("1")) * Decimal("100")
-    target.pv_eh = (sv.pp_eh / target.price - Decimal("1")) * Decimal("100")
-    # 相对上年末收益率 = (估值价/上年末 - 1) * 100
-    target.pv_el_y = (sv.pp_el / sv.py_close - Decimal("1")) * Decimal("100")
-    target.pv_l_y = (sv.pp_l / sv.py_close - Decimal("1")) * Decimal("100")
-    target.pv_m_y = (sv.pp_m / sv.py_close - Decimal("1")) * Decimal("100")
-    target.pv_h_y = (sv.pp_h / sv.py_close - Decimal("1")) * Decimal("100")
-    target.pv_eh_y = (sv.pp_eh / sv.py_close - Decimal("1")) * Decimal("100")
-    # 买点回测率 = (目标价/最新价 - 1) * 100
-    target.bg_d_bid1 = (sv.bg_p_bid1 / target.price - Decimal("1")) * Decimal("100")
-    target.bg_d_bid2 = (sv.bg_p_bid2 / target.price - Decimal("1")) * Decimal("100")
-    target.bg_d_bid3 = (sv.bg_p_bid3 / target.price - Decimal("1")) * Decimal("100")
-    # 阶段高点更新：若近期高点低于最新价，则刷新为最新价
-    if target.rh < target.price:
-        target.rh = target.price
-    # 回撤目标 = 近期高 * (1 - vix)
-    target.hd_target = target.rh * (Decimal("1") - sv.vix)
-    # 回撤值 = 最新价 - 目标价
-    target.hd_diff = target.price - target.hd_target
-    # 回撤率 = (目标价/最新价 - 1) * 100
-    target.hd_ratio = (target.hd_target / target.price - Decimal("1")) * Decimal("100")
 
 
 @_on_insert_update(OptionMonitor)

@@ -2,11 +2,10 @@
 """irs 应用路由（从 server_dj/apps/irs/admin.py + middleware.py 迁移）。
 
 提供 5 个 GET 查询路由 + 1 个 POST 同步路由：
-- GET  /irs/value-monitor        估值监测（先同步实时估值再返回，对应 MonitorValueAdmin）
-- GET  /irs/symbol-values        估值配置（对应 SymbolValueAdmin）
-- GET  /irs/symbol-kpis          估值指标（对应 SymbolKpiAdmin）
+- GET  /irs/value-monitors       估值监测（对应 ValueMonitor 独立表）
 - GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
-- POST /irs/sync/{target}        按 target 触发对应 service 函数链（5 种 target）
+- GET  /irs/option-monitors      期权监测（合并配置+监测，对应 OptionMonitor）
+- POST /irs/sync/{target}        按 target 触发对应 service 函数链（4 种 target）
 """
 from datetime import date
 from typing import Callable, Dict, List, Optional
@@ -19,18 +18,12 @@ from server_fast.app.irs import service
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
-    MonitorValue,
     OptionMonitor,
-    SymbolKpi,
-    SymbolValue,
     ValueMonitor,
 )
 from server_fast.app.irs.schemas import (
     DiscountMonitorOut,
-    MonitorValueOut,
     OptionMonitorOut,
-    SymbolKpiOut,
-    SymbolValueOut,
     ValueMonitorCreate,
     ValueMonitorOut,
     ValueMonitorUpdate,
@@ -42,32 +35,8 @@ router = APIRouter(prefix="/irs", tags=["irs"])
 
 
 # =========================================================================
-# 序列化辅助
-# =========================================================================
-
-def _resolve_field(obj, field_path: str):
-    """按 Django ORM 双下划线路径解析字段值（如 'symbol_value__symbol'）。
-
-    支持多级关联访问；任一中间节点为 None 或属性缺失则返回 None。
-    兼容原 fields_request 中可能不存在的字段（如 symbol_value__vr）。
-    """
-    current = obj
-    for part in field_path.split("__"):
-        if current is None:
-            return None
-        current = getattr(current, part, None)
-    return current
-
-
-# =========================================================================
 # 同步任务：target -> service 函数链（依据 server_dj/apps/irs/middleware.py）
 # =========================================================================
-
-def _sync_symbol_value():
-    """symbol-value：Excel 导入估值配置 + 更新历史行情(HLC)。"""
-    service.upsert_model_excel_sql(IrsCfg.FOLDER_SYMBOL_VALUE, SymbolValue)
-    service.update_symbol_value_hlc_sql()
-
 
 def _sync_discount_symbol():
     """discount-symbol：从 Config 同步贴水配置 + 更新贴水数据 + 同步实时行情。
@@ -85,11 +54,8 @@ def _sync_discount_symbol():
     service.discount_yield_em_orm()
 
 
-# 5 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
+# 4 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
 SYNC_MAP: Dict[str, List[Callable]] = {
-    "symbol-value":      [_sync_symbol_value],
-    "symbol-kpi":        [service.symbol_value_em_orm],
-    "monitor-value":     [service.monitor_value_em_orm],
     "discount-symbol":   [_sync_discount_symbol],
     "discount-monitor":  [service.discount_yield_em_orm],
     "value-monitor-hlc": [service.update_value_monitor_hlc_sql],
@@ -127,55 +93,8 @@ def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:
 
 
 # =========================================================================
-# GET 查询路由（6 个，对应原 Admin 注册的 6 个模型）
+# GET 查询路由（5 个，对应原 Admin 注册的模型）
 # =========================================================================
-
-@router.get("/value-monitor", response_model=PageResponse[MonitorValueOut])
-def value_monitor(
-    limit: int = Query(100, ge=1),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """估值监测（原 value_monitor 视图）。
-
-    先触发 monitor_value_em_orm() 同步实时估值（失败不阻塞查询），
-    再按 MonitorValue.fields_request 返回字段（含关联 SymbolValue 字段）。
-    """
-    # 同步实时数据，异常时仅打印日志，继续返回已有数据
-    try:
-        service.monitor_value_em_orm()
-    except Exception as e:
-        print(f"-->value-monitor 同步失败:{e}")
-    query = db.query(MonitorValue)
-    total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    # 按 fields_request 构建返回字段（路径如 symbol_value__symbol 自动解析）
-    return {
-        "items": [
-            {field: _resolve_field(mv, field) for field in MonitorValue.fields_request}
-            for mv in items
-        ],
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    }
-
-
-@router.get("/symbol-values", response_model=PageResponse[SymbolValueOut])
-def list_symbol_values(
-    symbol: Optional[str] = Query(None, description="代码精确匹配（search_fields）"),
-    limit: int = Query(100, ge=1),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """估值配置（对应 SymbolValueAdmin，支持 symbol 过滤）。"""
-    query = db.query(SymbolValue)
-    if symbol:
-        query = query.filter(SymbolValue.symbol == symbol)
-    total = query.count()
-    items = query.order_by(SymbolValue.m_tot.desc()).offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
-
 
 @router.get("/value-monitors", response_model=PageResponse[ValueMonitorOut])
 def list_value_monitors(
@@ -274,25 +193,6 @@ def delete_value_monitor(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"删除失败：{str(e)}")
-
-
-@router.get("/symbol-kpis", response_model=PageResponse[SymbolKpiOut])
-def list_symbol_kpis(
-    symbol: Optional[str] = Query(None, description="关联 SymbolValue.symbol 精确匹配"),
-    limit: int = Query(100, ge=1),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """估值指标（对应 SymbolKpiAdmin，支持 symbol 过滤，关联 SymbolValue）。"""
-    query = db.query(SymbolKpi)
-    if symbol:
-        # 通过关联 SymbolValue 过滤
-        query = query.join(
-            SymbolValue, SymbolKpi.symbol_value_id == SymbolValue.id
-        ).filter(SymbolValue.symbol == symbol)
-    total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/discounts-monitor", response_model=PageResponse[DiscountMonitorOut])
@@ -442,17 +342,3 @@ def sync_data(target: str):
     if funcs is None:
         raise HTTPException(status_code=400, detail=f"unknown target: {target}")
     return _run_sync_chain(target, funcs)
-
-
-# =========================================================================
-# 定时脚本拆分路由（对应 run.py 中 irs 部分，每个功能单独 POST 触发）
-# 使用 /run/ 前缀，避免与 /sync/{target} 路径参数路由冲突
-# =========================================================================
-
-@router.post("/run/symbol-value-import")
-def run_symbol_value_import():
-    """估值数据导入（对应 run.py: upsert_model_excel_sql(FOLDER_SYMBOL_VALUE, SymbolValue)）。"""
-    return _run_sync_chain(
-        "symbol-value-import",
-        [lambda: service.upsert_model_excel_sql(IrsCfg.FOLDER_SYMBOL_VALUE, SymbolValue)],
-    )

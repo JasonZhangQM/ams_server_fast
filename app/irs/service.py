@@ -30,10 +30,7 @@ from server_fast.app.bds.models import SymbolInfo, TradeDate
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
-    MonitorValue,
     OptionMonitor,
-    SymbolKpi,
-    SymbolValue,
     ValueMonitor,
 )
 
@@ -92,7 +89,7 @@ def upsert_model_excel_sql(folder, mdl):
 
 
 # =========================================================================
-# 估值行情更新（SymbolValue.hlc 字段）
+# 估值行情更新（ValueMonitor.hlc 字段）
 # =========================================================================
 
 
@@ -142,27 +139,6 @@ def handle_hlc_df(history_data: pd.DataFrame):
     return hlc_df
 
 
-# 更新估值配置中的行情数据
-def update_symbol_value_hlc_sql():
-    _engine = settings.DB_ENGINE
-    _mdl = SymbolValue
-    with SessionLocal() as session:
-        queryset = session.query(_mdl).all()
-        sv_dict = {item.symbol: item.id for item in queryset}
-    history_data = get_history_em_df(list(sv_dict.keys()))
-    hlc_df = handle_hlc_df(history_data)
-    if not hlc_df.empty:  # 更新bills_group表
-        df_in = df_init_model(hlc_df, _mdl)
-        _table = _mdl.__table__.name
-        _unique_keys = _mdl.unique_keys
-        _fields_update = _mdl.fields_hlc_update
-        result = upsert_df_to_db(
-            df_in, _table, _engine, _unique_keys, _fields_update)
-        logger.info(f'->更新成功:{result}')
-    else:
-        logger.info("->无需更新")
-
-
 # 更新估值监测(ValueMonitor)的年度行情数据
 def update_value_monitor_hlc_sql():
     """拉取 ValueMonitor 所有代码的年度行情，更新 py_close/y_high/y_low 三列。
@@ -196,7 +172,6 @@ def update_value_monitor_hlc_sql():
 def update_value_monitor_em_orm():
     """通过 gm current 获取实时行情，ORM 更新 ValueMonitor.price 并 flush 触发钩子。
 
-    与 monitor_value_em_orm 的区别：ValueMonitor 是单表（无关联 SymbolValue），
     钩子直接读本表 pp_*/py_close 字段计算指标。
     返回 (count_insert, count_update)，其中 insert 恒为 0（记录已存在）。
     """
@@ -232,107 +207,6 @@ def update_value_monitor_em_orm():
                     logger.error(f"处理 symbol {vm_symbol} 失败：{str(e)}")
                     continue
     return 0, count_update
-
-
-# 估值指标入库(SymbolKpi)
-def symbol_value_em_orm():
-    '''
-    通过orm的更新price字段,modle中的自定义save方法更新估值字段
-    '''
-    mdl = SymbolValue
-    _mdl_mv = SymbolKpi
-    count_insert = 0
-    count_update = 0
-    with SessionLocal() as session:
-        # 一次性加载所有 SymbolValue 的 id 与 symbol，构造 {symbol: id} 字典
-        rows = session.query(mdl.id, mdl.symbol).all()
-        sv_dict = {row.symbol: row.id for row in rows}
-        # 用事务块替代 transaction.atomic()，退出时自动 commit / rollback
-        with session.begin():
-            for sv_symbol, sv_id in sv_dict.items():
-                try:
-                    monitor = (
-                        session.query(_mdl_mv)
-                        .filter(_mdl_mv.symbol_value_id == sv_id)
-                        .one_or_none()
-                    )
-                    if monitor is not None:
-                        # 存在则触发 save（仅 flush 触发 before_update 钩子）
-                        session.flush()
-                        count_update += 1
-                    else:
-                        # 不存在则新建记录：先查询关联 SymbolValue，再构造 SymbolKpi
-                        symbol_value = session.query(mdl).filter(
-                            mdl.id == sv_id).one()
-                        monitor = _mdl_mv(symbol_value=symbol_value)
-                        session.add(monitor)
-                        session.flush()  # 触发 before_insert 钩子计算 last_ratio 等
-                        count_insert += 1
-                except Exception as e:
-                    logger.error(f"处理 symbol {sv_symbol} 失败：{str(e)}")
-                    continue
-    return count_insert, count_update
-
-
-# 实时估值数据入库(MonitorValue)
-def monitor_value_em_orm():
-    '''
-    通过orm的更新price字段,modle中的自定义save方法更新估值字段
-    '''
-    mdl = SymbolValue
-    _mdl_mv = MonitorValue
-    with SessionLocal() as session:
-        rows = session.query(mdl.id, mdl.symbol).all()
-        sv_dict = {row.symbol: row.id for row in rows}
-    # 获取实时行情（带超时保护，防止 gm 终端未启动时无限阻塞）
-    try:
-        sv_data = call_with_timeout(current, timeout=10)(
-            list(sv_dict.keys()), fields=['symbol', 'price', 'high'])
-    except Exception as e:
-        logger.error(f"******获取实时行情失败：{str(e)}")
-        raise e
-    sv_data_dict = {
-        item['symbol']: {'price': item['price'], 'high': item['high']}
-        for item in sv_data
-    }
-    count_insert = 0
-    count_update = 0
-    with SessionLocal() as session:
-        with session.begin():
-            for sv_symbol, sv_id in sv_dict.items():
-                if sv_symbol not in sv_data_dict.keys():  # 无实时行情则跳过
-                    logger.warning(f"无实时行情：{sv_symbol}")
-                    continue
-                price_d = Decimal(str(sv_data_dict[sv_symbol]['price']))
-                price_h = Decimal(str(sv_data_dict[sv_symbol]['high']))
-                try:
-                    monitor = (
-                        session.query(_mdl_mv)
-                        .filter(_mdl_mv.symbol_value_id == sv_id)
-                        .one_or_none()
-                    )
-                    if monitor is not None:
-                        monitor.price = price_d
-                        if (monitor.rh is None) or (monitor.rh < price_h):
-                            monitor.rh = price_h
-                        session.flush()  # 触发 before_update 钩子计算 pv_*/bg_d_*/hd_*
-                        count_update += 1
-                    else:
-                        # 不存在则新建记录
-                        symbol_value = session.query(mdl).filter(
-                            mdl.id == sv_id).one()
-                        monitor = _mdl_mv(
-                            symbol_value=symbol_value,  # 关联 SymbolValue
-                            price=price_d,
-                            rh=price_h,
-                        )
-                        session.add(monitor)
-                        session.flush()  # 触发 before_insert 钩子计算
-                        count_insert += 1
-                except Exception as e:
-                    logger.error(f"处理 symbol {sv_symbol} 失败：{str(e)}")
-                    continue
-    return count_insert, count_update
 
 
 # =========================================================================
