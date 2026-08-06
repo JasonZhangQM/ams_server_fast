@@ -2,12 +2,10 @@
 """irs 应用配置（从 server_dj/apps/irs/config.py 迁移）。
 
 保留所有原 Django Config 类的属性与方法：
-- FOLDER_*：各类 Excel 文件所在文件夹
 - SYMBOL_CON_LIST：贴水连续合约代码列表（从 Excel 迁移为常量）
 - SYMBOL_CON_ZL：主力连续合约代码前缀
 - MAP_OPTIONS_UD_MARKET + map_ud_market()：期权标的市场映射
 """
-from pathlib import Path
 
 
 class Config:
@@ -15,10 +13,6 @@ class Config:
 
     def __init__(self):
         pass
-
-    # 各类 Excel 文件所在文件夹
-    FOLDER_SYMBOL_VALUE = Path('C:\BaiduSyncdisk\账单\估值分析')
-    FOLDER_OPTION_PRICE = Path('C:\BaiduSyncdisk\账单\期权行情')
 
     # 贴水配置：连续合约代码列表（从 Excel 文件迁移为配置常量）
     SYMBOL_CON_LIST = {
