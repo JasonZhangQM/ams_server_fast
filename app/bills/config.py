@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""bills 应用配置（从 server_dj/apps/bills/config.py 迁移）。
+"""bills 应用配置。
 
 Config 类为纯 Python 配置类，不依赖任何框架，原样保留所有类属性与方法。
 路径使用 raw string 以避免 Windows 反斜杠转义问题，实际路径值不变。

@@ -58,7 +58,7 @@ def insert_trade_date_em_sql():
         df = df[df['trade_date']>str(max_date)]
     if not df.empty: # 交易日数据不为空
         df = df_init_model(df,_mdl) # 过滤字段
-        _table = _mdl.__table__.name  # SQLAlchemy 表名（原 Django: _meta.db_table）
+        _table = _mdl.__table__.name  # SQLAlchemy 表名
         df.to_sql(_table,_engine,if_exists='append', index=False)
         logger.info(f"->成功 {len(df)}")
         return len(df)
@@ -93,7 +93,7 @@ def upsert_symbol_info_excel_sql():
         df = df.astype(filter_dtypes(df.columns,_mdl.to_dtype())) # 转换数据类型
         if not df.empty:
             df = df.replace({np.nan: None})
-            _table = _mdl.__table__.name  # SQLAlchemy 表名（原 Django: _meta.db_table）
+            _table = _mdl.__table__.name  # SQLAlchemy 表名
             _unique_keys = _mdl.unique_keys
             result = upsert_df_to_db(df, _table, _engine, _unique_keys)
             logger.info(f"->成功：{result}")

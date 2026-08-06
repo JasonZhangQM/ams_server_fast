@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """SQLAlchemy 2.0 版本的 BaseModel mixin。
 
-替代原 Django 的 BaseModel（server_dj/common/models.py 第 8-102 行）。
 作为 mixin 使用：实际模型类继承 (Base, BaseModel)，Base 来自 server_fast.common.db。
 """
 from datetime import datetime, date
@@ -43,9 +42,8 @@ class BaseModel:
         Numeric/Float -> float, Integer -> int, String/Text -> str
 
         排除 id/create_time/update_time 三个通用字段：
-        - id 为自增主键，Django 的 BigAutoField 不在类型映射中
+        - id 为自增主键，不在类型映射中
         - create_time/update_time 为数据库自动维护的时间戳
-        与原 Django BaseModel.to_dtype() 行为保持一致。
         """
         _skip = {"id", "create_time", "update_time"}
         dtype_dict = {}

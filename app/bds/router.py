@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""bds 应用路由（从 server_dj/apps/bds/admin.py 迁移）。
+"""bds 应用路由。
 
-提供 2 个 GET 查询路由与 2 个 POST 同步路由：
-- GET  /bds/trade-dates         查询交易日历（对应 TradeDateAdmin）
-- GET  /bds/symbol-infos        查询证券信息（对应 SymbolInfoAdmin）
+提供查询路由与同步路由：
+- GET  /bds/trade-dates         查询交易日历
+- GET  /bds/symbol-infos        查询证券信息
 - POST /bds/sync/trade-date     同步交易日历
 - POST /bds/sync/symbol-info    同步证券信息
 """
@@ -129,7 +129,7 @@ def list_symbol_infos(
 ):
     """查询证券基本信息，支持可选过滤。
 
-    过滤规则（依据 admin.py）：
+    过滤规则：
     - search_fields(symbol)      → contains 模糊匹配
     - list_filter(industry)      → == 精确匹配
     - list_per_page 默认 86

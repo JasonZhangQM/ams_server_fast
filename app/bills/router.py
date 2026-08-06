@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
-"""bills 应用路由（Task 9）。
+"""bills 应用路由。
 
-覆盖原 Django Admin 注册的 5 个模型查询
-（Group / Bill / Profit / GroupAcc / GroupSymbol）
-及原中间件触发的 3 个同步操作。
+提供 Group / Bill / Profit / GroupAcc / GroupSymbol 的查询接口
+及 batch-import / sync 同步操作。
 
 约定：
 - GET 路由通过 Depends(get_db) 获取会话，直接查询模型；
 - POST 同步路由调用 service 内部函数（service 内部自管理 session）；
-- 过滤参数映射 Admin 配置：search_fields 用 contains（模糊），
-  list_filter 用 ==（精确），与原 Django Admin 行为一致。
-- 同步顺序与原 middleware.py 完全一致。
+- search_fields 用 contains（模糊），list_filter 用 ==（精确）。
 """
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -88,8 +85,8 @@ def _filter_query(
 def _run_sync_steps(steps: List[Tuple[str, Callable]]):
     """依次执行同步函数列表，返回每步结果。
 
-    与原 middleware.py 保持一致：groupsymbol / groupacc 会先执行
-    value_float_em_sql 再执行对应 upsert。任一步骤异常则抛出 500。
+    groupsymbol / groupacc 会先执行 value_float_em_sql 再执行对应 upsert。
+    任一步骤异常则抛出 500。
     """
     results = []
     try:
@@ -100,7 +97,7 @@ def _run_sync_steps(steps: List[Tuple[str, Callable]]):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# SubTask 9.2: 原 index 视图，对应 GroupAdmin
+# Group 列表
 @router.get("/group", response_model=PageResponse[GroupOut])
 def list_groups(
     account: Optional[List[str]] = Query(default=None),
@@ -113,12 +110,10 @@ def list_groups(
 ):
     """返回非 cash 类别的 Group 列表。
 
-    原 Django index 视图使用 Group.objects.exclude(category='cash')，
-    此处对应 SQLAlchemy 的 Group.category != 'cash'。
     account/category 支持多值 IN 匹配，symbol 为 search_fields（模糊）。
     value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录。
     """
-    # 核心：过滤掉 cash 类别（与原 index 视图一致）
+    # 过滤掉 cash 类别
     query = db.query(Group).filter(Group.category != "cash")
     query = _filter_query(
         query,
@@ -137,7 +132,7 @@ def list_groups(
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-# SubTask 9.3: 对应 BillAdmin
+# Bill 列表
 @router.get("/bills", response_model=PageResponse[BillOut])
 def list_bills(
     account: Optional[List[str]] = Query(default=None),
@@ -167,7 +162,7 @@ def list_bills(
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-# SubTask 9.4: 对应 ProfitAdmin
+# Profit 列表
 @router.get("/profits", response_model=PageResponse[ProfitOut])
 def list_profits(
     account: Optional[List[str]] = Query(default=None),
@@ -215,7 +210,7 @@ def list_profits(
     return {"items": result, "total": total, "limit": limit, "offset": offset}
 
 
-# SubTask 9.5: 对应 GroupAccAdmin（全量列表，无过滤参数）
+# GroupAcc 列表（全量列表，无过滤参数）
 @router.get("/group-accs", response_model=PageResponse[GroupAccOut])
 def list_group_accs(
     account: Optional[List[str]] = Query(default=None),
@@ -244,7 +239,7 @@ def list_group_accs(
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-# SubTask 9.6: 对应 GroupSymbolAdmin
+# GroupSymbol 列表
 @router.get("/group-symbols", response_model=PageResponse[GroupSymbolOut])
 def list_group_symbols(
     category: Optional[List[str]] = Query(default=None),

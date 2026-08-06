@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""irs 应用路由（从 server_dj/apps/irs/admin.py + middleware.py 迁移）。
+"""irs 应用路由。
 
-提供 5 个 GET 查询路由 + 1 个 POST 同步路由：
-- GET  /irs/value-monitors       估值监测（对应 ValueMonitor 独立表）
-- GET  /irs/discounts-monitor    贴水监测（合并配置+监测，对应 DiscountMonitor）
-- GET  /irs/option-monitors      期权监测（合并配置+监测，对应 OptionMonitor）
+提供查询路由与同步路由：
+- GET  /irs/value-monitors       估值监测
+- GET  /irs/discounts-monitor    贴水监测
+- GET  /irs/option-monitors      期权监测
 - POST /irs/sync/{target}        按 target 触发对应 service 函数链（4 种 target）
 """
 from datetime import date
@@ -35,7 +35,7 @@ router = APIRouter(prefix="/irs", tags=["irs"])
 
 
 # =========================================================================
-# 同步任务：target -> service 函数链（依据 server_dj/apps/irs/middleware.py）
+# 同步任务：target -> service 函数链
 # =========================================================================
 
 def _sync_discount_symbol():
@@ -54,7 +54,7 @@ def _sync_discount_symbol():
     service.discount_yield_em_orm()
 
 
-# 4 种 target -> 同步函数链映射（对应 middleware.py 各 Admin 路径触发逻辑）
+# 4 种 target -> 同步函数链映射
 SYNC_MAP: Dict[str, List[Callable]] = {
     "discount-symbol":   [_sync_discount_symbol],
     "discount-monitor":  [service.discount_yield_em_orm],
@@ -334,7 +334,7 @@ def clean_option_monitor(db: Session = Depends(get_db)):
 
 @router.post("/sync/{target}")
 def sync_data(target: str):
-    """根据 target 触发对应同步逻辑（对应 middleware.py 中 8 种 Admin 路径触发）。
+    """根据 target 触发对应同步逻辑。
 
     target 取值见 SYNC_MAP；service 函数内部自管理 session，无需注入 db。
     """

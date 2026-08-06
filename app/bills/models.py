@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
 """bills 应用的 SQLAlchemy 2.0 模型定义。
 
-由 Django (server_dj/apps/bills/models/) 迁移而来，共 7 个模型：
-Bill / Profit / Group / GroupAcc / GroupSymbol 。
+共 6 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / ProfitYear。
 
-迁移约定：
 - 继承 (Base, BaseModel)，BaseModel 提供 id/create_time/update_time 及通用方法
-- __tablename__ 与原 Django Meta.db_table 完全一致
-- 外键列名以 _id 结尾（与 Django 数据库列名一致）
-- 原模型所有自定义类属性（cols_map_fields/unique_keys/fields_*/agg_rules_daily_acc 等）全部保留
+- 外键列名以 _id 结尾
 - unique_together 与同名唯一索引合并为 UniqueConstraint
 """
 from datetime import date, datetime
@@ -32,7 +28,7 @@ from server_fast.common.models import BaseModel
 
 
 class Bill(Base, BaseModel):
-    """交易收益表（对应 Django bills_bill）。"""
+    """交易收益表。"""
 
     __tablename__ = "bills_bill"
 
@@ -77,7 +73,7 @@ class Bill(Base, BaseModel):
     market: Mapped[Optional[str]] = mapped_column(String(16), comment="市场")
     account: Mapped[str] = mapped_column(String(16), comment="账户")
 
-    # ---- 以下为原 Django 模型保留的自定义类属性 ----
+    # ---- 自定义类属性 ----
     unique_keys = [
         'account', 'trade_time', 'symbol', 'exec_type', 'amount_act', 'id_agree', 'cash',
     ]
@@ -122,7 +118,7 @@ class Bill(Base, BaseModel):
     ]
 
     __table_args__ = (
-        # 唯一约束（原 Django UniqueConstraint uk_bills_bill）
+        # 唯一约束
         UniqueConstraint(
             'account', 'trade_time', 'symbol', 'exec_type', 'amount_act', 'id_agree', 'cash',
             name='uk_bills_bill',
@@ -137,16 +133,16 @@ class Bill(Base, BaseModel):
 
 
 class Profit(Base, BaseModel):
-    """账单收益模型（对应 Django bills_profit）。
+    """账单收益模型。
 
-    原 Django 使用 OneToOneField(Bill) 关联，此处转为 bill_id 外键列 + relationship。
+    通过 bill_id 外键列 + relationship 与 Bill 一对一关联。
     """
 
     __tablename__ = "bills_profit"
 
-    # OneToOne 关联 Bill：外键列名 bill_id（与 Django 数据库列名一致），unique 体现一对一
+    # OneToOne 关联 Bill：外键列 bill_id + unique 体现一对一
     bill_id: Mapped[int] = mapped_column(Integer, ForeignKey('bills_bill.id'), unique=True, comment="关联账单")
-    # ORM 关联对象（可选，便于联表查询），对应原 related_name='bill_profit'
+    # ORM 关联对象（可选，便于联表查询）
     bill: Mapped["Bill"] = relationship("Bill")
 
     # 持仓与成本
@@ -192,7 +188,7 @@ class Profit(Base, BaseModel):
 
 
 class Group(Base, BaseModel):
-    """账单汇总模型（对应 Django bills_group）。"""
+    """账单汇总模型。"""
 
     __tablename__ = "bills_group"
 
@@ -292,7 +288,7 @@ class Group(Base, BaseModel):
 
 
 class GroupAcc(BaseModel, Base):
-    """账户汇总模型（对应 Django bills_group_acc）。"""
+    """账户汇总模型。"""
 
     __tablename__ = "bills_group_acc"
 
@@ -323,7 +319,7 @@ class GroupAcc(BaseModel, Base):
 
 
 class GroupSymbol(Base, BaseModel):
-    """标的汇总模型（对应 Django bills_group_symbol）。"""
+    """标的汇总模型。"""
 
     __tablename__ = "bills_group_symbol"
 

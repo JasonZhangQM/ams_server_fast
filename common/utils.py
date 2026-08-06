@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
-"""通用工具函数（从 server_dj/common/utils.py 迁移）。
+"""通用工具函数。
 
-迁移要点：
-- 所有与 Django 无关的函数原样保留（函数名、入参、逻辑不变）。
-- get_field_max_sql 中将 Django 的 mdl._meta.db_table 改为 SQLAlchemy 的 mdl.__table__.name。
-- df_init_model 依赖 BaseModel 的 map_fields/db_fields/to_dtype 方法，保持原逻辑（含 df.columns 用法）。
+- df_init_model 依赖 BaseModel 的 map_fields/db_fields/to_dtype 方法。
 """
 from sqlalchemy import text
 import codecs
@@ -50,7 +47,7 @@ def df_init_model(df, mdl, is_id=False):
         lambda x: x.strip() if isinstance(x, str) else x)  # 去除空格
     df_copy = df_copy.rename(columns=mdl.map_fields())  # 外部列名映射数据库字段
     df_copy = df_copy[filter_in_cols(df_copy.columns, mdl.db_fields(is_id))]  # 过滤字段
-    # 注意：此处用 df.columns（原始列名）保持与原 Django 逻辑一致
+    # 注意：此处用 df.columns（原始列名）
     df_copy = df_copy.astype(filter_dtypes(df.columns, mdl.to_dtype()))  # 转换数据类型
     df_copy = df_copy.replace({np.nan: None})  # 空值适配数据库
     return df_copy
@@ -118,10 +115,7 @@ def get_sql_to_df(sql: str, engine) -> pd.DataFrame:
 
 
 def get_field_max_sql(field, mdl, engine):
-    """读取指定数据库表中指定 field 的最大值。
-
-    迁移变更：mdl._meta.db_table -> mdl.__table__.name（SQLAlchemy 元数据）
-    """
+    """读取指定数据库表中指定 field 的最大值。"""
     sql = f'''
         SELECT MAX({field}) as field_max
         FROM {mdl.__table__.name}

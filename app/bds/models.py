@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 """bds 应用的 SQLAlchemy 2.0 模型。
 
-由 Django (server_dj/apps/bds/models.py) 迁移而来：
-- SymbolInfo: 证券信息
-- TradeDate: 交易日历
-
 继承 (Base, BaseModel)：Base 来自 server_fast.common.db，
 BaseModel mixin 提供 id/create_time/update_time 通用字段及
 to_dtype/map_fields/db_fields/to_dict 方法。
@@ -72,7 +68,7 @@ class SymbolInfo(Base, BaseModel):
         "roe", "yoy_in", "yoy_np", "gpm", "dar",
     ]
 
-    # 表级参数：保留原 Django Meta.indexes 中的命名索引（与 unique=True 互不冲突）
+    # 表级参数：命名索引（与 unique=True 互不冲突）
     __table_args__ = (
         Index("k_bds_symbol_info_symbol", "symbol"),
     )

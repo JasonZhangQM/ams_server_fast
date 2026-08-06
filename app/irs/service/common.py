@@ -12,7 +12,7 @@ logger = logging.getLogger("uvicorn.error")
 def _flush_and_commit(session, obj=None):
     """统一封装：add（如传入 obj）-> flush（触发事件钩子）-> commit。
 
-    替代 Django 的 obj.save()。在事务块 (with session.begin()) 内不应调用此函数，
+    在事务块 (with session.begin()) 内不应调用此函数，
     因为 begin 会在退出时自动 commit。
     """
     if obj is not None:

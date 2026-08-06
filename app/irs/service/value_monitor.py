@@ -27,7 +27,7 @@ def get_history_em_df(symbols: list):
     """获取 symbols 上年度末至本年度最近的最高价、最低价和收盘价。"""
     _mdl = TradeDate
     last_year = (datetime.now().year) - 1
-    # 查询上一年度最后一个交易日：MySQL YEAR() 函数等价 Django __year 查找
+    # 查询上一年度最后一个交易日：用 MySQL YEAR() 函数过滤
     with SessionLocal() as session:
         last_trade_date_row = (
             session.query(_mdl.trade_date)

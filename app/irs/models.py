@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """irs 应用 SQLAlchemy 2.0 模型定义。
 
-迁移自 server_dj/apps/irs/models.py，要点：
-- 9 个 ORM 模型继承 (Base, BaseModel)，表名与原 Django class Meta.db_table 完全一致
-- 原 Django save() 中的自动计算逻辑改写为 SQLAlchemy before_insert / before_update 事件钩子
+- 3 个 ORM 模型继承 (Base, BaseModel)
+- 衍生字段计算逻辑通过 SQLAlchemy before_insert / before_update 事件钩子实现
 - 保留所有自定义类属性（cols_map_fields / unique_keys / fields_request 等）
 """
 from datetime import date
@@ -29,7 +28,7 @@ from server_fast.common.models import BaseModel
 def _on_insert_update(model):
     """装饰器：把函数同时注册为 model 的 before_insert + before_update 钩子。
 
-    替代 Django save() 中的自动计算逻辑：在 flush 前对 target 实例赋值计算字段。
+    在 flush 前对 target 实例赋值计算字段。
     """
 
     def decorator(fn):
@@ -162,7 +161,7 @@ class DiscountMonitor(Base, BaseModel):
 
     __tablename__ = "irs_discount_monitor"
 
-    # 期权主力标记常量（保留原 Django 类属性）
+    # 期权主力标记常量
     OPTION_MAIN = True    # 是
     OPTION_MINOR = False  # 否
 
@@ -200,7 +199,7 @@ class DiscountMonitor(Base, BaseModel):
 
 
 # =========================================================================
-# 事件钩子：替代原 Django save() 中的自动计算逻辑
+# 事件钩子：flush 前自动计算衍生字段
 # =========================================================================
 
 
@@ -232,7 +231,7 @@ def _compute_value_monitor(mapper, connection, target):
 
 @_on_insert_update(OptionMonitor)
 def _compute_option_monitor(mapper, connection, target):
-    """OptionMonitor 计算逻辑（合并原 SymbolOption + MonitorOption 的 save()）：
+    """OptionMonitor 计算逻辑：
     - days_left = (delisted_date - today).days
     - multiplier 直接存储，不计算（原 value_per 计算已移除）
     - atm_i/value_i/value_t/ratio_t/ratio_i/ratio_t_y/ratio_i_y 基于本表字段计算
@@ -274,7 +273,7 @@ def _compute_option_monitor(mapper, connection, target):
 
 @_on_insert_update(DiscountMonitor)
 def _compute_discount_monitor(mapper, connection, target):
-    """DiscountMonitor 计算逻辑（合并原 SymbolDiscount + MonitorDiscount 的 save()）：
+    """DiscountMonitor 计算逻辑：
     - symbol_type/con_name：由 Config.SYMBOL_CON_LIST 配置取数（service 层写入），钩子不再解析
     - days_left：若 delisted_date 有值，计算 (delisted_date - today).days
     - discount/ratio/ratio_y：仅当 price 和 price_ud 均有值时计算，避免除零

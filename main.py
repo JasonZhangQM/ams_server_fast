@@ -13,11 +13,10 @@ from server_fast.app.irs.router import router as irs_router
 
 app = FastAPI(
     title="宽客ams FastAPI",
-    description="Django→FastAPI 迁移",
     version="1.0.0",
 )
 
-# CORS：允许所有源（与原 Django CSRF_TRUSTED_ORIGINS 包含 localhost:9527 的意图一致）
+# CORS：允许所有源
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

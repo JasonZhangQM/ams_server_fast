@@ -1,7 +1,7 @@
 """FastAPI 项目配置：基于 pydantic-settings 加载 .env，提供全局 settings 对象。
 
 关键点：
-- DB_ENGINE 为 SQLAlchemy engine 单例（显式包含端口 3306，区别于原 Django 无端口写法）。
+- DB_ENGINE 为 SQLAlchemy engine 单例。
 - gm SDK set_token 调用用 try/except 包裹，gm 未安装时不影响配置加载。
 """
 import sys
@@ -63,7 +63,6 @@ class Settings(BaseSettings):
         """SQLAlchemy engine 单例。
 
         连接串格式：mysql+pymysql://{user}:{password}@{host}:{port}/{name}
-        原 Django 代码无端口，FastAPI 版本显式包含 3306。
         """
         global _db_engine
         if _db_engine is None:

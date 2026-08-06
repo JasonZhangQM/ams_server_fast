@@ -176,7 +176,7 @@ def upsert_group_symbol_sql():
     _engine = settings.DB_ENGINE
     _mdl = Group
     _mdl_symbol = GroupSymbol
-    # 获取Group数据（原 Django _meta.fields 改为 __table__.columns）
+    # 获取Group数据
     sql = f'''
         SELECT {','.join([col.name for col in _mdl.__table__.columns])}
         FROM bills_group
