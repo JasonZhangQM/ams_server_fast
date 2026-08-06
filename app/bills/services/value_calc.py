@@ -17,7 +17,7 @@ def value_float(df, current_data, multiplier):
     df['price'] = df['symbol'].map(symbol_dict)
     df['multiplier'] = df['symbol'].apply(
         map_value, multiplier=multiplier)
-    cdt = (df['p_long'] > 0 & df['price'].notna())  # 多头持仓市值=多头持仓数量*最新价格*乘数
+    cdt = ((df['p_long'] > 0) & df['price'].notna())  # 多头持仓市值=多头持仓数量*最新价格*乘数
     df.loc[cdt, 'value_long'] = (
         df.loc[cdt, 'price'] * df.loc[cdt, 'p_long'] * df.loc[cdt, 'multiplier']
     ).round(2)

@@ -304,8 +304,8 @@ def sync_group():
     return _run_sync_steps(
         [
             ("value_float_em_sql", value_float_em_sql),
-            ("upsert_group_symbol_sql", upsert_group_symbol_sql),
             ("upsert_group_acc_sql", upsert_group_acc_sql),
+            ("upsert_group_symbol_sql", upsert_group_symbol_sql),
         ]
     )
 

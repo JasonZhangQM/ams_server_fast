@@ -284,7 +284,7 @@ def handle_revenue_expenses(org: dict, dfd: dict) -> dict:
         raise ValueError
     return org.copy()
 
-# 处理交易账单(全部,有问题)
+# 处理交易账单(全部)
 def handle_trades_all(group_dict, df_bill, handle_dict, ll=[]):
     for i, bill in df_bill.iterrows():  # 逐行处理交易账单
         bill = bill.to_dict()
