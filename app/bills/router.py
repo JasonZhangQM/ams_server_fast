@@ -277,19 +277,6 @@ def list_group_symbols(
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-# 标的分组类别查询：返回 Config.MAP_CATEGORY 字典的所有 key 作为类别列表
-@router.get("/group-symbols/categories")
-def list_group_symbol_categories():
-    """返回应用配置的交易类别列表。
-
-    数据源为 Config.MAP_CATEGORY 字典的 key 集合，确保前端下拉选项
-    与后端交易类型映射配置保持一致，无需依赖数据库实际数据。
-    """
-    # 直接取字典 key 列表，避免查询数据库
-    categories = list(Config.MAP_CATEGORY.keys())
-    return {"categories": categories}
-
-
 # 年度收益查询
 @router.get("/profit-years", response_model=PageResponse[ProfitYearOut])
 def list_profit_years(
