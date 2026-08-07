@@ -35,15 +35,18 @@ class Config:
     OPTIONS_MARCH = (
         {'underlying_symbol':'SHSE.000300','option_type':'股指期权','option_name':'沪深300股指期权','multiplier':'100','rule_exercise_date':'R1'},
         {'underlying_symbol':'SHSE.510500','option_type':'ETF期权','option_name':'南方中证500ETF期权','multiplier':'10000','rule_exercise_date':'R2'},
+        {'underlying_symbol':'SHFE.au','option_type':'商品期权','option_name':'黄金期权','multiplier':'1000','rule_exercise_date':'R3'},
         )
 
     # 到期日规则映射：rule_exercise_date -> (第几个星期, 星期几)
     # 星期几：0=周一 ... 4=周五
     # R1: 股指期权，合约月第三个周五；R2: ETF期权，合约月第四个周三
+    # R3: 商品期权（如黄金期权），标的期货合约交割月前第一月的倒数第五个交易日（不用 (week_n, weekday) 元组，由 service 层按"倒数第 5 个交易日"逻辑实现）
     # 遇节假日顺延至下一交易日（由 service 层查 TradeDate 日历处理）
     RULE_EXERCISE_DATE = {
         'R1': (3, 4),  # 合约月第三个周五
         'R2': (4, 2),  # 合约月第四个周三
+        'R3': None,    # 商品期权：交割月前第一月倒数第 5 个交易日（占位，逻辑在 service 层）
     }
 
 

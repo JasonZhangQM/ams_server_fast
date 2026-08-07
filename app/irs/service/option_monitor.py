@@ -3,6 +3,8 @@
 
 - option_monitor_sync_orm：按到期月同步期权行情，upsert 到 OptionMonitor 表
 """
+import calendar
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -20,16 +22,39 @@ def _calc_delisted_date(end_month: str, rule: str) -> date:
     """根据到期日规则推算 delisted_date（遇节假日顺延至下一交易日）。
 
     :param end_month: 到期年月，格式 "YYYYMM"（如 "202608"）
-    :param rule: 到期日规则代码（对应 Config.RULE_EXERCISE_DATE，如 'R1'/'R2'）
+    :param rule: 到期日规则代码（对应 Config.RULE_EXERCISE_DATE，如 'R1'/'R2'/'R3'）
     :return: 到期日 date
     """
-    rule_map = IrsCfg.RULE_EXERCISE_DATE.get(rule)
-    if rule_map is None:
+    # 未知规则校验：R3 配置值为 None（占位），需排除在 None 校验之外
+    if rule != 'R3' and IrsCfg.RULE_EXERCISE_DATE.get(rule) is None:
         raise ValueError(f"unknown rule_exercise_date: {rule}")
-    week_n, weekday = rule_map  # 第几个星期(1-based), 星期几(0=周一)
 
     year = int(end_month[:4])
     month = int(end_month[4:])
+
+    # R3：商品期权，标的期货合约交割月（end_month）前第一月的倒数第五个交易日
+    if rule == 'R3':
+        # 计算"前第一月"：若 month==1 则跨年至上年 12 月
+        if month == 1:
+            prev_year, prev_month = year - 1, 12
+        else:
+            prev_year, prev_month = year, month - 1
+        prev_first = date(prev_year, prev_month, 1)
+        prev_last = date(prev_year, prev_month, calendar.monthrange(prev_year, prev_month)[1])
+        # 查询该月所有交易日，按降序取倒数第 5 个
+        with SessionLocal() as session:
+            trade_dates = session.query(TradeDate.trade_date).filter(
+                TradeDate.trade_date >= prev_first,
+                TradeDate.trade_date <= prev_last,
+            ).order_by(TradeDate.trade_date.desc()).limit(5).all()
+        if len(trade_dates) < 5:
+            raise ValueError(
+                f"TradeDate 日历数据不足：{prev_year}-{prev_month:02d} 交易日不足 5 条"
+            )
+        return trade_dates[4][0]
+
+    # R1/R2：按 (week_n, weekday) 规则计算
+    week_n, weekday = IrsCfg.RULE_EXERCISE_DATE[rule]  # 第几个星期(1-based), 星期几(0=周一)
 
     # 找到该月第 week_n 个星期 weekday 的日期
     # date(year, month, 1).weekday() 得到 1 号的星期几(0=周一)
@@ -74,18 +99,50 @@ def option_monitor_sync_orm(option_name: str, end_month: str):
     underlying_symbol = config_item['underlying_symbol']
     multiplier = int(config_item['multiplier'])
     rule_exercise_date = config_item['rule_exercise_date']
+    option_type_cfg = config_item['option_type']
+    # 商品期权（如黄金期权）走 option_hist_shfe 分支；股指/ETF 期权走 option_finance_board
+    is_commodity_option = (option_type_cfg == '商品期权')
 
     # 2. 调用 akshare 获取期权行情（函数内导入，避免模块加载时拉起 akshare 依赖）
     import akshare as ak
-    df = ak.option_finance_board(symbol=option_name, end_month=end_month)
-    if df is None or df.empty:
-        logger.info(f"akshare 返回空数据：{option_name} {end_month}")
-        return 0
+    if is_commodity_option:
+        # 商品期权：option_hist_shfe 需指定 trade_date，取今日或日历中 ≤ today 的最大交易日
+        today = date.today()
+        with SessionLocal() as session:
+            is_trade = session.query(TradeDate.trade_date).filter(
+                TradeDate.trade_date == today
+            ).first()
+            if is_trade:
+                trade_date = today
+            else:
+                last_trade = session.query(TradeDate.trade_date).filter(
+                    TradeDate.trade_date <= today
+                ).order_by(TradeDate.trade_date.desc()).first()
+                if last_trade is None:
+                    logger.info(f"TradeDate 日历无 {today} 及之前的交易日")
+                    return 0
+                trade_date = last_trade[0]
+        df = ak.option_hist_shfe(
+            symbol=option_name, trade_date=trade_date.strftime('%Y%m%d'))
+        if df is None or df.empty:
+            logger.info(f"akshare 返回空数据：{option_name} {end_month} trade_date={trade_date}")
+            return 0
+    else:
+        # 股指/ETF 期权：option_finance_board 按 end_month 拉取
+        df = ak.option_finance_board(symbol=option_name, end_month=end_month)
+        if df is None or df.empty:
+            logger.info(f"akshare 返回空数据：{option_name} {end_month}")
+            return 0
 
     # 3. 调用 gm current 获取标的现价（gm 终端不可用时降级为 None，钩子已处理 None 情况）
+    #    商品期权标的合约为动态拼接 SHFE.au{YYMM}；股指/ETF 期权标的固定
+    if is_commodity_option:
+        ud_symbol = f"{underlying_symbol}{end_month[2:]}"  # 如 SHFE.au2609
+    else:
+        ud_symbol = underlying_symbol
     try:
         ud_data = call_with_timeout(current, timeout=10)(
-            [underlying_symbol], fields=['symbol', 'price'])
+            [ud_symbol], fields=['symbol', 'price'])
         price_ud = Decimal(str(ud_data[0]['price'])) if ud_data else None
     except Exception as e:
         logger.error(f"获取标的现价失败：{str(e)}")
@@ -94,9 +151,13 @@ def option_monitor_sync_orm(option_name: str, end_month: str):
     # 4. 根据到期日规则推算 delisted_date（遇节假日顺延至下一交易日）
     delisted_date = _calc_delisted_date(end_month, rule_exercise_date)
 
-    # 5. 根据 Config.OPTIONS_MARCH 的 option_type 判断品种格式
+    # 5. 解析合约行并 upsert
     #    股指期权：akshare 返回 'instrument' 列；ETF期权：返回 '合约交易代码' 列
-    is_index_option = config_item['option_type'] == '股指期权'
+    #    商品期权：返回 '合约代码' 列，需正则解析
+    is_index_option = (option_type_cfg == '股指期权')
+    # 黄金期权合约代码正则：au2609C648 = 标的au+月份2609+C认购+行权价648
+    commodity_re = re.compile(r'^au(\d{4})([CP])(\d+(?:\.\d+)?)$')
+    target_month = end_month[2:]  # YYMM，如 '2609'
     count_insert = 0
     count_update = 0
     _mdl = OptionMonitor
@@ -105,7 +166,22 @@ def option_monitor_sync_orm(option_name: str, end_month: str):
             for _, row in df.iterrows():
                 symbol = None  # 预定义，便于异常日志定位
                 try:
-                    if is_index_option:
+                    if is_commodity_option:
+                        # 商品期权（上期所）：合约代码列 + 收盘价列
+                        raw_code = str(row['合约代码'])
+                        m = commodity_re.match(raw_code)
+                        if m is None:
+                            logger.error(f"商品期权合约代码格式不符：{raw_code}")
+                            continue
+                        code_month, cp_flag, strike_str = m.group(1), m.group(2), m.group(3)
+                        if code_month != target_month:
+                            # 非目标到期月，跳过
+                            continue
+                        symbol = raw_code
+                        option_type = 'call' if cp_flag == 'C' else 'put'
+                        price_strike = Decimal(strike_str)
+                        price = Decimal(str(row['收盘价']))
+                    elif is_index_option:
                         # 股指期权（中金所）：instrument 格式 'IO2603-C-3900'
                         symbol = row['instrument']
                         price = Decimal(str(row['lastprice']))
