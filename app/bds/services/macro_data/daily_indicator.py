@@ -26,19 +26,6 @@ from server_fast.app.bds.models import DailyIndicator
 logger = logging.getLogger("uvicorn.error")  # 复用 uvicorn 的 logger
 
 
-def _ensure_table():
-    """幂等创建 bds_daily_indicator 表（checkfirst=True，已存在则跳过）。
-
-    项目硬约束：不修改任何已有表，仅创建新表。
-    在首次同步时调用，避免 import 时触发 DDL。
-    """
-    try:
-        DailyIndicator.__table__.create(settings.DB_ENGINE, checkfirst=True)
-    except Exception as e:
-        # 表已存在或创建失败均不阻断同步流程，upsert_df_to_db 会进一步抛错
-        logger.warning(f"创建 bds_daily_indicator 表失败（可忽略已存在情况）：{e}")
-
-
 def _fetch_daily_from_fred(indicator_code, meta):
     """通过 FRED API 获取单个收益率指标数据，返回标准化的 DataFrame。
 
@@ -129,9 +116,6 @@ def upsert_daily_indicator_sql(indicator_code):
 
     logger.info(f"收益率指标 {indicator_code}（{meta['name']}）获取并导入")
     try:
-        # 首次同步时确保表存在（幂等）
-        _ensure_table()
-
         df = _fetch_daily_from_fred(indicator_code, meta)
         if df is None or df.empty:
             logger.info(f"->{indicator_code} 无需导入")

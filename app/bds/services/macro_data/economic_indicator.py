@@ -22,108 +22,7 @@ from server_fast.app.bds.models import EconomicIndicator
 logger = logging.getLogger("uvicorn.error")  # 复用 uvicorn 的 logger
 
 
-def upsert_economic_indicator_sql(indicator_code):
-    """同步单个美国宏观经济指标数据并 upsert 入库。
 
-    数据源优先级：
-    1. FRED API（圣路易斯联储聚合 Fed/BLS/BEA/Census/ISM/CB 等原始源）
-       - 配置 fred_series_id 时使用 FRED
-       - fred_units: lin=原始值 pch=环比 pct pc1=同比 pct pca=复合年化 pct
-       - FRED 不提供预期值（value_expected 置空），前值通过 shift(1) 计算
-    2. akshare（fallback）：fred_series_id 缺失时回退到 akshare 三种列模式（A/B/C）
-
-    增量策略：
-    - 月度/季度指标：查询 DB 最大 report_date，仅导入新增行；无数据从 2010-01-01 全量
-    - 日度指标（YIELD_*）：获取最近 365 天数据
-
-    返回值：插入/更新条数（int），异常返回 -1。
-    """
-    _engine = settings.DB_ENGINE
-    _mdl = EconomicIndicator
-
-    # 获取指标元信息
-    meta = dbsCfg.ECONOMIC_INDICATORS.get(indicator_code)
-    if meta is None:
-        logger.warning(f"未知经济指标代码：{indicator_code}")
-        return -1
-
-    logger.info(f"经济指标 {indicator_code}（{meta['name']}）获取并导入")
-    try:
-        fred_series_id = meta.get('fred_series_id')
-        akshare_func = meta.get('akshare_func')
-
-        if fred_series_id:
-            # ===== FRED API 路径 =====
-            df = _fetch_economic_indicator_from_fred(indicator_code, meta)
-        elif akshare_func:
-            # ===== akshare fallback 路径 =====
-            df = _fetch_economic_indicator_from_akshare(indicator_code, meta)
-        else:
-            # 既无 FRED 也无 akshare 配置（如中国指标），仅通过 wscn 同步
-            logger.info(f"->{indicator_code} 无 FRED/akshare 配置，请通过 wscn 同步")
-            return 0
-
-        if df is None or df.empty:
-            logger.info(f"->{indicator_code} 无需导入")
-            return 0
-
-        # 添加元信息列
-        df['indicator_code'] = indicator_code
-        df['indicator_name'] = meta['name']
-        df['indicator_short_name'] = meta['short_name']
-        df['category'] = meta['category']
-        df['country'] = meta['country']
-        df['unit'] = meta['unit']
-        df['frequency'] = meta['frequency']
-
-        # 日期列转换（空值/异常值转为 NaT 后过滤）
-        df['report_date'] = pd.to_datetime(df['report_date'], errors='coerce').dt.date
-        if 'pub_date' in df.columns:
-            df['pub_date'] = pd.to_datetime(df['pub_date'], errors='coerce').dt.date
-
-        # 数值列转换（非数值转为 NaN 后过滤）
-        for col in ['value', 'value_prev', 'value_expected']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # 过滤掉 report_date 或 value 为 NaN 的行
-        df = df[df['report_date'].notna() & df['value'].notna()]
-
-        # 增量过滤
-        # 日度指标（frequency=daily）：仅保留最近 365 天
-        # 月度/季度指标：查询 DB 最大 report_date，仅导入新增；无数据从 2010-01-01 全量
-        if meta['frequency'] == 'daily':
-            cutoff = date.today() - timedelta(days=365)
-            df = df[df['report_date'] >= cutoff]
-        else:
-            with SessionLocal() as db:
-                max_date = (
-                    db.query(func.max(_mdl.report_date))
-                    .filter(_mdl.indicator_code == indicator_code)
-                    .scalar()
-                )
-            if max_date is not None:
-                df = df[df['report_date'] > max_date]
-            else:
-                df = df[df['report_date'] >= date(2010, 1, 1)]
-
-        if df.empty:
-            logger.info(f"->{indicator_code} 无需导入")
-            return 0
-
-        # 选择目标列并入库
-        cols = ['indicator_code', 'indicator_name', 'indicator_short_name', 'category', 'country', 'report_date',
-                'pub_date', 'value', 'value_prev', 'value_expected', 'unit', 'frequency']
-        df = df[[c for c in cols if c in df.columns]]
-        df = df.replace({np.nan: None})
-
-        upsert_df_to_db(df, _mdl.__table__.name, _engine, _mdl.unique_keys)
-        count = len(df)
-        logger.info(f"->{indicator_code} 成功：{count}")
-        return count
-    except Exception as e:
-        logger.error(f"->{indicator_code} 失败：{str(e)}")
-        return -1
 
 
 def _fetch_economic_indicator_from_fred(indicator_code, meta):
@@ -251,6 +150,109 @@ def _fetch_economic_indicator_from_akshare(indicator_code, meta):
 
     return df
 
+def upsert_economic_indicator_sql(indicator_code):
+    """同步单个美国宏观经济指标数据并 upsert 入库。
+
+    数据源优先级：
+    1. FRED API（圣路易斯联储聚合 Fed/BLS/BEA/Census/ISM/CB 等原始源）
+       - 配置 fred_series_id 时使用 FRED
+       - fred_units: lin=原始值 pch=环比 pct pc1=同比 pct pca=复合年化 pct
+       - FRED 不提供预期值（value_expected 置空），前值通过 shift(1) 计算
+    2. akshare（fallback）：fred_series_id 缺失时回退到 akshare 三种列模式（A/B/C）
+
+    增量策略：
+    - 月度/季度指标：查询 DB 最大 report_date，仅导入新增行；无数据从 2010-01-01 全量
+    - 日度指标（YIELD_*）：获取最近 365 天数据
+
+    返回值：插入/更新条数（int），异常返回 -1。
+    """
+    _engine = settings.DB_ENGINE
+    _mdl = EconomicIndicator
+
+    # 获取指标元信息
+    meta = dbsCfg.ECONOMIC_INDICATORS.get(indicator_code)
+    if meta is None:
+        logger.warning(f"未知经济指标代码：{indicator_code}")
+        return -1
+
+    logger.info(f"经济指标 {indicator_code}（{meta['name']}）获取并导入")
+    try:
+        fred_series_id = meta.get('fred_series_id')
+        akshare_func = meta.get('akshare_func')
+
+        if fred_series_id:
+            # ===== FRED API 路径 =====
+            df = _fetch_economic_indicator_from_fred(indicator_code, meta)
+        elif akshare_func:
+            # ===== akshare fallback 路径 =====
+            df = _fetch_economic_indicator_from_akshare(indicator_code, meta)
+        else:
+            # 既无 FRED 也无 akshare 配置（如中国指标），仅通过 wscn 同步
+            logger.info(f"->{indicator_code} 无 FRED/akshare 配置，请通过 wscn 同步")
+            return 0
+
+        if df is None or df.empty:
+            logger.info(f"->{indicator_code} 无需导入")
+            return 0
+
+        # 添加元信息列
+        df['indicator_code'] = indicator_code
+        df['indicator_name'] = meta['name']
+        df['indicator_short_name'] = meta['short_name']
+        df['category'] = meta['category']
+        df['country'] = meta['country']
+        df['unit'] = meta['unit']
+        df['frequency'] = meta['frequency']
+
+        # 日期列转换（空值/异常值转为 NaT 后过滤）
+        df['report_date'] = pd.to_datetime(df['report_date'], errors='coerce').dt.date
+        if 'pub_date' in df.columns:
+            df['pub_date'] = pd.to_datetime(df['pub_date'], errors='coerce').dt.date
+
+        # 数值列转换（非数值转为 NaN 后过滤）
+        for col in ['value', 'value_prev', 'value_expected']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # 过滤掉 report_date 或 value 为 NaN 的行
+        df = df[df['report_date'].notna() & df['value'].notna()]
+
+        # 增量过滤
+        # 日度指标（frequency=daily）：仅保留最近 365 天
+        # 月度/季度指标：查询 DB 最大 report_date，仅导入新增；无数据从 2010-01-01 全量
+        if meta['frequency'] == 'daily':
+            cutoff = date.today() - timedelta(days=365)
+            df = df[df['report_date'] >= cutoff]
+        else:
+            with SessionLocal() as db:
+                max_date = (
+                    db.query(func.max(_mdl.report_date))
+                    .filter(_mdl.indicator_code == indicator_code)
+                    .scalar()
+                )
+            if max_date is not None:
+                df = df[df['report_date'] > max_date]
+            else:
+                df = df[df['report_date'] >= date(2010, 1, 1)]
+
+        if df.empty:
+            logger.info(f"->{indicator_code} 无需导入")
+            return 0
+
+        # 选择目标列并入库
+        cols = ['indicator_code', 'indicator_name', 'indicator_short_name', 'category', 'country', 'report_date',
+                'pub_date', 'value', 'value_prev', 'value_expected', 'unit', 'frequency']
+        df = df[[c for c in cols if c in df.columns]]
+        df = df.replace({np.nan: None})
+
+        upsert_df_to_db(df, _mdl.__table__.name, _engine, _mdl.unique_keys)
+        count = len(df)
+        logger.info(f"->{indicator_code} 成功：{count}")
+        return count
+    except Exception as e:
+        logger.error(f"->{indicator_code} 失败：{str(e)}")
+        return -1
+    
 
 def upsert_all_economic_indicators_sql():
     """遍历 Config.ECONOMIC_INDICATORS 全量同步所有经济指标。

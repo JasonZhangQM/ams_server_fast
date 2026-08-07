@@ -877,7 +877,7 @@ def list_daily_indicators(
 
 @router.post("/sync/daily-indicator")
 def sync_daily_indicator(indicator_code: str = Query(..., description="指标代码，精确匹配单个指标")):
-    """同步单个美债收益率指标数据。
+    """同步单个日频经济指标数据。
 
     返回值说明：
     - status: success/no_data/error
