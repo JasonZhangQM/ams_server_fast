@@ -100,8 +100,8 @@ def _run_sync_steps(steps: List[Tuple[str, Callable]]):
 # Group 列表
 @router.get("/group", response_model=PageResponse[GroupOut])
 def list_groups(
-    account: Optional[List[str]] = Query(default=None),
-    category: Optional[List[str]] = Query(default=None),
+    account: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
     symbol: Optional[str] = None,
     value_only: Optional[bool] = Query(default=None),
     limit: int = Query(100, ge=1),
@@ -110,7 +110,7 @@ def list_groups(
 ):
     """返回非 cash 类别的 Group 列表。
 
-    account/category 支持多值 IN 匹配，symbol 为 search_fields（模糊）。
+    account/category 单值精确匹配，symbol 为 search_fields（模糊）。
     value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录。
     """
     # 过滤掉 cash 类别
@@ -118,8 +118,8 @@ def list_groups(
     query = _filter_query(
         query,
         [
-            (Group.account, account, "in"),
-            (Group.category, category, "in"),
+            (Group.account, account, "=="),
+            (Group.category, category, "=="),
             (Group.symbol, symbol, "contains"),
         ],
     )
@@ -135,8 +135,8 @@ def list_groups(
 # Bill 列表
 @router.get("/bills", response_model=PageResponse[BillOut])
 def list_bills(
-    account: Optional[List[str]] = Query(default=None),
-    category: Optional[List[str]] = Query(default=None),
+    account: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
     symbol: Optional[str] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -144,15 +144,15 @@ def list_bills(
 ):
     """返回 Bill 列表。
 
-    account/category 支持多值 IN 匹配，
+    account/category 单值精确匹配，
     symbol 为 search_fields（模糊）。
     """
     query = db.query(Bill)
     query = _filter_query(
         query,
         [
-            (Bill.account, account, "in"),
-            (Bill.category, category, "in"),
+            (Bill.account, account, "=="),
+            (Bill.category, category, "=="),
             (Bill.symbol, symbol, "contains"),
         ],
     )
@@ -210,10 +210,10 @@ def list_profits(
     return {"items": result, "total": total, "limit": limit, "offset": offset}
 
 
-# GroupAcc 列表（全量列表，无过滤参数）
+# GroupAcc 列表
 @router.get("/group-accs", response_model=PageResponse[GroupAccOut])
 def list_group_accs(
-    account: Optional[List[str]] = Query(default=None),
+    account: Optional[str] = Query(default=None),
     acc_aset_only: Optional[bool] = Query(default=None),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -221,13 +221,13 @@ def list_group_accs(
 ):
     """返回 GroupAcc 列表。
 
-    account 支持多值 IN 匹配，acc_aset_only 为 True 时仅返回账户净值不为 0 的记录。
+    account 单值精确匹配，acc_aset_only 为 True 时仅返回账户净值不为 0 的记录。
     """
     query = db.query(GroupAcc)
     query = _filter_query(
         query,
         [
-            (GroupAcc.account, account, "in"),
+            (GroupAcc.account, account, "=="),
         ],
     )
     # 仅保留账户净值不为 0 的记录
@@ -242,7 +242,7 @@ def list_group_accs(
 # GroupSymbol 列表
 @router.get("/group-symbols", response_model=PageResponse[GroupSymbolOut])
 def list_group_symbols(
-    category: Optional[List[str]] = Query(default=None),
+    category: Optional[str] = Query(default=None),
     symbol: Optional[str] = None,
     value_only: Optional[bool] = Query(default=None),
     limit: int = Query(100, ge=1),
@@ -251,7 +251,7 @@ def list_group_symbols(
 ):
     """返回 GroupSymbol 列表。
 
-    category 支持多值 IN 匹配（可传入多个值，命中任一即返回），
+    category 单值精确匹配，
     symbol 为 search_fields（模糊）。
     value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录。
     """
@@ -259,7 +259,7 @@ def list_group_symbols(
     query = _filter_query(
         query,
         [
-            (GroupSymbol.category, category, "in"),
+            (GroupSymbol.category, category, "=="),
             (GroupSymbol.symbol, symbol, "contains"),
         ],
     )
