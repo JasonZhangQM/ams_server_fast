@@ -98,18 +98,15 @@ def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:
 
 @router.get("/value-monitors", response_model=PageResponse[ValueMonitorOut])
 def list_value_monitors(
-    symbol: Optional[str] = Query(None, description="代码模糊匹配"),
-    name: Optional[str] = Query(None, description="名称模糊匹配"),
+    symbol: Optional[str] = Query(None, description="代码精确匹配"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """估值监测（对应 ValueMonitor 独立表，支持代码和名称模糊匹配）。"""
+    """估值监测（对应 ValueMonitor 独立表，支持代码精确匹配）。"""
     query = db.query(ValueMonitor)
     if symbol:
-        query = query.filter(ValueMonitor.symbol.like(f"%{symbol}%"))
-    if name:
-        query = query.filter(ValueMonitor.name.like(f"%{name}%"))
+        query = query.filter(ValueMonitor.symbol == symbol)
     total = query.count()
     items = query.order_by(ValueMonitor.symbol).offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
