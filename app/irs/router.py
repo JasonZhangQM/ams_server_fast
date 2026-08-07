@@ -154,7 +154,8 @@ def update_value_monitor(
 ):
     """修改估值监测记录。
 
-    按 id 更新 6 个可编辑字段（symbol 不可改）。
+    按 id 更新 6 个必填字段（symbol 不可改）；
+    py_close/y_high/y_low/price 为可选行情字段，None 表示不修改（兜底编辑）。
     id 不存在时返回 HTTP 404。
     """
     vm = db.get(ValueMonitor, id_)
@@ -167,6 +168,15 @@ def update_value_monitor(
         vm.pp_m = payload.pp_m
         vm.pp_h = payload.pp_h
         vm.pp_eh = payload.pp_eh
+        # 行情字段：非 None 才更新（None 表示不修改）
+        if payload.py_close is not None:
+            vm.py_close = payload.py_close
+        if payload.y_high is not None:
+            vm.y_high = payload.y_high
+        if payload.y_low is not None:
+            vm.y_low = payload.y_low
+        if payload.price is not None:
+            vm.price = payload.price
         db.commit()
         return {"status": "success", "message": "修改成功"}
     except Exception as e:

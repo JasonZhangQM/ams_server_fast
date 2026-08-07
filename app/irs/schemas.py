@@ -101,10 +101,14 @@ class ValueMonitorCreate(BaseModel):
 
 
 # =========================================================================
-# 估值监测修改：请求 Schema（6 个可编辑字段，symbol 不可改）
+# 估值监测修改：请求 Schema（6 个必填字段 + 4 个可选行情字段，symbol 不可改）
 # =========================================================================
 class ValueMonitorUpdate(BaseModel):
-    """估值监测修改请求（对应 PUT /irs/value-monitors/{id}）。"""
+    """估值监测修改请求（对应 PUT /irs/value-monitors/{id}）。
+
+    name/pp_* 为必填字段；py_close/y_high/y_low/price 为可选行情字段，
+    None 表示不修改，作为同步接口拉取失败时的兜底编辑入口。
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -114,6 +118,11 @@ class ValueMonitorUpdate(BaseModel):
     pp_m: Decimal                              # 中
     pp_h: Decimal                              # 高
     pp_eh: Decimal                             # 极高
+    # 行情字段（可选，None 表示不修改）
+    py_close: Optional[Decimal] = None         # 上年末
+    y_high: Optional[Decimal] = None           # 年高
+    y_low: Optional[Decimal] = None            # 年低
+    price: Optional[Decimal] = None            # 最新价
 
 
 # =========================================================================
