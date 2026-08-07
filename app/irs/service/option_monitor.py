@@ -134,30 +134,27 @@ def option_monitor_sync_orm(option_name: str, end_month: str):
             logger.info(f"akshare 返回空数据：{option_name} {end_month}")
             return 0
 
-    # 3. 调用 gm current 获取标的现价（gm 终端不可用时降级为 None，钩子已处理 None 情况）
-    #    商品期权标的合约为动态拼接 SHFE.au{YYMM}；股指/ETF 期权标的固定
-    if is_commodity_option:
-        ud_symbol = f"{underlying_symbol}{end_month[2:]}"  # 如 SHFE.au2609
-    else:
-        ud_symbol = underlying_symbol
-    try:
-        ud_data = call_with_timeout(current, timeout=10)(
-            [ud_symbol], fields=['symbol', 'price'])
-        price_ud = Decimal(str(ud_data[0]['price'])) if ud_data else None
-    except Exception as e:
-        logger.error(f"获取标的现价失败：{str(e)}")
-        price_ud = None
-
-    # 4. 根据到期日规则推算 delisted_date（遇节假日顺延至下一交易日）
-    delisted_date = _calc_delisted_date(end_month, rule_exercise_date)
-
-    # 5. 解析合约行并 upsert
-    #    股指期权：akshare 返回 'instrument' 列；ETF期权：返回 '合约交易代码' 列
-    #    商品期权：返回 '合约代码' 列，需正则解析
+    # 3. 股指/ETF 期权：标的固定、end_month 唯一，循环前算一次 delisted_date 与 price_ud
+    #    商品期权：标的随到期月变化（SHFE.au2609、SHFE.au2610...），按 code_month 缓存
     is_index_option = (option_type_cfg == '股指期权')
     # 黄金期权合约代码正则：au2609C648 = 标的au+月份2609+C认购+行权价648
     commodity_re = re.compile(r'^au(\d{4})([CP])(\d+(?:\.\d+)?)$')
-    target_month = end_month[2:]  # YYMM，如 '2609'
+
+    if not is_commodity_option:
+        # 股指/ETF 期权：循环前计算 delisted_date 与 price_ud
+        try:
+            ud_data = call_with_timeout(current, timeout=10)(
+                [underlying_symbol], fields=['symbol', 'price'])
+            price_ud = Decimal(str(ud_data[0]['price'])) if ud_data else None
+        except Exception as e:
+            logger.error(f"获取标的现价失败：{str(e)}")
+            price_ud = None
+        delisted_date = _calc_delisted_date(end_month, rule_exercise_date)
+
+    # 商品期权缓存：同 code_month 的 delisted_date 与 price_ud 只算一次（避免重复查日历/gm）
+    delisted_cache = {}   # code_month -> delisted_date
+    price_ud_cache = {}   # code_month -> price_ud
+
     count_insert = 0
     count_update = 0
     _mdl = OptionMonitor
@@ -168,19 +165,34 @@ def option_monitor_sync_orm(option_name: str, end_month: str):
                 try:
                     if is_commodity_option:
                         # 商品期权（上期所）：合约代码列 + 收盘价列
+                        # 不按到期月筛选，trade_date 当日所有到期月数据全部入库
                         raw_code = str(row['合约代码'])
                         m = commodity_re.match(raw_code)
                         if m is None:
                             logger.error(f"商品期权合约代码格式不符：{raw_code}")
                             continue
                         code_month, cp_flag, strike_str = m.group(1), m.group(2), m.group(3)
-                        if code_month != target_month:
-                            # 非目标到期月，跳过
-                            continue
                         symbol = raw_code
                         option_type = 'call' if cp_flag == 'C' else 'put'
                         price_strike = Decimal(strike_str)
                         price = Decimal(str(row['收盘价']))
+                        # 按合约自身的到期月计算 delisted_date（缓存避免重复查日历）
+                        if code_month not in delisted_cache:
+                            end_month_full = f"20{code_month}"  # 2609 -> 202609
+                            delisted_cache[code_month] = _calc_delisted_date(
+                                end_month_full, rule_exercise_date)
+                        delisted_date = delisted_cache[code_month]
+                        # 按合约自身的到期月查询标的现价（缓存避免重复调 gm）
+                        if code_month not in price_ud_cache:
+                            ud_symbol = f"{underlying_symbol}{code_month}"  # SHFE.au2609
+                            try:
+                                ud_data = call_with_timeout(current, timeout=10)(
+                                    [ud_symbol], fields=['symbol', 'price'])
+                                price_ud_cache[code_month] = Decimal(str(ud_data[0]['price'])) if ud_data else None
+                            except Exception as e:
+                                logger.error(f"获取标的现价失败：{ud_symbol} - {str(e)}")
+                                price_ud_cache[code_month] = None
+                        price_ud = price_ud_cache[code_month]
                     elif is_index_option:
                         # 股指期权（中金所）：instrument 格式 'IO2603-C-3900'
                         symbol = row['instrument']
