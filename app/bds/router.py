@@ -1,11 +1,29 @@
 # -*- coding: utf-8 -*-
 """bds 应用路由。
 
+bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项。
+可视化分析查询（如 /economic-indicators/latest）已迁移至 irs 模块。
+
 提供查询路由与同步路由：
-- GET  /bds/trade-dates         查询交易日历
-- GET  /bds/symbol-infos        查询证券信息
-- POST /bds/sync/trade-date     同步交易日历
-- POST /bds/sync/symbol-info    同步证券信息
+- GET  /bds/trade-dates             查询交易日历
+- GET  /bds/symbol-infos            查询证券信息
+- GET  /bds/symbol-industries       行业下拉选项
+- GET  /bds/index-histories         指数历史行情
+- GET  /bds/index-codes             指数代码下拉
+- GET  /bds/index-constituents      指数成分股
+- GET  /bds/index-cum-returns       指数累计收益率
+- GET  /bds/fund-balances           资产负债表
+- GET  /bds/fund-incomes            利润表
+- GET  /bds/fund-cashflows         现金流量表
+- GET  /bds/finance-derivs          财务指标
+- GET  /bds/daily-valuations        估值指标
+- GET  /bds/economic-indicators     经济指标（基础查询，可视化分析用 irs）
+- GET  /bds/economic-indicator-codes 经济指标代码下拉
+- GET  /bds/gold-reserves           黄金储备
+- GET  /bds/gold-reserve-countries  黄金储备国家下拉
+- GET  /bds/daily-indicators        美债收益率指标
+- GET  /bds/daily-indicator-codes   美债收益率代码下拉
+- POST /bds/sync/{target}           数据同步（按 target 触发对应 service）
 """
 from datetime import date, timedelta
 from typing import List, Optional
@@ -15,7 +33,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_, text
+from sqlalchemy import or_, text
 
 from server_fast.app.bds.models import (
     DailyIndicator, 
@@ -627,39 +645,6 @@ def list_economic_indicators(
         .offset(offset).limit(limit).all()
     )
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
-
-
-@router.get("/economic-indicators/latest", response_model=List[EconomicIndicatorOut])
-def list_economic_indicators_latest(db: Session = Depends(get_db)):
-    """查询各指标最新值（每个 indicator_code 取 report_date 降序第一条）。
-
-    实现方式：子查询获取每个 indicator_code 的最大 report_date，
-    再 join 主表取对应记录，等价于：
-    SELECT * FROM bds_economic_indicator
-    WHERE (indicator_code, report_date) IN (
-        SELECT indicator_code, MAX(report_date)
-        FROM bds_economic_indicator GROUP BY indicator_code)
-    """
-    # 子查询：每个 indicator_code 的最大 report_date
-    subq = (
-        db.query(
-            EconomicIndicator.indicator_code,
-            func.max(EconomicIndicator.report_date).label("max_date"),
-        )
-        .group_by(EconomicIndicator.indicator_code)
-        .subquery()
-    )
-    # join 主表取对应记录
-    items = (
-        db.query(EconomicIndicator)
-        .join(
-            subq,
-            (EconomicIndicator.indicator_code == subq.c.indicator_code)
-            & (EconomicIndicator.report_date == subq.c.max_date),
-        )
-        .all()
-    )
-    return [item.to_dict() for item in items]
 
 
 @router.get("/economic-indicator-codes")

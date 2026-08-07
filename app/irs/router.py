@@ -2,18 +2,22 @@
 """irs 应用路由。
 
 提供查询路由与同步路由：
-- GET  /irs/value-monitors       估值监测
-- GET  /irs/discounts-monitor    贴水监测
-- GET  /irs/option-monitors      期权监测
-- POST /irs/sync/{target}        按 target 触发对应 service 函数链（4 种 target）
+- GET  /irs/value-monitors              估值监测
+- GET  /irs/discounts-monitor           贴水监测
+- GET  /irs/option-monitors             期权监测
+- GET  /irs/economic-indicators/latest  经济指标最新值（可视化分析查询，复用 bds 模型）
+- POST /irs/sync/{target}               按 target 触发对应 service 函数链（4 种 target）
 """
 from datetime import date
 from typing import Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from server_fast.app.bds.models import EconomicIndicator
+from server_fast.app.bds.schemas import EconomicIndicatorOut
 from server_fast.app.irs import service
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
@@ -303,6 +307,42 @@ def list_option_underlyings():
         for item in IrsCfg.OPTIONS_MARCH
     ]
     return {"underlying_symbols": underlying_symbols}
+
+
+@router.get("/economic-indicators/latest", response_model=List[EconomicIndicatorOut])
+def list_economic_indicators_latest(db: Session = Depends(get_db)):
+    """查询各经济指标最新值（每个 indicator_code 取 report_date 降序第一条）。
+
+    可视化分析查询：复用 bds.EconomicIndicator 模型（只读），
+    供 irs 前端 economic-report 可视化页面使用。
+
+    实现方式：子查询获取每个 indicator_code 的最大 report_date，
+    再 join 主表取对应记录，等价于：
+    SELECT * FROM bds_economic_indicator
+    WHERE (indicator_code, report_date) IN (
+        SELECT indicator_code, MAX(report_date)
+        FROM bds_economic_indicator GROUP BY indicator_code)
+    """
+    # 子查询：每个 indicator_code 的最大 report_date
+    subq = (
+        db.query(
+            EconomicIndicator.indicator_code,
+            func.max(EconomicIndicator.report_date).label("max_date"),
+        )
+        .group_by(EconomicIndicator.indicator_code)
+        .subquery()
+    )
+    # join 主表取对应记录
+    items = (
+        db.query(EconomicIndicator)
+        .join(
+            subq,
+            (EconomicIndicator.indicator_code == subq.c.indicator_code)
+            & (EconomicIndicator.report_date == subq.c.max_date),
+        )
+        .all()
+    )
+    return [item.to_dict() for item in items]
 
 
 # =========================================================================
