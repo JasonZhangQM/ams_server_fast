@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class GroupOut(BaseModel):
-    """账单汇总响应（对应 Group 模型，共 32 字段）。"""
+    """账单汇总响应（对应 Group 模型，共 34 字段）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -42,6 +42,8 @@ class GroupOut(BaseModel):
     cost_total: Optional[Decimal] = None  # 持仓成本
 
     # 市值与浮盈
+    price: Optional[Decimal] = None  # 最新价
+    multiplier: Optional[int] = None  # 乘数
     value_long: Optional[Decimal] = None  # 多头市值
     value_short: Optional[Decimal] = None  # 空头市值
     value_total: Optional[Decimal] = None  # 市值
@@ -188,7 +190,7 @@ class GroupAccOut(BaseModel):
 
 
 class GroupSymbolOut(BaseModel):
-    """标的汇总响应（对应 GroupSymbol 模型，共 16 字段）。"""
+    """标的汇总响应（对应 GroupSymbol 模型，共 18 字段）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -197,6 +199,8 @@ class GroupSymbolOut(BaseModel):
     count: int  # 交易次数
     p_total: Optional[int] = None  # 持仓量
     cost_total: Optional[Decimal] = None  # 持仓成本
+    price: Optional[Decimal] = None  # 最新价
+    multiplier: Optional[int] = None  # 乘数
     value_total: Optional[Decimal] = None  # 当前市值
     pf_total: Optional[Decimal] = None  # 浮动盈亏
     pl_all: Optional[Decimal] = None  # 平仓盈亏

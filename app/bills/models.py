@@ -213,6 +213,8 @@ class Group(Base, BaseModel):
     cost_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="持仓成本")
 
     # 市值与浮盈
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), comment="最新价")
+    multiplier: Mapped[Optional[int]] = mapped_column(Integer, comment="乘数")
     value_long: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="多头市值")
     value_short: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="空头市值")
     value_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="市值")
@@ -249,7 +251,7 @@ class Group(Base, BaseModel):
         'pl_t_br',
         'diff_br', 'diff_dw', 'diff_dwt',
     ]
-    fields_cash_update = [  # 资金试算最佳字段
+    fields_cash_update = [  # 资金试算追加字段
         'profit_time',
         'cost_t_long',
         'cost_total',
@@ -263,6 +265,7 @@ class Group(Base, BaseModel):
     ]
     fields_f_update = [  # 市值试算追加字段
         'value_time',
+        'price', 'multiplier',
         'value_long', 'value_short', 'value_total',
         'pf_long', 'pf_short', 'pf_total',
     ]
@@ -328,6 +331,8 @@ class GroupSymbol(Base, BaseModel):
     count: Mapped[int] = mapped_column(Integer, comment="交易次数")
     p_total: Mapped[Optional[int]] = mapped_column(Integer, comment="持仓量")
     cost_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="持仓成本")
+    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), comment="最新价")
+    multiplier: Mapped[Optional[int]] = mapped_column(Integer, comment="乘数")
     value_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="当前市值")
     pf_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="浮动盈亏")
     pl_all: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="平仓盈亏")

@@ -191,6 +191,9 @@ def upsert_group_symbol_sql():
         df_g['pl_all'] + df_g['pf_total'])
 
     df_symbol = df_g.groupby(['category', 'symbol']).sum(numeric_only=True)
+    # price/multiplier 同一标的应一致，取 max 覆盖 sum 累加值（剔除 fillna(0) 空值）
+    df_symbol['price'] = df_g.groupby(['category', 'symbol'])['price'].max()
+    df_symbol['multiplier'] = df_g.groupby(['category', 'symbol'])['multiplier'].max()
 
     df_symbol.reset_index(inplace=True)
     result = 0
