@@ -264,21 +264,21 @@ def list_index_codes():
 
 @router.get("/index-constituents", response_model=PageResponse[IndexConstituentOut])
 def list_index_constituents(
-    index_code: Optional[List[str]] = Query(default=None, description="指数代码多选精确匹配"),
+    index_code: Optional[str] = Query(default=None, description="指数代码精确匹配"),
     symbol: Optional[str] = Query(default=None, description="成分股代码模糊匹配"),
     trade_date: Optional[date] = Query(default=None, description="交易日期 YYYY-MM-DD"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询指数成分股，支持指数代码多选、成分股代码模糊匹配和具体交易日期筛选。
+    """查询指数成分股，支持指数代码精确匹配、成分股代码模糊匹配和具体交易日期筛选。
 
     响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
     """
     query = db.query(IndexConstituent)
-    # index_code 多选 IN 过滤
+    # index_code 精确匹配
     if index_code:
-        query = query.filter(IndexConstituent.index_code.in_(index_code))
+        query = query.filter(IndexConstituent.index_code == index_code)
     # symbol 模糊匹配
     if symbol:
         query = query.filter(IndexConstituent.symbol.contains(symbol))
@@ -455,6 +455,27 @@ def sync_fund_balance(symbol: str = Query(..., description="股票代码，精�
     return _build_sync_response(symbol, steps)
 
 
+def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit, offset):
+    """通用财务报表查询（FundBalance/FundIncome/FundCashflow/FinanceDeriv 共用）。
+
+    过滤规则：symbol 模糊匹配、rpt_type 精确匹配、rpt_date 起始日。
+    排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
+    """
+    query = db.query(model)
+    if symbol:
+        query = query.filter(model.symbol.like(f"%{symbol}%"))
+    if rpt_type is not None:
+        query = query.filter(model.rpt_type == rpt_type)
+    if start_date:
+        query = query.filter(model.rpt_date >= start_date)
+    total = query.count()
+    items = (
+        query.order_by(model.rpt_date.desc(), model.pub_date.desc())
+        .offset(offset).limit(limit).all()
+    )
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
 @router.get("/fund-balances", response_model=PageResponse[FundBalanceOut])
 def list_fund_balances(
     symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
@@ -464,26 +485,8 @@ def list_fund_balances(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询资产负债表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。
-
-    排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
-    """
-    query = db.query(FundBalance)
-    # symbol 模糊匹配
-    if symbol:
-        query = query.filter(FundBalance.symbol.like(f"%{symbol}%"))
-    # rpt_type 精确匹配
-    if rpt_type is not None:
-        query = query.filter(FundBalance.rpt_type == rpt_type)
-    # 报告日期起始日过滤
-    if start_date:
-        query = query.filter(FundBalance.rpt_date >= start_date)
-    total = query.count()
-    items = (
-        query.order_by(FundBalance.rpt_date.desc(), FundBalance.pub_date.desc())
-        .offset(offset).limit(limit).all()
-    )
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    """查询资产负债表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    return _query_fund_reports(FundBalance, db, symbol, rpt_type, start_date, limit, offset)
 
 
 @router.post("/sync/fund-income")
@@ -504,26 +507,8 @@ def list_fund_incomes(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询利润表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。
-
-    排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
-    """
-    query = db.query(FundIncome)
-    # symbol 模糊匹配
-    if symbol:
-        query = query.filter(FundIncome.symbol.like(f"%{symbol}%"))
-    # rpt_type 精确匹配
-    if rpt_type is not None:
-        query = query.filter(FundIncome.rpt_type == rpt_type)
-    # 报告日期起始日过滤
-    if start_date:
-        query = query.filter(FundIncome.rpt_date >= start_date)
-    total = query.count()
-    items = (
-        query.order_by(FundIncome.rpt_date.desc(), FundIncome.pub_date.desc())
-        .offset(offset).limit(limit).all()
-    )
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    """查询利润表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    return _query_fund_reports(FundIncome, db, symbol, rpt_type, start_date, limit, offset)
 
 
 @router.post("/sync/fund-cashflow")
@@ -544,26 +529,8 @@ def list_fund_cashflows(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询现金流量表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。
-
-    排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
-    """
-    query = db.query(FundCashflow)
-    # symbol 模糊匹配
-    if symbol:
-        query = query.filter(FundCashflow.symbol.like(f"%{symbol}%"))
-    # rpt_type 精确匹配
-    if rpt_type is not None:
-        query = query.filter(FundCashflow.rpt_type == rpt_type)
-    # 报告日期起始日过滤
-    if start_date:
-        query = query.filter(FundCashflow.rpt_date >= start_date)
-    total = query.count()
-    items = (
-        query.order_by(FundCashflow.rpt_date.desc(), FundCashflow.pub_date.desc())
-        .offset(offset).limit(limit).all()
-    )
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    """查询现金流量表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    return _query_fund_reports(FundCashflow, db, symbol, rpt_type, start_date, limit, offset)
 
 
 @router.post("/sync/finance-deriv")
@@ -584,26 +551,8 @@ def list_finance_derivs(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询财务指标数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。
-
-    排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
-    """
-    query = db.query(FinanceDeriv)
-    # symbol 模糊匹配
-    if symbol:
-        query = query.filter(FinanceDeriv.symbol.like(f"%{symbol}%"))
-    # rpt_type 精确匹配
-    if rpt_type is not None:
-        query = query.filter(FinanceDeriv.rpt_type == rpt_type)
-    # 报告日期起始日过滤
-    if start_date:
-        query = query.filter(FinanceDeriv.rpt_date >= start_date)
-    total = query.count()
-    items = (
-        query.order_by(FinanceDeriv.rpt_date.desc(), FinanceDeriv.pub_date.desc())
-        .offset(offset).limit(limit).all()
-    )
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    """查询财务指标数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    return _query_fund_reports(FinanceDeriv, db, symbol, rpt_type, start_date, limit, offset)
 
 
 @router.post("/sync/daily-valuation")
