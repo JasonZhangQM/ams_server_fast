@@ -5,8 +5,8 @@
 """
 import calendar
 import re
-from datetime import date
-from decimal import Decimal
+from datetime import date, datetime, time as dtime
+from decimal import Decimal, InvalidOperation
 
 from gm.api import *  # noqa: F401,F403  保留原 gm SDK 通配导入（current 等）
 
@@ -106,20 +106,24 @@ def option_monitor_sync_orm(option_name: str, end_month: str):
     # 2. 调用 akshare 获取期权行情（函数内导入，避免模块加载时拉起 akshare 依赖）
     import akshare as ak
     if is_commodity_option:
-        # 商品期权：option_hist_shfe 需指定 trade_date，取今日或日历中 ≤ today 的最大交易日
-        today = date.today()
+        # 商品期权：option_hist_shfe 需指定 trade_date
+        # trade_date 取值规则：交易日且已收盘(>=15:00)用当日；否则取上一个交易日
+        now = datetime.now()
+        today = now.date()
+        is_closed = now.time() >= dtime(15, 0)  # 国内期货 15:00 收盘
         with SessionLocal() as session:
-            is_trade = session.query(TradeDate.trade_date).filter(
+            is_trade_day = session.query(TradeDate.trade_date).filter(
                 TradeDate.trade_date == today
-            ).first()
-            if is_trade:
+            ).first() is not None
+            if is_trade_day and is_closed:
                 trade_date = today
             else:
+                # 非交易日 或 交易日未收盘 → 取上一个交易日
                 last_trade = session.query(TradeDate.trade_date).filter(
-                    TradeDate.trade_date <= today
+                    TradeDate.trade_date < today
                 ).order_by(TradeDate.trade_date.desc()).first()
                 if last_trade is None:
-                    logger.info(f"TradeDate 日历无 {today} 及之前的交易日")
+                    logger.info(f"TradeDate 日历无 {today} 之前的交易日")
                     return 0
                 trade_date = last_trade[0]
         df = ak.option_hist_shfe(
@@ -175,7 +179,17 @@ def option_monitor_sync_orm(option_name: str, end_month: str):
                         symbol = raw_code
                         option_type = 'call' if cp_flag == 'C' else 'put'
                         price_strike = Decimal(strike_str)
-                        price = Decimal(str(row['收盘价']))
+                        # 收盘价可能为空字符串/None/'-'等无效值，跳过无价数据行
+                        close_raw = row['收盘价']
+                        if close_raw is None or str(close_raw).strip() in ('', '-', 'None', 'nan'):
+                            logger.warning(f"商品期权 {raw_code} 收盘价无效，跳过：{close_raw!r}")
+                            continue
+                        try:
+                            price = Decimal(str(close_raw))
+                        except InvalidOperation:
+                            # ConversionSyntax 是 InvalidOperation 子类，一并捕获
+                            logger.warning(f"商品期权 {raw_code} 收盘价无法解析，跳过：{close_raw!r}")
+                            continue
                         # 按合约自身的到期月计算 delisted_date（缓存避免重复查日历）
                         if code_month not in delisted_cache:
                             end_month_full = f"20{code_month}"  # 2609 -> 202609
