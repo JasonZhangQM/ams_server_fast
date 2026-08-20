@@ -35,8 +35,11 @@ def last_row_group_cash(df: pd.DataFrame, group_dict: dict, df_empty: pd.DataFra
 def cash_acc_daily_group_sql(account):
     _mdl = Bill
     _engine = settings.DB_ENGINE
+    # 出金记录 amount_act 为正数，累加前需取负（出金减少现金余额）
     sql = f'''
-        SELECT trade_time, amount_act FROM {_mdl.__table__.name}
+        SELECT trade_time,
+            CASE WHEN category1='出金' THEN -abs(amount_act) ELSE amount_act END AS amount_act
+        FROM {_mdl.__table__.name}
         WHERE account='{account}'
             AND category<>'-'
             AND (category1<>'转入' AND category1<>'转出')
