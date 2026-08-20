@@ -403,6 +403,96 @@ class DailyValuation(Base, BaseModel):
         return f"{self.symbol}-{self.trade_date}"
 
 
+class FinancePrime(Base, BaseModel):
+    """财务主要指标模型（对应表 bds_finance_prime）。
+
+    对应 gm 接口 stk_get_finance_prime，存储资产/负债/收入/利润/ROE/同比等
+    主要财务指标，按 symbol + rpt_date 联合唯一去重，复用 pub_date 保留策略。
+    """
+
+    __tablename__ = "bds_finance_prime"
+
+    # ---- 元数据字段 ----
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="股票代码")
+    pub_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="发布日期")
+    rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
+    rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
+    data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+
+    # ---- 资产/负债/收入/利润类绝对值字段 ----
+    ttl_ast: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="资产总计")
+    ttl_liab: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="负债合计")
+    ttl_inc_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业总收入")
+    inc_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业收入")
+    oper_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业利润")
+    ttl_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="利润总额")
+    ttl_eqy_pcom: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="归母股东权益合计")
+    net_prof_pcom: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="归母净利润")
+    net_prof_pcom_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="扣非归母净利润")
+    # ---- ROE 类比率字段 ----
+    roe: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="净资产收益率ROE(摊薄)")
+    roe_weight_avg: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="净资产收益率ROE(加权)")
+    roe_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="扣非净资产收益率ROE(摊薄)")
+    roe_weight_avg_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="扣非净资产收益率ROE(加权)")
+    # ---- 现金流/同比/其他 ----
+    net_cf_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="经营活动产生的现金流量净额")
+    inc_oper_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="营业收入同比增长率")
+    ttl_inc_oper_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="营业总收入同比增长率")
+    net_prof_pcom_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="归属母公司股东的净利润同比增长率")
+    net_asset: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="净资产")
+    net_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="净利润")
+    net_prof_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="扣非净利润")
+
+    # 联合唯一约束：按 symbol + rpt_date 去重
+    __table_args__ = (
+        UniqueConstraint("symbol", "rpt_date", name="uk_bds_finance_prime"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["symbol", "rpt_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.rpt_date}"
+
+
+class DailyMktvalue(Base, BaseModel):
+    """每日市值模型（对应表 bds_daily_mktvalue）。
+
+    对应 gm 接口 stk_get_daily_mktvalue，存储总市值/A股市值/B股市值/企业价值等
+    每日市值数据，按 symbol + trade_date 联合唯一去重，直接覆盖更新。
+    """
+
+    __tablename__ = "bds_daily_mktvalue"
+
+    # ---- 元数据字段（每日交易数据，无 rpt_type/data_type/pub_date） ----
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="股票代码")
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
+
+    # ---- 市值/价值类字段（单位：元） ----
+    tot_mv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="总市值")
+    tot_mv_csrc: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="总市值(证监会算法)")
+    a_mv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="A股市值")
+    a_mv_ex_ltd: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="A股市值(剔除限售股)")
+    b_mv: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="B股市值")
+    b_mv_ex_ltd: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="B股市值(剔除限售股)")
+    ev: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="企业价值")
+    ev_ex_curr: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="企业价值(剔除货币资金)")
+    equity_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="股权价值")
+    # ---- 比率类字段（单位：倍） ----
+    ev_ebitda: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="企业价值/EBITDA")
+
+    # 联合唯一约束：按 symbol + trade_date 去重（每日市值无修正概念）
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uk_bds_daily_mktvalue"),
+    )
+
+    # 供 upsert 使用的唯一键
+    unique_keys = ["symbol", "trade_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.trade_date}"
+
+
 class EconomicIndicator(Base, BaseModel):
     """宏观经济指标模型（对应表 bds_economic_indicator）。
 

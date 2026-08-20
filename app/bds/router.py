@@ -16,7 +16,9 @@ bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项�
 - GET  /bds/fund-incomes            利润表
 - GET  /bds/fund-cashflows         现金流量表
 - GET  /bds/finance-derivs          财务指标
+- GET  /bds/finance-primes          财务主要指标
 - GET  /bds/daily-valuations        估值指标
+- GET  /bds/daily-mktvalues         每日市值
 - GET  /bds/economic-indicators     经济指标（基础查询，可视化分析用 irs）
 - GET  /bds/economic-indicator-codes 经济指标代码下拉
 - GET  /bds/gold-reserves           黄金储备
@@ -37,9 +39,11 @@ from sqlalchemy import or_, text
 
 from server_fast.app.bds.models import (
     DailyIndicator, 
+    DailyMktvalue, 
     DailyValuation, 
     EconomicIndicator, 
     FinanceDeriv, 
+    FinancePrime, 
     FundBalance, 
     FundCashflow, 
     FundIncome, 
@@ -51,9 +55,11 @@ from server_fast.app.bds.models import (
 )
 from server_fast.app.bds.schemas import (
     DailyIndicatorOut,
+    DailyMktvalueOut,
     DailyValuationOut,
     EconomicIndicatorOut,
     FinanceDerivOut,
+    FinancePrimeOut,
     FundBalanceOut,
     FundCashflowOut,
     FundIncomeOut,
@@ -70,9 +76,11 @@ from server_fast.app.bds.services import (
     upsert_all_gold_reserves_sql,
     upsert_all_daily_indicators_sql,
     upsert_daily_valuation_sql,
+    upsert_daily_mktvalue_sql,
     upsert_economic_indicator_from_wscn_sql,
     upsert_economic_indicator_sql,
     upsert_finance_deriv_sql,
+    upsert_finance_prime_sql,
     upsert_fund_balance_sql,
     upsert_fund_cashflow_sql,
     upsert_fund_income_sql,
@@ -573,6 +581,28 @@ def list_finance_derivs(
     return _query_fund_reports(FinanceDeriv, db, symbol, rpt_type, start_date, limit, offset)
 
 
+@router.post("/sync/finance-prime")
+def sync_finance_prime(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
+    """同步财务主要指标数据，接收单个股票代码，获取并入库。"""
+    if not symbol:
+        return {"status": "error", "message": "symbol 不能为空"}
+    steps = upsert_finance_prime_sql([symbol])
+    return _build_sync_response(symbol, steps)
+
+
+@router.get("/finance-primes", response_model=PageResponse[FinancePrimeOut])
+def list_finance_primes(
+    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
+    rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
+    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    limit: int = Query(default=10, ge=1),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """查询财务主要指标数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    return _query_fund_reports(FinancePrime, db, symbol, rpt_type, start_date, limit, offset)
+
+
 @router.post("/sync/daily-valuation")
 def sync_daily_valuation(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
     """同步估值指标数据，接收单个股票代码，获取并入库。"""
@@ -604,6 +634,40 @@ def list_daily_valuations(
     total = query.count()
     items = (
         query.order_by(DailyValuation.trade_date.desc())
+        .offset(offset).limit(limit).all()
+    )
+    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+@router.post("/sync/daily-mktvalue")
+def sync_daily_mktvalue(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
+    """同步每日市值数据，接收单个股票代码，获取并入库。"""
+    if not symbol:
+        return {"status": "error", "message": "symbol 不能为空"}
+    steps = upsert_daily_mktvalue_sql([symbol])
+    return _build_sync_response(symbol, steps)
+
+
+@router.get("/daily-mktvalues", response_model=PageResponse[DailyMktvalueOut])
+def list_daily_mktvalues(
+    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
+    start_date: Optional[date] = Query(default=None, description="交易日期起始日"),
+    limit: int = Query(default=10, ge=1),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """查询每日市值数据，支持代码模糊匹配和交易日期范围筛选。
+
+    排序规则：trade_date 降序。
+    """
+    query = db.query(DailyMktvalue)
+    if symbol:
+        query = query.filter(DailyMktvalue.symbol.like(f"%{symbol}%"))
+    if start_date:
+        query = query.filter(DailyMktvalue.trade_date >= start_date)
+    total = query.count()
+    items = (
+        query.order_by(DailyMktvalue.trade_date.desc())
         .offset(offset).limit(limit).all()
     )
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}

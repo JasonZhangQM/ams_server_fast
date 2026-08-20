@@ -19,6 +19,7 @@ from server_fast.app.bds.services.market_data import (
     fetch_realtime_index_prices,
     upsert_index_history_sql,
     upsert_daily_valuation_sql,
+    upsert_daily_mktvalue_sql,
 )
 from server_fast.app.bds.services.index_constituent import (
     upsert_index_constituent_sql,
@@ -28,6 +29,7 @@ from server_fast.app.bds.services.fund_data import (
     upsert_fund_cashflow_sql,
     upsert_fund_income_sql,
     upsert_finance_deriv_sql,
+    upsert_finance_prime_sql,
 )
 from server_fast.app.bds.services.macro_data import (
     upsert_all_economic_indicators_sql,
@@ -48,6 +50,7 @@ __all__ = [
     'fetch_realtime_index_prices',
     'upsert_index_history_sql',
     'upsert_daily_valuation_sql',
+    'upsert_daily_mktvalue_sql',
     # 指数成分
     'upsert_index_constituent_sql',
     # 财务数据
@@ -55,6 +58,7 @@ __all__ = [
     'upsert_fund_cashflow_sql',
     'upsert_fund_income_sql',
     'upsert_finance_deriv_sql',
+    'upsert_finance_prime_sql',
     # 宏观数据
     'upsert_all_economic_indicators_sql',
     'upsert_economic_indicator_from_wscn_sql',
