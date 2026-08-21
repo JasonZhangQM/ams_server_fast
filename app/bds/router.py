@@ -16,7 +16,6 @@ bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项�
 - GET  /bds/fund-incomes            利润表
 - GET  /bds/fund-cashflows         现金流量表
 - GET  /bds/finance-derivs          财务指标
-- GET  /bds/finance-primes          财务主要指标
 - GET  /bds/daily-valuations        估值指标
 - GET  /bds/daily-mktvalues         每日市值
 - GET  /bds/economic-indicators     经济指标（基础查询，可视化分析用 irs）
@@ -42,9 +41,8 @@ from server_fast.app.bds.models import (
     DailyMktvalue, 
     DailyValuation, 
     EconomicIndicator, 
-    FinanceDeriv, 
-    FinancePrime, 
-    FundBalance, 
+    FinanceDeriv,
+    FundBalance,
     FundCashflow, 
     FundIncome, 
     GoldReserve, 
@@ -59,7 +57,6 @@ from server_fast.app.bds.schemas import (
     DailyValuationOut,
     EconomicIndicatorOut,
     FinanceDerivOut,
-    FinancePrimeOut,
     FundBalanceOut,
     FundCashflowOut,
     FundIncomeOut,
@@ -80,7 +77,6 @@ from server_fast.app.bds.services import (
     upsert_economic_indicator_from_wscn_sql,
     upsert_economic_indicator_sql,
     upsert_finance_deriv_sql,
-    upsert_finance_prime_sql,
     upsert_fund_balance_sql,
     upsert_fund_cashflow_sql,
     upsert_fund_income_sql,
@@ -579,28 +575,6 @@ def list_finance_derivs(
 ):
     """查询财务指标数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
     return _query_fund_reports(FinanceDeriv, db, symbol, rpt_type, start_date, limit, offset)
-
-
-@router.post("/sync/finance-prime")
-def sync_finance_prime(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
-    """同步财务主要指标数据，接收单个股票代码，获取并入库。"""
-    if not symbol:
-        return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_finance_prime_sql([symbol])
-    return _build_sync_response(symbol, steps)
-
-
-@router.get("/finance-primes", response_model=PageResponse[FinancePrimeOut])
-def list_finance_primes(
-    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
-    rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
-    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
-    limit: int = Query(default=10, ge=1),
-    offset: int = Query(default=0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """查询财务主要指标数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
-    return _query_fund_reports(FinancePrime, db, symbol, rpt_type, start_date, limit, offset)
 
 
 @router.post("/sync/daily-valuation")

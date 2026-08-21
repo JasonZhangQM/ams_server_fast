@@ -298,48 +298,6 @@ class DailyValuationOut(BaseModel):
     update_time: datetime = Field(description="更新时间")
 
 
-class FinancePrimeOut(BaseModel):
-    """财务主要指标响应 Schema（对应 bds.FinancePrime 模型）。
-
-    每个字段的 description 与 ORM 模型的 comment 保持一致，
-    以便 OpenAPI 文档与前端表头统一。
-    """
-
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int = Field(description="主键")
-    symbol: str = Field(description="股票代码")
-    pub_date: Optional[date] = Field(default=None, description="发布日期")
-    rpt_date: Optional[date] = Field(default=None, description="报告日期")
-    rpt_type: Optional[int] = Field(default=None, description="报表类型")
-    data_type: Optional[int] = Field(default=None, description="数据类型")
-    # ---- 资产/负债/收入/利润类绝对值字段 ----
-    ttl_ast: Optional[Decimal] = Field(default=None, description="资产总计")
-    ttl_liab: Optional[Decimal] = Field(default=None, description="负债合计")
-    ttl_inc_oper: Optional[Decimal] = Field(default=None, description="营业总收入")
-    inc_oper: Optional[Decimal] = Field(default=None, description="营业收入")
-    oper_prof: Optional[Decimal] = Field(default=None, description="营业利润")
-    ttl_prof: Optional[Decimal] = Field(default=None, description="利润总额")
-    ttl_eqy_pcom: Optional[Decimal] = Field(default=None, description="归母股东权益合计")
-    net_prof_pcom: Optional[Decimal] = Field(default=None, description="归母净利润")
-    net_prof_pcom_cut: Optional[Decimal] = Field(default=None, description="扣非归母净利润")
-    # ---- ROE 类比率字段 ----
-    roe: Optional[Decimal] = Field(default=None, description="净资产收益率ROE(摊薄)")
-    roe_weight_avg: Optional[Decimal] = Field(default=None, description="净资产收益率ROE(加权)")
-    roe_cut: Optional[Decimal] = Field(default=None, description="扣非净资产收益率ROE(摊薄)")
-    roe_weight_avg_cut: Optional[Decimal] = Field(default=None, description="扣非净资产收益率ROE(加权)")
-    # ---- 现金流/同比/其他 ----
-    net_cf_oper: Optional[Decimal] = Field(default=None, description="经营活动产生的现金流量净额")
-    inc_oper_yoy: Optional[Decimal] = Field(default=None, description="营业收入同比增长率")
-    ttl_inc_oper_yoy: Optional[Decimal] = Field(default=None, description="营业总收入同比增长率")
-    net_prof_pcom_yoy: Optional[Decimal] = Field(default=None, description="归属母公司股东的净利润同比增长率")
-    net_asset: Optional[Decimal] = Field(default=None, description="净资产")
-    net_prof: Optional[Decimal] = Field(default=None, description="净利润")
-    net_prof_cut: Optional[Decimal] = Field(default=None, description="扣非净利润")
-    create_time: datetime = Field(description="创建时间")
-    update_time: datetime = Field(description="更新时间")
-
-
 class DailyMktvalueOut(BaseModel):
     """每日市值响应 Schema（对应 bds.DailyMktvalue 模型）。
 

@@ -29,7 +29,6 @@ from server_fast.app.bds.services.fund_data import (
     upsert_fund_cashflow_sql,
     upsert_fund_income_sql,
     upsert_finance_deriv_sql,
-    upsert_finance_prime_sql,
 )
 from server_fast.app.bds.services.macro_data import (
     upsert_all_economic_indicators_sql,
@@ -58,7 +57,6 @@ __all__ = [
     'upsert_fund_cashflow_sql',
     'upsert_fund_income_sql',
     'upsert_finance_deriv_sql',
-    'upsert_finance_prime_sql',
     # 宏观数据
     'upsert_all_economic_indicators_sql',
     'upsert_economic_indicator_from_wscn_sql',
