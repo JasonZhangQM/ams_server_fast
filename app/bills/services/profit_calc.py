@@ -20,7 +20,7 @@ pd.set_option('future.no_silent_downcasting', True)
 
 
 ## 收益试算
-# 买入开多
+# 买入开多:股票、期货
 def util_buy_open_long(org: dict, dfd: dict) -> dict:
     org['p_long'] += abs(dfd['vol'])  # 多头持仓
     org['cost_t_long'] += abs(dfd['amount_act'])  # 多头总成本
@@ -29,7 +29,7 @@ def util_buy_open_long(org: dict, dfd: dict) -> dict:
     org['pl_short'] = 0
     return org
 
-# 卖出开空
+# 卖出开空:期货
 def util_sell_open_short(org: dict, dfd: dict) -> dict:
     org['p_short'] += abs(dfd['vol'])  # 空头持仓
     org['cost_t_short'] += abs(dfd['amount_act'])  # 多头总成本
@@ -38,7 +38,7 @@ def util_sell_open_short(org: dict, dfd: dict) -> dict:
     org['pl_short'] = 0
     return org
 
-# 卖出平多
+# 卖出平多:股票、期货
 def util_sell_close_long(org: dict, dfd: dict) -> dict:
     org['p_long'] = round(org['p_long'] - abs(dfd['vol']), 0)  # 调整持仓
     if org['p_long'] > 0:  # 有持仓，当次收益为发生额减去单位成本与交易量折算的当成交易成本
@@ -51,7 +51,7 @@ def util_sell_close_long(org: dict, dfd: dict) -> dict:
     org['pl_short'] = 0
     return org
 
-# 买入平空
+# 买入平空:期货
 def util_buy_close_short(org: dict, dfd: dict) -> dict:
     org['p_short'] = round(org['p_short'] - abs(dfd['vol']), 0)  # 调整持仓
     if org['p_short'] > 0:  # 有持仓，当次收益为发生额减去单位成本与交易量折算的当成交易成本

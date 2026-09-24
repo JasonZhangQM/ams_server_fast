@@ -4,5 +4,6 @@
 conda run -n fast311 uvicorn server_fast.main:app --host 0.0.0.0 --port 8008
 
 $env:PYTHONUNBUFFERED=1; uvicorn server_fast.main:app --reload --log-level debug --host 0.0.0.0 --port 8008
+$env:PYTHONUNBUFFERED=1; uvicorn main:app --reload --log-level debug --host 0.0.0.0 --port 8008
 
 ```
