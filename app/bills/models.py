@@ -366,6 +366,11 @@ class ProfitYear(Base, BaseModel):
     pl_all: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="总平仓盈亏")
     # 累计盈亏：该年度及之前所有年份 pl_all 的累计求和
     pl_cumulative: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="累计盈亏")
+    # 资产与收益率（Modified Dietz：年初资产 + 出入金现金流时间加权）
+    asset_begin: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), comment="年初资产")
+    asset_end: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), comment="年末资产")
+    asset_avg: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), comment="日均资产")
+    return_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), comment="收益率")
 
     def __str__(self) -> str:
         return f'年度收益-{self.year}'
