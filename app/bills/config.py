@@ -12,8 +12,8 @@ class Config:
     def __init__(self):
         pass
 
-    FOLDER_BILLS = Path(r'C:\quant_man\账单')
-    FOLDER_QH = Path(r'C:\quant_man\账单\期货结单')
+    FOLDER_BILLS = Path(r'C:\quant_man\statement')
+    FOLDER_QH = Path(r'C:\quant_man\statement\期货结单')
 
     ACCOUNT_INFO = {  # 账户信息
         'B01': {'acc_owner': '张三爸爸', 'acc_type': '股票账户', 'acc_inst': '东方财富'},
