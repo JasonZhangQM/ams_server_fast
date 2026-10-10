@@ -114,7 +114,8 @@ def list_groups(
     value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录。
     """
     # 过滤掉 cash 类别
-    query = db.query(Group).filter(Group.category != "cash")
+    # query = db.query(Group).filter(Group.category != "cash")
+    query = db.query(Group)
     query = _filter_query(
         query,
         [
@@ -128,7 +129,8 @@ def list_groups(
         query = query.filter(Group.value_total != 0)
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
-    items = query.offset(offset).limit(limit).all()
+    # 按账户、代码升序排列
+    items = query.order_by(Group.account.asc(), Group.symbol.asc()).offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
