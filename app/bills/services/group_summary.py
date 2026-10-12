@@ -134,9 +134,9 @@ def upsert_group_acc_sql():
     # 获取Group数据，按account汇总
     df_g = get_group_sql_df()  # 获取数据
     df_acc = df_g.groupby('account').sum(numeric_only=True)
-    df_acc['status'] = (  # 验证
+    df_acc['status'] = (  # 验证（融资借入亦为资金来源，需计入 diff_br）
         df_acc['cost_total'] - df_acc['pl_all'] -
-        df_acc['diff_dw'] - df_acc['diff_dwt']
+        df_acc['diff_dw'] - df_acc['diff_dwt'] - df_acc['diff_br']
     ).round(0)
     # 提出现金、理财与市值合并(区分现金、理财和证券市值)
     df_cash_acc = df_g[df_g['category'] == 'cash']
