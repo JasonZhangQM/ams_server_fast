@@ -91,7 +91,7 @@ def upsert_gold_reserve_sql(country_code):
 
     增量策略：
     - 查询 DB 最大 rpt_date，加 1 天得到下月首日，取 YYYY-MM 作为 startPeriod
-    - 无数据时从 2010-01 起
+    - 无数据时从 EARLIEST_START_DATE 的年月部分（1901-01）起
     - 终点为当前月
 
     返回值：插入/更新条数（int），异常返回 -1。
@@ -119,7 +119,8 @@ def upsert_gold_reserve_sql(country_code):
         if max_date is not None:
             start_period = (max_date + timedelta(days=1)).strftime("%Y-%m")
         else:
-            start_period = "2010-01"
+            # IMF SDMX 的 startPeriod 为 YYYY-MM，故取统一起点的年月部分
+            start_period = dbsCfg.EARLIEST_START_DATE[:7]
 
         end_period = date.today().strftime("%Y-%m")
 

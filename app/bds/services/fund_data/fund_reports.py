@@ -20,6 +20,7 @@ from gm.api import (
 
 from server_fast.common.utils import call_with_timeout
 from server_fast.common.db import SessionLocal
+from server_fast.app.bds.config import Config as dbsCfg
 from server_fast.app.bds.models import (
     FundBalance,
     FundIncome,
@@ -104,7 +105,8 @@ def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name):
 
     增量更新策略：
     - 数据库已有该 symbol 数据：从最新 rpt_date + 1 天开始获取
-    - 数据库无该 symbol 数据：从 2010-01-01 全量获取
+    - 数据库无该 symbol 数据：从 EARLIEST_START_DATE（1901-01-01）全量获取，
+      gm 会自动截断到该股最早报告期（含上市前披露的财务）
 
     去重规则（按 symbol + rpt_date）：
     - 已有记录且新数据 pub_date >= 已有 pub_date：更新所有字段
@@ -135,7 +137,7 @@ def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name):
             if max_rpt_date is not None:
                 start_date = (max_rpt_date + timedelta(days=1)).strftime("%Y-%m-%d")
             else:
-                start_date = "2010-01-01"
+                start_date = dbsCfg.EARLIEST_START_DATE
             df = _fetch_fund_batched(symbol, start_date, end_date, api_func, fields_str)
             if df is None or df.empty:
                 logger.info(f"->{symbol} 无需导入")

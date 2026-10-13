@@ -37,7 +37,7 @@ def _fetch_economic_indicator_from_fred(indicator_code, meta):
     units = meta.get('fred_units', 'lin')
     frequency = meta['frequency']
 
-    # 增量起点：日度取最近 365 天，月度/季度取 DB 最大日期+1 或 2010-01-01
+    # 增量起点：日度取最近 365 天，月度/季度取 DB 最大日期+1 或统一起点
     if frequency == 'daily':
         observation_start = (date.today() - timedelta(days=365)).strftime("%Y-%m-%d")
     else:
@@ -50,7 +50,7 @@ def _fetch_economic_indicator_from_fred(indicator_code, meta):
         if max_date is not None:
             observation_start = (max_date + timedelta(days=1)).strftime("%Y-%m-%d")
         else:
-            observation_start = "2010-01-01"
+            observation_start = dbsCfg.EARLIEST_START_DATE
 
     # 调用 FRED API（fetch_json_with_timeout 自带超时保护）
     api_key = settings.FRED_API_KEY
@@ -161,7 +161,7 @@ def upsert_economic_indicator_sql(indicator_code):
     2. akshare（fallback）：fred_series_id 缺失时回退到 akshare 三种列模式（A/B/C）
 
     增量策略：
-    - 月度/季度指标：查询 DB 最大 report_date，仅导入新增行；无数据从 2010-01-01 全量
+    - 月度/季度指标：查询 DB 最大 report_date，仅导入新增行；无数据从 EARLIEST_START_DATE 全量
     - 日度指标（YIELD_*）：获取最近 365 天数据
 
     返回值：插入/更新条数（int），异常返回 -1。
@@ -219,7 +219,7 @@ def upsert_economic_indicator_sql(indicator_code):
 
         # 增量过滤
         # 日度指标（frequency=daily）：仅保留最近 365 天
-        # 月度/季度指标：查询 DB 最大 report_date，仅导入新增；无数据从 2010-01-01 全量
+        # 月度/季度指标：查询 DB 最大 report_date，仅导入新增；无数据从 EARLIEST_START_DATE 全量
         if meta['frequency'] == 'daily':
             cutoff = date.today() - timedelta(days=365)
             df = df[df['report_date'] >= cutoff]
@@ -309,7 +309,8 @@ def upsert_economic_indicator_from_wscn_sql():
     - 接口不支持服务端过滤（country/wscn_ticker 参数均被忽略），需客户端过滤
 
     增量策略：以 pub_date 为基准，按指标独立计算已发布记录的 max(pub_date)+1 天为起点
-    （无数据从 2015-01-01），全局起点取各指标起点最小值，按自然月分批调用 API，
+    （无数据从 2015-01-01，该源起点独立于 EARLIEST_START_DATE，原因见下方代码注释），
+    全局起点取各指标起点最小值，按自然月分批调用 API，
     今日为终点。客户端按指标级 pub_date 过滤，避免已入库指标重复 upsert。
     未发布记录（value 为空）不参与 max 计算，确保下次拉取时能覆盖为已发布数据。
 
@@ -341,7 +342,10 @@ def upsert_economic_indicator_from_wscn_sql():
         # 每个指标的 max(pub_date) 字典
         code_to_max_pub: dict = {code: max_pub for code, max_pub in rows_db if max_pub is not None}
 
-        # 各指标起点 = max(pub_date)+1 或 2015-01-01，全局起点取最小值
+        # 各指标起点 = max(pub_date)+1 或 2015-01-01，全局起点取最小值。
+        # 此处刻意不引用 EARLIEST_START_DATE：① wscn 日历数据本身最早约 2014-10
+        # （实测 2000-01 区间返回 0 条），往前取无增量；② 该接口用 time.mktime
+        # 转时间戳，Windows 下 1970 年前日期会抛 OverflowError，改用会直接导致同步失败。
         code_starts: dict = {}
         for code in mapped_codes:
             max_pub = code_to_max_pub.get(code)

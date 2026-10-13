@@ -8,7 +8,7 @@
 - 数据源仅 FRED API `/series/observations`，无 akshare/wscn 回退
 - 仅保留 FRED observation 中的 date/value 两个字段（realtime_start/realtime_end 已废弃）
 - 不计算 value_prev、不设 value_expected/pub_date 为 null（这些 wscn 专用字段新表不含）
-- 增量策略：DB 有数据时从 max(report_date)+1 起拉，无数据从 2010-01-01 起拉
+- 增量策略：DB 有数据时从 max(report_date)+1 起拉，无数据从 EARLIEST_START_DATE 起拉
 """
 import logging
 
@@ -36,14 +36,15 @@ def _fetch_daily_from_fred(indicator_code, meta):
 
     增量策略：
     - DB 有数据时从 max(report_date)+1 起拉
-    - 无数据时从 2010-01-01 起拉
+    - 无数据时从 EARLIEST_START_DATE（1901-01-01）起拉，FRED 会截断到序列自身起点
+      （如 DGS10 实际从 1962-01-02 起）
 
     :return: DataFrame，列包含 report_date/value
     """
     series_id = meta['fred_series_id']
     units = meta.get('fred_units', 'lin')
 
-    # 增量起点：DB 已有数据则从 max(report_date)+1 起拉，否则从 2010-01-01 起拉
+    # 增量起点：DB 已有数据则从 max(report_date)+1 起拉，否则从统一起点起拉
     with SessionLocal() as db:
         max_date = (
             db.query(func.max(DailyIndicator.report_date))
@@ -53,7 +54,7 @@ def _fetch_daily_from_fred(indicator_code, meta):
     if max_date is not None:
         observation_start = (max_date + timedelta(days=1)).strftime("%Y-%m-%d")
     else:
-        observation_start = "2010-01-01"
+        observation_start = dbsCfg.EARLIEST_START_DATE
 
     # 调用 FRED API（fetch_json_with_timeout 自带超时保护与重试）
     api_key = settings.FRED_API_KEY

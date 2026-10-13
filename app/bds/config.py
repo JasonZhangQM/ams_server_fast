@@ -6,7 +6,17 @@ class Config:
     def __init__(self):
         pass
 
-    FOLDER_SYMBOL = Path('C:\BaiduSyncdisk\账单\代码信息')
+    # 数据首次同步的统一起点（仅对"人为截断"类表生效）。
+    # 1901-01-01 为名义下限，各数据源会自动截断到自身最早：
+    #   gm   -> 个股/指数首日（含上市前披露的财务）
+    #   FRED -> 序列起始（如 DGS10 从 1962-01-02）
+    #   IMF  -> 数据集起始
+    # 注意：仅首次同步（库中无该标的/序列数据）时生效；已有数据的标的走 MAX+1 增量，
+    #      不会因改此值而回补历史，需另行删除旧行重跑。
+    # 调整起点只改这一处。例外：wscn 日历源起点仍为 2015-01-01（见 economic_indicator.py）
+    EARLIEST_START_DATE = "1901-01-01"
+
+    FOLDER_SYMBOL = Path('C:\quant_man\statement\代码信息')
 
     MAP_MARKET_CODE = { #代码市场映射
         '6':'SHSE',

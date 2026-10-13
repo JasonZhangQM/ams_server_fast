@@ -16,6 +16,7 @@ from gm.api import stk_get_daily_valuation
 from server_fast.config import settings
 from server_fast.common.utils import call_with_timeout, upsert_df_to_db
 from server_fast.common.db import SessionLocal
+from server_fast.app.bds.config import Config as dbsCfg
 from server_fast.app.bds.models import DailyValuation
 # 复用 fund_data 的标量清洗工具，避免重复实现
 from server_fast.app.bds.services.fund_data.fund_reports import _clean_scalar, _to_date
@@ -66,7 +67,8 @@ def upsert_daily_valuation_sql(symbols):
 
     增量更新策略（基于 trade_date，非 rpt_date）：
     - 数据库已有该 symbol 数据：从最新 trade_date + 1 天开始获取
-    - 数据库无该 symbol 数据：从 2010-01-01 全量获取
+    - 数据库无该 symbol 数据：从 EARLIEST_START_DATE（1901-01-01）全量获取，
+      gm 会自动截断到该股首个交易日
 
     去重规则（按 symbol + trade_date 直接覆盖）：
     - 每日估值无修正概念，无需 pub_date 最新保留逻辑
@@ -89,11 +91,11 @@ def upsert_daily_valuation_sql(symbols):
                     .filter(_mdl.symbol == symbol)
                     .scalar()
                 )
-            # 增量起点：有数据则从最新 trade_date + 1 天，否则从 2010-01-01 全量获取
+            # 增量起点：有数据则从最新 trade_date + 1 天，否则从统一起点全量获取
             if max_trade_date is not None:
                 start_date = (max_trade_date + timedelta(days=1)).strftime("%Y-%m-%d")
             else:
-                start_date = "2010-01-01"
+                start_date = dbsCfg.EARLIEST_START_DATE
             # 调用 gm 接口获取估值指标（分批获取，带超时保护）
             df = _fetch_daily_valuation_batched(symbol, start_date, end_date)
             if df is None or df.empty:
