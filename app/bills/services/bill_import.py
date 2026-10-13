@@ -113,6 +113,11 @@ def handle_df_fields(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df['category'] == '融资融券', 'symbol'] = 'RZRQ'
     df.loc[df['category'] == '收益费用', 'symbol'] = 'SYFY'
     df.loc[df['category'] == '出入金', 'symbol'] = 'CRJ'
+    # 账户级流水（出入金/融资融券/收益费用）无成交价/成交量，填充 0 避免 NOT NULL 约束报错
+    _no_price_cats = {'出入金', '融资融券', '收益费用'}
+    _mask = df['category'].isin(_no_price_cats)
+    df.loc[_mask, 'price'] = df.loc[_mask, 'price'].fillna(0)
+    df.loc[_mask, 'vol'] = df.loc[_mask, 'vol'].fillna(0)
     return df
 
 # 定义函数：从第一个数字开始截取后面内容，判断是否包含 P / C

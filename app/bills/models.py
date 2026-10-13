@@ -143,7 +143,12 @@ class Profit(Base, BaseModel):
 
     # OneToOne 关联 Bill：外键列 bill_id + unique 体现一对一
     # 外键列类型须与被引用的 bills_bill.id（BigInteger）一致，否则 MySQL 建表报 errno 3780
-    bill_id: Mapped[int] = mapped_column(BigInteger, ForeignKey('bills_bill.id'), unique=True, comment="关联账单")
+    bill_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey('bills_bill.id', ondelete='CASCADE'),
+        unique=True,
+        comment="关联账单",
+    )
     # ORM 关联对象（可选，便于联表查询）
     bill: Mapped["Bill"] = relationship("Bill")
 
