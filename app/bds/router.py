@@ -25,6 +25,7 @@ bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项�
 - GET  /bds/daily-indicators        美债收益率指标
 - GET  /bds/daily-indicator-codes   美债收益率代码下拉
 - POST /bds/sync/{target}           数据同步（按 target 触发对应 service）
+- POST /bds/sync/mark-synced        标记标的当日已完成批量同步（写 bds_symbol_info.sync_at）
 """
 from datetime import date, timedelta
 from typing import List, Optional
@@ -109,11 +110,14 @@ def _run_sync(task_name: str, func) -> dict:
 def _build_sync_response(symbol: str, steps: dict) -> dict:
     """根据 steps 中 symbol 对应的保存条数构建同步响应。
 
+    - -2：跳过（库内报告期已是最新报告期，未调 gm）
     - -1：同步失败（gm 终端未启动或接口异常）
     - 0：无数据可导入
     - >0：成功导入 count 条
     """
     count = steps.get(symbol, 0)
+    if count == -2:
+        return {"status": "no_data", "message": f"已是最新报告期，无需导入：{symbol}"}
     if count == -1:
         return {"status": "error", "message": f"同步失败：{symbol}，请检查 gm 终端是否启动"}
     if count == 0:
@@ -145,6 +149,9 @@ def list_symbol_infos(
     symbol: Optional[str] = Query(None, description="代码模糊匹配（search_fields）"),
     industry: Optional[str] = Query(None, description="行业精确匹配（list_filter）"),
     keyword: Optional[str] = Query(None, description="代码或名称任一模糊匹配（OR，用于远程搜索）"),
+    exclude_synced_today: bool = Query(
+        False, description="为 True 时排除 sync_at 等于当日（服务器本地日）的标的，用于批量同步断点续跑"
+    ),
     limit: int = Query(86, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -156,6 +163,7 @@ def list_symbol_infos(
     - list_filter(industry)      → == 精确匹配
     - list_per_page 默认 86
     - keyword → symbol/name 任一包含即命中（OR），用于前端远程搜索场景
+    - exclude_synced_today → 剔除当日已批量同步完成的标的（sync_at 为空或不为当日者保留）
     """
     query = db.query(SymbolInfo)
     if symbol:
@@ -169,6 +177,11 @@ def list_symbol_infos(
                 SymbolInfo.symbol.contains(keyword),
                 SymbolInfo.name.contains(keyword),
             )
+        )
+    if exclude_synced_today:
+        # 只保留「从未标记」或「标记日期早于今日」的标的
+        query = query.filter(
+            or_(SymbolInfo.sync_at.is_(None), SymbolInfo.sync_at != date.today())
         )
     total = query.count()  # 应用所有过滤条件后的总记录数
     items = query.offset(offset).limit(limit).all()
@@ -213,6 +226,44 @@ def sync_trade_date():
 def sync_symbol_info():
     """同步证券信息（触发 upsert_symbol_info_excel_sql）。"""
     return _run_sync("symbol-info", upsert_symbol_info_excel_sql)
+
+
+@router.post("/sync/mark-synced")
+def mark_synced(
+    symbol: str = Query(..., description="股票代码，精确匹配单个标的"),
+    db: Session = Depends(get_db),
+):
+    """标记某标的「当日已完成批量同步」：写 bds_symbol_info.sync_at = 服务器本地当日。
+
+    由批量同步 notebook 在该 symbol 的全部目标表都返回 success / no_data 之后调用。
+    幂等：重复调用只把 sync_at 刷新为当日，不回写其他字段。
+
+    ⚠️ 本端点只写 sync_at 一个字段，与 upsert_symbol_info_excel_sql 的
+    ON DUPLICATE KEY UPDATE 子句不重叠，故两者互不覆盖。
+
+    返回值说明：
+    - status: ok / error
+    - symbol: 标的代码
+    - sync_at: 写入的日期（YYYY-MM-DD）
+    - updated: 受影响行数（0 表示库中无该 symbol）
+    """
+    if not symbol:
+        return {"status": "error", "message": "symbol 不能为空", "updated": 0}
+    today = date.today()
+    updated = (
+        db.query(SymbolInfo)
+        .filter(SymbolInfo.symbol == symbol)
+        .update({"sync_at": today}, synchronize_session=False)
+    )
+    db.commit()
+    if updated == 0:
+        return {"status": "error", "message": f"未找到标的：{symbol}", "updated": 0}
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "sync_at": today.strftime("%Y-%m-%d"),
+        "updated": updated,
+    }
 
 
 @router.post("/sync/index-history")
@@ -469,11 +520,18 @@ def list_index_cum_returns(
 
 
 @router.post("/sync/fund-balance")
-def sync_fund_balance(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
-    """同步资产负债表数据，接收单个股票代码，获取并入库。"""
+def sync_fund_balance(
+    symbol: str = Query(..., description="股票代码，精确匹配单个标的"),
+    force: bool = Query(False, description="True=跳过「已是最新报告期」判断，强制按增量同步"),
+):
+    """同步资产负债表数据，接收单个股票代码，获取并入库。
+
+    默认先比对库内该标的 MAX(rpt_date) 与 bds_symbol_info.latest_rpt_date，
+    已追平则判定数据已最新，不调 gm 直接返回 no_data；force=True 可绕过该判断。
+    """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_fund_balance_sql([symbol])
+    steps = upsert_fund_balance_sql([symbol], force=force)
     return _build_sync_response(symbol, steps)
 
 
@@ -512,11 +570,18 @@ def list_fund_balances(
 
 
 @router.post("/sync/fund-income")
-def sync_fund_income(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
-    """同步利润表数据，接收单个股票代码，获取并入库。"""
+def sync_fund_income(
+    symbol: str = Query(..., description="股票代码，精确匹配单个标的"),
+    force: bool = Query(False, description="True=跳过「已是最新报告期」判断，强制按增量同步"),
+):
+    """同步利润表数据，接收单个股票代码，获取并入库。
+
+    默认先比对库内该标的 MAX(rpt_date) 与 bds_symbol_info.latest_rpt_date，
+    已追平则判定数据已最新，不调 gm 直接返回 no_data；force=True 可绕过该判断。
+    """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_fund_income_sql([symbol])
+    steps = upsert_fund_income_sql([symbol], force=force)
     return _build_sync_response(symbol, steps)
 
 
@@ -534,11 +599,18 @@ def list_fund_incomes(
 
 
 @router.post("/sync/fund-cashflow")
-def sync_fund_cashflow(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
-    """同步现金流量表数据，接收单个股票代码，获取并入库。"""
+def sync_fund_cashflow(
+    symbol: str = Query(..., description="股票代码，精确匹配单个标的"),
+    force: bool = Query(False, description="True=跳过「已是最新报告期」判断，强制按增量同步"),
+):
+    """同步现金流量表数据，接收单个股票代码，获取并入库。
+
+    默认先比对库内该标的 MAX(rpt_date) 与 bds_symbol_info.latest_rpt_date，
+    已追平则判定数据已最新，不调 gm 直接返回 no_data；force=True 可绕过该判断。
+    """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_fund_cashflow_sql([symbol])
+    steps = upsert_fund_cashflow_sql([symbol], force=force)
     return _build_sync_response(symbol, steps)
 
 
@@ -556,11 +628,18 @@ def list_fund_cashflows(
 
 
 @router.post("/sync/finance-deriv")
-def sync_finance_deriv(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
-    """同步财务指标数据，接收单个股票代码，获取并入库。"""
+def sync_finance_deriv(
+    symbol: str = Query(..., description="股票代码，精确匹配单个标的"),
+    force: bool = Query(False, description="True=跳过「已是最新报告期」判断，强制按增量同步"),
+):
+    """同步财务指标数据，接收单个股票代码，获取并入库。
+
+    默认先比对库内该标的 MAX(rpt_date) 与 bds_symbol_info.latest_rpt_date，
+    已追平则判定数据已最新，不调 gm 直接返回 no_data；force=True 可绕过该判断。
+    """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_finance_deriv_sql([symbol])
+    steps = upsert_finance_deriv_sql([symbol], force=force)
     return _build_sync_response(symbol, steps)
 
 

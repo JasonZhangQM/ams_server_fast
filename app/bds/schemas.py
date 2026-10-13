@@ -46,6 +46,8 @@ class SymbolInfoOut(BaseModel):
     yoy_np: Optional[Decimal] = None  # 净利润(%)
     gpm: Optional[Decimal] = None  # 毛利率(%)
     dar: Optional[Decimal] = None  # 负债率(%)
+    latest_rpt_date: Optional[date] = None  # 最新报告期(含快报)
+    sync_at: Optional[date] = None  # 同步日期：批量同步完成当日写今日，重跑据此过滤
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间
 

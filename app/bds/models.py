@@ -40,6 +40,23 @@ class SymbolInfo(Base, BaseModel):
     gpm: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="毛利率(%)")
     dar: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="负债率(%)")
 
+    # ---- 报告期 ----
+    # 来源：东财 Excel 列「最新报告期(含快报)」，为该标的最新财报所属报告期。
+    # 注意与财务四表（bds_fund_*）的 rpt_date 区分：那里是每行自身的报告期，这里是快照值。
+    latest_rpt_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="报告期：最新报告期(含快报)"
+    )
+
+    # ---- 批量同步标记 ----
+    # 注意：本列不由『东财 Excel 全量 upsert』维护（Excel 无此列），
+    # 仅由 POST /bds/sync/mark-synced 写入。upsert_df_to_db 的
+    # ON DUPLICATE KEY UPDATE 子句只含 df 中出现的列，故同步证券信息不会清空本列。
+    # ⚠️ 若日后把 upsert_symbol_info_excel_sql 改成「先 DELETE 再 INSERT」，
+    #    或给 upsert_df_to_db 显式传入全部列，本列会被清空。
+    sync_at: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="同步日期：批量同步完成当日写今日，重跑据此过滤"
+    )
+
     # ---- 附加类属性：被 BaseModel 的 map_fields() 等方法使用 ----
     # 字段匹配外部表头：{db_field: [别名...]}
     cols_map_fields = {
@@ -59,13 +76,14 @@ class SymbolInfo(Base, BaseModel):
         "yoy_np": ["归属净利润同比%"],
         "gpm": ["销售毛利率%"],
         "dar": ["资产负债比率%"],
+        "latest_rpt_date": ["最新报告期(含快报)"],
     }
     # 唯一键字段列表
     unique_keys = ["symbol"]
     # 需要 '—' 替换的字段列表
     fields_replace = [
         "online_date", "price", "rate", "pe_lyr", "pe_ttm", "pb", "dy_ttm",
-        "roe", "yoy_in", "yoy_np", "gpm", "dar",
+        "roe", "yoy_in", "yoy_np", "gpm", "dar", "latest_rpt_date",
     ]
 
     # 表级参数：命名索引（与 unique=True 互不冲突）

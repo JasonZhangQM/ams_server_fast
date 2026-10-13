@@ -2,9 +2,11 @@
 """财务数据同步：三大财报（资产负债表/利润表/现金流量表）+ 财务指标。
 
 共用 _upsert_fund_sql 通用 upsert 框架：
+- 报告期预判：库内 MAX(rpt_date) 已追平/超过 bds_symbol_info.latest_rpt_date 时
+  直接跳过，不调 gm（财报按季更新，避免每天重复调接口）
 - gm API fields ≤20 限制通过 _fetch_fund_batched 分批获取 + 元数据列 merge 合并
 - pub_date 保留策略：新数据 pub_date < 已有 pub_date 时跳过
-- 单 symbol 失败不中断，返回 steps 字典记录 -1/0/>0 三态
+- 单 symbol 失败不中断，返回 steps 字典记录 -2/-1/0/>0 四态
 """
 import logging
 from datetime import date, datetime, timedelta
@@ -26,6 +28,7 @@ from server_fast.app.bds.models import (
     FundIncome,
     FundCashflow,
     FinanceDeriv,
+    SymbolInfo,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -100,10 +103,18 @@ def _fetch_fund_batched(symbol, start_date, end_date, api_func, fields_str):
     return result
 
 
-def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name):
+def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name, force=False):
     """通用财报数据 upsert 入库（三大报表 + 财务指标共用）。
 
-    增量更新策略：
+    报告期预判（force=False 时生效）：
+    - 取库内该 symbol 的 MAX(rpt_date)，与 bds_symbol_info.latest_rpt_date
+      （东财「最新报告期(含快报)」快照）比对
+    - MAX(rpt_date) >= latest_rpt_date ⇒ 该表已是最新报告期，直接跳过，不调 gm
+    - 任一方为 NULL（无历史数据 / 快照缺值）⇒ 无法判定，按原增量逻辑请求
+    - force=True ⇒ 绕过该判断，强制按增量执行（用于财报更正回补、快报转正式、
+      以及怀疑漏数时强刷）
+
+    增量更新策略（未跳过时）：
     - 数据库已有该 symbol 数据：从最新 rpt_date + 1 天开始获取
     - 数据库无该 symbol 数据：从 EARLIEST_START_DATE（1901-01-01）全量获取，
       gm 会自动截断到该股最早报告期（含上市前披露的财务）
@@ -113,13 +124,14 @@ def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name):
     - 已有记录但新数据 pub_date < 已有 pub_date：跳过该行
     - 无已有记录：插入新记录
 
-    单个 symbol 失败不中断后续步骤，返回 steps 字典记录每个 symbol 的保存条数。
+    单个 symbol 失败不中断后续步骤，返回 steps 字典记录每个 symbol 的结果。
 
     :param model: ORM 模型类（FundBalance/FundIncome/FundCashflow/FinanceDeriv）
     :param fields_str: 字段名逗号分隔字符串
     :param api_func: gm API 函数
     :param log_name: 日志中的表名（如"资产负债表"）
-    :return: steps 字典 {symbol: 保存条数或 -1}
+    :param force: True 时跳过「已是最新报告期」判断
+    :return: steps 字典 {symbol: 保存条数 / -1 失败 / -2 跳过（已是最新报告期）}
     """
     _mdl = model
     _field_list = fields_str.split(",")
@@ -134,6 +146,20 @@ def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name):
                     .filter(_mdl.symbol == symbol)
                     .scalar()
                 )
+                # 报告期快照（东财 Excel 列「最新报告期(含快报)」），判断是否值得调 gm
+                latest_rpt_date = (
+                    db.query(SymbolInfo.latest_rpt_date)
+                    .filter(SymbolInfo.symbol == symbol)
+                    .scalar()
+                )
+            # 库内报告期已追平/超过最新报告期 → 该表数据已是最新，跳过 gm 请求
+            if (not force and max_rpt_date is not None and latest_rpt_date is not None
+                    and max_rpt_date >= latest_rpt_date):
+                logger.info(
+                    f"->{symbol} 已是最新报告期 {latest_rpt_date}（库内 {max_rpt_date}），跳过"
+                )
+                steps[symbol] = -2
+                continue
             if max_rpt_date is not None:
                 start_date = (max_rpt_date + timedelta(days=1)).strftime("%Y-%m-%d")
             else:
@@ -185,33 +211,33 @@ def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name):
     return steps
 
 
-def upsert_fund_balance_sql(symbols):
+def upsert_fund_balance_sql(symbols, force=False):
     """资产负债表数据获取并导入。"""
     return _upsert_fund_sql(
         symbols, model=FundBalance, fields_str=FUND_BALANCE_FIELDS,
-        api_func=stk_get_fundamentals_balance, log_name="资产负债表",
+        api_func=stk_get_fundamentals_balance, log_name="资产负债表", force=force,
     )
 
 
-def upsert_fund_income_sql(symbols):
+def upsert_fund_income_sql(symbols, force=False):
     """利润表数据获取并导入。"""
     return _upsert_fund_sql(
         symbols, model=FundIncome, fields_str=FUND_INCOME_FIELDS,
-        api_func=stk_get_fundamentals_income, log_name="利润表",
+        api_func=stk_get_fundamentals_income, log_name="利润表", force=force,
     )
 
 
-def upsert_fund_cashflow_sql(symbols):
+def upsert_fund_cashflow_sql(symbols, force=False):
     """现金流量表数据获取并导入。"""
     return _upsert_fund_sql(
         symbols, model=FundCashflow, fields_str=FUND_CASHFLOW_FIELDS,
-        api_func=stk_get_fundamentals_cashflow, log_name="现金流量表",
+        api_func=stk_get_fundamentals_cashflow, log_name="现金流量表", force=force,
     )
 
 
-def upsert_finance_deriv_sql(symbols):
+def upsert_finance_deriv_sql(symbols, force=False):
     """财务指标数据获取并导入。"""
     return _upsert_fund_sql(
         symbols, model=FinanceDeriv, fields_str=FINANCE_DERIV_FIELDS,
-        api_func=stk_get_finance_deriv, log_name="财务指标",
+        api_func=stk_get_finance_deriv, log_name="财务指标", force=force,
     )
