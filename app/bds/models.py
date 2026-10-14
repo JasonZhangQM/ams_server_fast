@@ -86,10 +86,8 @@ class SymbolInfo(Base, BaseModel):
         "roe", "yoy_in", "yoy_np", "gpm", "dar", "latest_rpt_date",
     ]
 
-    # 表级参数：命名索引（与 unique=True 互不冲突）
-    __table_args__ = (
-        Index("k_bds_symbol_info_symbol", "symbol"),
-    )
+    # symbol 已有 unique=True（隐式唯一索引），无需额外单列索引
+    __table_args__ = ()
 
     def __str__(self) -> str:
         """模型实例字符串表示，便于调试与日志输出。"""
@@ -123,10 +121,10 @@ class IndexHistory(Base, BaseModel):
     volume: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="成交量")
     position: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="持仓量")
 
-    # 联合唯一约束 + 索引
+    # 联合唯一约束 + 单列索引
+    # symbol 是 uk(symbol, trade_date) 的最左前缀，单独 k_symbol 冗余已移除
     __table_args__ = (
         UniqueConstraint("symbol", "trade_date", name="uk_bds_index_history_symbol_date"),
-        Index("k_bds_index_history_symbol", "symbol"),
     )
 
     # BaseModel 工具方法所需元数据
@@ -157,9 +155,10 @@ class IndexConstituent(Base, BaseModel):
     weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True, comment="权重")
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
 
+    # 联合唯一约束 + trade_date 单列索引
+    # index_code 是 uk(index_code, symbol, trade_date) 的最左前缀，单独 k_index_code 冗余已移除
     __table_args__ = (
         UniqueConstraint("index_code", "symbol", "trade_date", name="uk_bds_index_constituent"),
-        Index("k_bds_index_constituent_index_code", "index_code"),
         Index("k_bds_index_constituent_trade_date", "trade_date"),
     )
 

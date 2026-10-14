@@ -146,7 +146,7 @@ def list_trade_dates(
 
 @router.get("/symbol-infos", response_model=PageResponse[SymbolInfoOut])
 def list_symbol_infos(
-    symbol: Optional[str] = Query(None, description="代码模糊匹配（search_fields）"),
+    symbol: Optional[str] = Query(None, description="代码精确匹配（对应 UK 最左前缀）"),
     industry: Optional[str] = Query(None, description="行业精确匹配（list_filter）"),
     keyword: Optional[str] = Query(None, description="代码或名称任一模糊匹配（OR，用于远程搜索）"),
     exclude_synced_today: bool = Query(
@@ -159,15 +159,14 @@ def list_symbol_infos(
     """查询证券基本信息，支持可选过滤。
 
     过滤规则：
-    - search_fields(symbol)      → contains 模糊匹配
-    - list_filter(industry)      → == 精确匹配
-    - list_per_page 默认 86
-    - keyword → symbol/name 任一包含即命中（OR），用于前端远程搜索场景
+    - symbol          → == 精确匹配（对应 UK 最左前缀）
+    - industry        → == 精确匹配
+    - keyword         → symbol/name 任一包含即命中（OR，远程搜索保留模糊）
     - exclude_synced_today → 剔除当日已批量同步完成的标的（sync_at 为空或不为当日者保留）
     """
     query = db.query(SymbolInfo)
     if symbol:
-        query = query.filter(SymbolInfo.symbol.contains(symbol))
+        query = query.filter(SymbolInfo.symbol == symbol)
     if industry:
         query = query.filter(SymbolInfo.industry == industry)
     if keyword:
@@ -338,13 +337,13 @@ def list_index_codes():
 @router.get("/index-constituents", response_model=PageResponse[IndexConstituentOut])
 def list_index_constituents(
     index_code: Optional[str] = Query(default=None, description="指数代码精确匹配"),
-    symbol: Optional[str] = Query(default=None, description="成分股代码模糊匹配"),
+    symbol: Optional[str] = Query(default=None, description="成分股代码精确匹配"),
     trade_date: Optional[date] = Query(default=None, description="交易日期 YYYY-MM-DD"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询指数成分股，支持指数代码精确匹配、成分股代码模糊匹配和具体交易日期筛选。
+    """查询指数成分股，支持指数代码精确匹配、成分股代码精确匹配和具体交易日期筛选。
 
     响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
     """
@@ -352,9 +351,9 @@ def list_index_constituents(
     # index_code 精确匹配
     if index_code:
         query = query.filter(IndexConstituent.index_code == index_code)
-    # symbol 模糊匹配
+    # symbol 精确匹配
     if symbol:
-        query = query.filter(IndexConstituent.symbol.contains(symbol))
+        query = query.filter(IndexConstituent.symbol == symbol)
     # 具体交易日期精确匹配
     if trade_date:
         query = query.filter(IndexConstituent.trade_date == trade_date)
@@ -538,12 +537,12 @@ def sync_fund_balance(
 def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit, offset):
     """通用财务报表查询（FundBalance/FundIncome/FundCashflow/FinanceDeriv 共用）。
 
-    过滤规则：symbol 模糊匹配、rpt_type 精确匹配、rpt_date 起始日。
+    过滤规则：symbol 精确匹配、rpt_type 精确匹配、rpt_date 起始日。
     排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
     """
     query = db.query(model)
     if symbol:
-        query = query.filter(model.symbol.like(f"%{symbol}%"))
+        query = query.filter(model.symbol == symbol)
     if rpt_type is not None:
         query = query.filter(model.rpt_type == rpt_type)
     if start_date:
@@ -558,14 +557,14 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
 
 @router.get("/fund-balances", response_model=PageResponse[FundBalanceOut])
 def list_fund_balances(
-    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
+    symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询资产负债表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    """查询资产负债表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
     return _query_fund_reports(FundBalance, db, symbol, rpt_type, start_date, limit, offset)
 
 
@@ -587,14 +586,14 @@ def sync_fund_income(
 
 @router.get("/fund-incomes", response_model=PageResponse[FundIncomeOut])
 def list_fund_incomes(
-    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
+    symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询利润表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    """查询利润表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
     return _query_fund_reports(FundIncome, db, symbol, rpt_type, start_date, limit, offset)
 
 
@@ -616,14 +615,14 @@ def sync_fund_cashflow(
 
 @router.get("/fund-cashflows", response_model=PageResponse[FundCashflowOut])
 def list_fund_cashflows(
-    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
+    symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询现金流量表数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    """查询现金流量表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
     return _query_fund_reports(FundCashflow, db, symbol, rpt_type, start_date, limit, offset)
 
 
@@ -645,14 +644,14 @@ def sync_finance_deriv(
 
 @router.get("/finance-derivs", response_model=PageResponse[FinanceDerivOut])
 def list_finance_derivs(
-    symbol: Optional[str] = Query(default=None, description="股票代码模糊匹配"),
+    symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询财务指标数据，支持代码模糊匹配、报表类型和报告日期起始日筛选。"""
+    """查询财务指标数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
     return _query_fund_reports(FinanceDeriv, db, symbol, rpt_type, start_date, limit, offset)
 
 
