@@ -2,7 +2,7 @@
 """bds 应用路由。
 
 bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项。
-可视化分析查询（如 /economic-indicators/latest）已迁移至 irs 模块。
+可视化分析查询已迁移至 irs 模块。
 
 提供查询路由与同步路由：
 - GET  /bds/trade-dates             查询交易日历
@@ -73,13 +73,11 @@ from server_fast.app.bds.schemas import (
 from server_fast.app.bds.services import (
     fetch_realtime_index_prices,
     insert_trade_date_em_sql,
-    upsert_all_economic_indicators_sql,
     upsert_all_gold_reserves_sql,
     upsert_all_daily_indicators_sql,
     upsert_daily_valuation_sql,
     upsert_daily_mktvalue_sql,
     upsert_economic_indicator_from_wscn_sql,
-    upsert_economic_indicator_sql,
     upsert_finance_deriv_sql,
     upsert_fund_balance_sql,
     upsert_fund_cashflow_sql,
@@ -812,49 +810,6 @@ def list_economic_indicator_codes():
         for code, info in Config.ECONOMIC_INDICATORS.items()
     ]
     return indicators
-
-
-@router.post("/sync/economic-indicator")
-def sync_economic_indicator(indicator_code: str = Query(..., description="指标代码，精确匹配单个指标")):
-    """同步单个经济指标数据。
-
-    返回值说明：
-    - status: success/no_data/error
-    - message: 同步结果描述信息
-    - indicator_code: 指标代码
-    - count: 插入/更新条数（-1 表示失败）
-    """
-    if not indicator_code:
-        return {"status": "error", "message": "indicator_code 不能为空",
-                "indicator_code": indicator_code, "count": -1}
-    count = upsert_economic_indicator_sql(indicator_code)
-    if count == -1:
-        return {"status": "error", "message": f"同步失败：{indicator_code}",
-                "indicator_code": indicator_code, "count": -1}
-    if count == 0:
-        return {"status": "no_data", "message": f"无数据可导入：{indicator_code}",
-                "indicator_code": indicator_code, "count": 0}
-    return {"status": "success", "message": f"同步完成：{indicator_code}，更新 {count} 条",
-            "indicator_code": indicator_code, "count": count}
-
-
-@router.post("/sync/economic-indicators-all")
-def sync_economic_indicators_all():
-    """同步全部经济指标数据。
-
-    遍历 Config.ECONOMIC_INDICATORS 中所有指标代码，逐个调用同步函数。
-    单指标失败不中断，返回 results 包含每个指标的结果。
-
-    返回值说明：
-    - status: success
-    - message: 同步结果描述信息
-    - results: {indicator_code: count, ...} 各指标同步条数字典
-    """
-    try:
-        results = upsert_all_economic_indicators_sql()
-        return {"status": "success", "message": "经济指标全量同步完成", "results": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/sync/economic-indicator-wscn")

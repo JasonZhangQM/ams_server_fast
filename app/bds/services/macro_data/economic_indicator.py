@@ -358,7 +358,7 @@ def upsert_economic_indicator_from_wscn_sql():
             return 0
 
         logger.info(f"->wscn 增量范围：{start_date} ~ {end_date}")
-        logger.info(f"->wscn 各指标起点：{code_starts}")
+        # logger.info(f"->wscn 各指标起点：{code_starts}")
 
         # 2. 按自然月分批拉取（API 最大跨度 31 天，自然月 28-31 天均安全）
         all_items: list = []
