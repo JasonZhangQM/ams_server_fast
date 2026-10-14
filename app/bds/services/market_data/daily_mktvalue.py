@@ -92,6 +92,11 @@ def upsert_daily_mktvalue_sql(symbols):
             # 增量起点：有数据则从最新 trade_date + 1 天，否则从统一起点全量获取
             if max_trade_date is not None:
                 start_date = (max_trade_date + timedelta(days=1)).strftime("%Y-%m-%d")
+                # 边界保护：若 DB 已追平今日，start_date > end_date 会触发 gm "开始时间晚于结束时间"错误
+                if start_date > end_date:
+                    logger.info(f"->{symbol} 已是最新（{max_trade_date}），跳过")
+                    steps[symbol] = 0
+                    continue
             else:
                 start_date = dbsCfg.EARLIEST_START_DATE
             # 调用 gm 接口获取市值指标（分批获取，带超时保护）

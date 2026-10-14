@@ -62,12 +62,17 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
                 print(f'[{i}/{total}] 收到停止信号，中止后续任务')
                 break
 
-            pause = random.uniform(SLEEP_MIN, SLEEP_MAX)
-            if fail_streak >= FAIL_STREAK_LIMIT:
-                pause += FAIL_STREAK_SLEEP
-                print(f'  连续失败 {fail_streak} 次，额外停顿 {FAIL_STREAK_SLEEP:.0f}s')
-                fail_streak = 0
-            time.sleep(pause)
+            # 按状态分档限速：no_data 是后端预判跳过（纯 DB 查询，未调外部 API），
+            # 无需 1~3s 限速，仅短暂让出 CPU 即可；success / error 保留完整限速。
+            if res['status'] == 'no_data':
+                time.sleep(0.1)
+            else:
+                pause = random.uniform(SLEEP_MIN, SLEEP_MAX)
+                if fail_streak >= FAIL_STREAK_LIMIT:
+                    pause += FAIL_STREAK_SLEEP
+                    print(f'  连续失败 {fail_streak} 次，额外停顿 {FAIL_STREAK_SLEEP:.0f}s')
+                    fail_streak = 0
+                time.sleep(pause)
 
             if i % 10 == 0 or i == total:
                 elapsed = time.time() - t0
