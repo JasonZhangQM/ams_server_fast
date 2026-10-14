@@ -104,6 +104,24 @@ _stop_events: dict[int, threading.Event] = {}
 router = APIRouter(prefix="/bds", tags=["bds"])
 
 
+def _cleanup_zombies(db: Session, minutes: int = 5) -> int:
+    """清理僵尸任务（running 状态超过指定分钟数未更新）。返回清理数量。"""
+    from datetime import datetime, timedelta
+    cutoff = datetime.now() - timedelta(minutes=minutes)
+    zombies = db.query(BdsSyncTask).filter(
+        BdsSyncTask.status == "running",
+        BdsSyncTask.update_time < cutoff,
+    ).all()
+    for z in zombies:
+        z.status = "failed"
+        z.errors = (z.errors or []) + [{"symbol": "", "table": "", "message": f"僵尸任务（running 超 {minutes} 分钟未更新，后端重启残留）"}]
+        z.end_time = z.update_time
+        print(f'[batch-sync] 清理僵尸 #{z.id} (update_time={z.update_time})')
+    if zombies:
+        db.commit()
+    return len(zombies)
+
+
 def _run_sync(task_name: str, func) -> dict:
     """统一的同步任务执行器：调用 service 函数并捕获异常。
 
@@ -1150,20 +1168,8 @@ def run_batch_sync(req: BatchSyncRequest):
     """
     db = next(get_db())  # 获取请求 session（用于查 + 建 task，线程内另起 session）
     try:
-        # 清理僵尸任务（running 状态超过 2 小时 = 后端崩溃残留，自动置为 failed）
-        from datetime import datetime, timedelta
-        cutoff = datetime.now() - timedelta(hours=2)
-        zombies = db.query(BdsSyncTask).filter(
-            BdsSyncTask.status == "running",
-            BdsSyncTask.update_time < cutoff,
-        ).all()
-        for z in zombies:
-            z.status = "failed"
-            z.errors = (z.errors or []) + [{"symbol": "", "table": "", "message": "后端崩溃残留（僵尸任务）"}]
-            z.end_time = z.update_time
-            print(f'[batch-sync] 自动清理僵尸任务 #{z.id}')
-        if zombies:
-            db.commit()
+        # 清理僵尸任务（running 超 5 分钟未更新 = 后端崩溃残留）
+        _cleanup_zombies(db, minutes=5)
 
         running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
         if running:
@@ -1223,14 +1229,16 @@ def run_batch_sync(req: BatchSyncRequest):
 
 @router.get("/sync-tasks", response_model=List[BdsSyncTaskOut])
 def list_sync_tasks(limit: int = Query(10, ge=1, le=100), db: Session = Depends(get_db)):
-    """查询批量同步任务列表，按创建时间倒序（最新在前）。"""
+    """查询批量同步任务列表。顺带清理僵尸任务（running 超 5 分钟未更新）。"""
+    _cleanup_zombies(db, minutes=5)
     items = db.query(BdsSyncTask).order_by(BdsSyncTask.create_time.desc()).limit(limit).all()
     return items
 
 
 @router.get("/sync-tasks/latest", response_model=BdsSyncTaskOut)
 def get_latest_sync_task(db: Session = Depends(get_db)):
-    """查询最新一条批量同步任务（供前端轮询进度）。"""
+    """查询最新一条批量同步任务（供前端轮询进度）。顺带清理僵尸任务。"""
+    _cleanup_zombies(db, minutes=5)
     task = db.query(BdsSyncTask).order_by(BdsSyncTask.create_time.desc()).first()
     if not task:
         raise HTTPException(status_code=404, detail="暂无同步任务记录")
@@ -1239,7 +1247,8 @@ def get_latest_sync_task(db: Session = Depends(get_db)):
 
 @router.get("/sync-tasks/{task_id}", response_model=BdsSyncTaskOut)
 def get_sync_task(task_id: int, db: Session = Depends(get_db)):
-    """查询单条批量同步任务详情（含 progress / errors）。"""
+    """查询单条批量同步任务详情（含 progress / errors）。顺带清理僵尸任务。"""
+    _cleanup_zombies(db, minutes=5)
     task = db.query(BdsSyncTask).get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail=f"任务 #{task_id} 不存在")
