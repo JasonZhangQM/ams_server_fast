@@ -27,7 +27,7 @@ bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项�
 - POST /bds/sync/{target}           数据同步（按 target 触发对应 service）
 - POST /bds/sync/mark-synced        标记标的当日已完成批量同步（写 bds_symbol_info.sync_at）
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import List, Optional
 
 import numpy as np
@@ -1211,7 +1211,7 @@ def get_sync_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/stop/batch-sync")
-def stop_batch_sync(task_id: int = Query(..., description="要停止的任务 ID")):
+def stop_batch_sync(task_id: int = Query(..., description="要停止的任务 ID"), db: Session = Depends(get_db)):
     """停止正在运行的批量同步任务。
 
     原理：对该任务对应的 threading.Event.set()。后台线程每次 sync_one 返回后检查，
@@ -1221,10 +1221,24 @@ def stop_batch_sync(task_id: int = Query(..., description="要停止的任务 ID
     - pending（还没开始跑）：Event.set() 后线程进入 run_tasks 会立即停止，状态=stopped
     - running（正在跑）：等当前 symbol×table 的 sync_one 返回后停止
     - done/failed/stopped：返回 400，任务已结束，无需停止
+    - 僵尸任务（后端重启残留）：Event 不存在但 DB 里 status=running → 直接置为 stopped
     """
     ev = _stop_events.get(task_id)
     if ev is None:
-        raise HTTPException(status_code=404, detail=f"任务 #{task_id} 不在运行中或不存在")
+        # Event 不存在：查 DB 判断是"任务不存在"还是"后端重启残留的僵尸任务"
+        task = db.query(BdsSyncTask).get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"任务 #{task_id} 不存在")
+        if task.status in ("done", "failed", "stopped"):
+            return {"status": "already_done",
+                    "message": f"任务 #{task_id} 已结束（{task.status}），无需停止"}
+        # 僵尸任务：DB 里还是 running/pending，但内存 Event 已丢失（后端重启残留）
+        # 无法真的停止了，直接标记为 stopped 让前端不再显示运行中
+        task.status = "stopped"
+        task.end_time = task.end_time or datetime.now()
+        db.commit()
+        print(f'[batch-sync] 僵尸任务 #{task_id}：Event 已丢失，直接置为 stopped')
+        return {"status": "stopped", "message": f"任务 #{task_id} 是后端重启残留的僵尸任务，已标记为已停止"}
 
     if ev.is_set():
         return {"status": "already_stopped", "message": f"任务 #{task_id} 已发出停止信号"}
