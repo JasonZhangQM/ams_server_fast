@@ -399,3 +399,42 @@ class DailyIndicatorOut(BaseModel):
     frequency: Optional[str] = Field(default=None, description="频率")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
+
+
+class BatchSyncRequest(BaseModel):
+    """批量同步任务请求体（POST /bds/run/batch-sync）。"""
+
+    scope: str = Field(description="同步范围: all/index/industry/explicit")
+    index_code: Optional[str] = Field(default=None, description="scope=index 时填指数代码，如 SHSE.000300")
+    industry: Optional[str] = Field(default=None, description="scope=industry 时填行业名，如 银行")
+    symbols: Optional[list[str]] = Field(default=None, description="scope=explicit 时填手写清单")
+    tables: Optional[list[str]] = Field(default=None, description="要同步的表列表，默认 6 张全跑")
+    mark_synced: bool = Field(default=True, description="全部成功后是否写 sync_at 标记")
+    exclude_synced_today: bool = Field(default=False, description="是否跳过当日已同步标的")
+    max_symbols: int = Field(default=0, ge=0, description="最多处理几只 symbol: 0=不限")
+
+
+class BdsSyncTaskOut(BaseModel):
+    """批量同步任务响应 Schema（对应 bds.BdsSyncTask 模型）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    scope: str = Field(description="同步范围")
+    scope_params: Optional[dict] = Field(default=None, description="范围参数")
+    tables: list = Field(description="要同步的表列表")
+    mark_synced: int = Field(description="是否写 sync_at: 1=是 0=否")
+    exclude_synced_today: int = Field(description="是否跳过当日已同步: 1=是 0=否")
+    max_symbols: int = Field(description="最多处理几只 symbol: 0=不限")
+    status: str = Field(description="状态: pending/running/done/failed")
+    total_count: int = Field(description="任务总数")
+    done_count: int = Field(description="已完成数")
+    success_count: int = Field(description="success 数")
+    no_data_count: int = Field(description="no_data 数")
+    error_count: int = Field(description="error 数")
+    progress: Decimal = Field(description="进度% (0-100)")
+    errors: Optional[list] = Field(default=None, description="失败明细")
+    start_time: Optional[datetime] = Field(default=None, description="实际开始时间")
+    end_time: Optional[datetime] = Field(default=None, description="实际结束时间")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")

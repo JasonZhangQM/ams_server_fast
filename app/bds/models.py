@@ -5,11 +5,11 @@
 BaseModel mixin 提供 id/create_time/update_time 通用字段及
 to_dtype/map_fields/db_fields/to_dict 方法。
 """
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Date, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Date, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
@@ -574,3 +574,39 @@ class DailyIndicator(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"{self.indicator_code}-{self.report_date}"
+
+
+class BdsSyncTask(Base, BaseModel):
+    """批量同步任务（对应表 bds_sync_task）。
+
+    后端后台线程启动，进度与结果实时写 DB，前端轮询 /sync-tasks 端点查看。
+    """
+
+    __tablename__ = "bds_sync_task"
+
+    # ---- 任务参数 ----
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit")
+    scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols}")
+    tables: Mapped[list] = mapped_column(JSON, nullable=False, comment="要同步的表列表")
+    mark_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", comment="全部成功后是否写 sync_at: 1=是 0=否")
+    exclude_synced_today: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="是否跳过当日已同步标的: 1=是 0=否")
+    max_symbols: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="最多处理几只 symbol: 0=不限")
+
+    # ---- 任务状态 ----
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending", comment="状态: pending/running/done/failed")
+    total_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="任务总数 (symbol × table)")
+    done_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="已完成数")
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="success 数")
+    no_data_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="no_data 数")
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="error 数")
+    progress: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, server_default="0", comment="进度% (0-100)")
+    errors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="失败明细: [{symbol, table, message}]")
+
+    # ---- 时间戳 ----
+    start_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, comment="实际开始时间")
+    end_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, comment="实际结束时间")
+
+    unique_keys = []
+
+    def __str__(self) -> str:
+        return f"task-{self.id}({self.scope})"

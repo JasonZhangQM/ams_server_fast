@@ -13,19 +13,14 @@ from .config import SLEEP_MIN, SLEEP_MAX, FAIL_STREAK_LIMIT, FAIL_STREAK_SLEEP
 from .sync import sync_one, mark_synced
 
 
-def run_tasks(tasks, mark_synced_when_done=True):
+def run_tasks(tasks, mark_synced_when_done=True, on_progress=None):
     '''执行 (symbol, table) 任务列表，返回结果记录列表。
 
-    按 symbol 分组推进：某个 symbol 的全部表都返回 success / no_data 时，
-    调 /bds/sync/mark-synced 把 bds_symbol_info.sync_at 写为当日，
-    下次运行即可用 EXCLUDE_SYNCED_TODAY=True 直接跳过。
-
-    不做批次断点记录：中断后直接重跑整批即可，同步接口按增量起点
-    MAX(date)+1 推进，已同步的表返回 no_data，幂等安全。
+    on_progress: 可选回调，签名 fn(symbol, table, status, done_count, total_count)
+                 每条任务完成后调用，供后端后台线程实时更新 DB 进度。
     '''
     results = []
     total = len(tasks)
-    print(f'任务总数 {total}')
     if total == 0:
         print('无任务。')
         return results
@@ -46,6 +41,14 @@ def run_tasks(tasks, mark_synced_when_done=True):
             res = sync_one(sym, table)
             results.append({'symbol': sym, 'table': table, **res})
             sym_statuses.append(res['status'])
+
+            # 实时进度回调（供后端后台线程写 DB）
+            if on_progress is not None:
+                try:
+                    on_progress(sym, table, res['status'], i, total)
+                except Exception as exc:
+                    # 回调异常不影响主流程（DB 挂了也要继续同步）
+                    print(f'  [警告] on_progress 回调异常: {exc}')
 
             if res['status'] in ('success', 'no_data'):
                 fail_streak = 0

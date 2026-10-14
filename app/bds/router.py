@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_, text
 
 from server_fast.app.bds.models import (
+    BdsSyncTask,
     DailyIndicator, 
     DailyMktvalue, 
     DailyValuation, 
@@ -53,6 +54,8 @@ from server_fast.app.bds.models import (
     TradeDate,
 )
 from server_fast.app.bds.schemas import (
+    BdsSyncTaskOut,
+    BatchSyncRequest,
     DailyIndicatorOut,
     DailyMktvalueOut,
     DailyValuationOut,
@@ -88,8 +91,12 @@ from server_fast.app.bds.services import (
     upsert_daily_indicator_sql,
 )
 from server_fast.app.bds.config import Config
-from server_fast.common.db import get_db
+from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
+
+# 批量同步后台线程需要的依赖
+import threading
+from server_fast.sync_runner import TABLES, resolve_symbols, run_tasks
 
 router = APIRouter(prefix="/bds", tags=["bds"])
 
@@ -1036,3 +1043,187 @@ def sync_daily_indicators_all():
         return {"status": "success", "message": "美债收益率指标全量同步完成", "steps": steps}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# 批量同步：后台线程异步执行，进度实时写 bds_sync_task 表
+# ============================================================================
+
+def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
+    """后台线程：执行批量同步并实时写进度到 DB。
+
+    与 HTTP 调用完全隔离：本线程内部创建独立 SessionLocal，
+    不复用请求的 db 依赖。异常时将 task 状态置为 failed 并记录错误。
+    """
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).get(task_id)
+    tables = req.tables or TABLES
+    errors = []
+
+    try:
+        # 1. 解析 symbol 列表
+        syms = resolve_symbols(
+            req.scope,
+            explicit=req.symbols,
+            industry=req.industry,
+            index_code=req.index_code,
+            max_symbols=req.max_symbols,
+            exclude_synced_today=req.exclude_synced_today,
+        )
+
+        tasks = [(s, t) for s in syms for t in tables]
+        total_count = len(tasks)
+        print(f'[batch-sync #{task_id}] 任务总数 {total_count} (symbols={len(syms)}, tables={len(tables)})')
+
+        # 2. 更新 task 状态为 running
+        task.status = "running"
+        task.total_count = total_count
+        task.start_time = date.today()  # DB 列是 DateTime，但这里只需要日期精度
+        db.commit()
+
+        # 3. 定义进度回调
+        def on_progress(symbol, table, status, done_count, total):
+            # 每次回调都开独立 session，避免长事务
+            s = SessionLocal()
+            try:
+                t = s.query(BdsSyncTask).get(task_id)
+                t.done_count = done_count
+                if status == "success":
+                    t.success_count += 1
+                elif status == "no_data":
+                    t.no_data_count += 1
+                else:
+                    t.error_count += 1
+                    t.errors = (t.errors or []) + [{"symbol": symbol, "table": table, "message": ""}]
+                t.progress = round(done_count / total * 100, 2) if total else 100
+                s.commit()
+            finally:
+                s.close()
+
+        # 4. 执行同步（复用 sync_runner，限速 + 重试 + 连续失败退避 + 当日标记 全在 run_tasks 内）
+        results = run_tasks(tasks, mark_synced_when_done=req.mark_synced, on_progress=on_progress)
+
+        # 5. 收集失败明细
+        for r in results:
+            if r["status"] == "error":
+                errors.append({"symbol": r["symbol"], "table": r["table"], "message": r.get("message", "")})
+
+        # 6. 结束
+        task.status = "done"
+        task.errors = errors
+        task.end_time = date.today()
+        db.commit()
+        print(f'[batch-sync #{task_id}] 完成：success={task.success_count}, no_data={task.no_data_count}, error={task.error_count}')
+
+    except Exception as e:
+        # 兜底：线程异常也要把 task 状态置为 failed
+        errors.append({"symbol": "", "table": "", "message": f"线程异常: {type(e).__name__}: {e}"})
+        task.status = "failed"
+        task.errors = errors
+        task.end_time = date.today()
+        db.commit()
+        print(f'[batch-sync #{task_id}] 失败: {e}')
+    finally:
+        db.close()
+
+
+@router.post("/run/batch-sync", response_model=BdsSyncTaskOut)
+def run_batch_sync(req: BatchSyncRequest):
+    """启动批量同步任务（后台线程异步执行）。
+
+    启动前检查是否已有 status='running' 的任务：有则返回 409，防止重复启动。
+    立即返回 task 对象（status=pending），前端可轮询 GET /sync-tasks/{id} 查看进度。
+    """
+    db = next(get_db())  # 获取请求 session（用于查 + 建 task，线程内另起 session）
+    try:
+        # 清理僵尸任务（running 状态超过 2 小时 = 后端崩溃残留，自动置为 failed）
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(hours=2)
+        zombies = db.query(BdsSyncTask).filter(
+            BdsSyncTask.status == "running",
+            BdsSyncTask.update_time < cutoff,
+        ).all()
+        for z in zombies:
+            z.status = "failed"
+            z.errors = (z.errors or []) + [{"symbol": "", "table": "", "message": "后端崩溃残留（僵尸任务）"}]
+            z.end_time = z.update_time
+            print(f'[batch-sync] 自动清理僵尸任务 #{z.id}')
+        if zombies:
+            db.commit()
+
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        # scope 参数校验
+        if req.scope not in ("all", "index", "industry", "explicit"):
+            raise HTTPException(status_code=400, detail=f"非法 scope: {req.scope}")
+        if req.scope == "index" and not req.index_code:
+            raise HTTPException(status_code=400, detail="scope=index 时 index_code 必填")
+        if req.scope == "industry" and not req.industry:
+            raise HTTPException(status_code=400, detail="scope=industry 时 industry 必填")
+        if req.scope == "explicit" and not req.symbols:
+            raise HTTPException(status_code=400, detail="scope=explicit 时 symbols 必填")
+
+        # 组装 scope_params
+        scope_params = {}
+        if req.scope == "index":
+            scope_params["index_code"] = req.index_code
+        elif req.scope == "industry":
+            scope_params["industry_name"] = req.industry
+        elif req.scope == "explicit":
+            scope_params["symbols"] = req.symbols
+
+        task = BdsSyncTask(
+            scope=req.scope,
+            scope_params=scope_params,
+            tables=req.tables or TABLES,
+            mark_synced=1 if req.mark_synced else 0,
+            exclude_synced_today=1 if req.exclude_synced_today else 0,
+            max_symbols=req.max_symbols,
+            status="pending",
+            total_count=0,
+            done_count=0,
+            success_count=0,
+            no_data_count=0,
+            error_count=0,
+            progress=0,
+            errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        # 启动后台线程（daemon=True：进程退出时自动终止）
+        t = threading.Thread(target=_run_batch_sync_thread, args=(task.id, req), daemon=True)
+        t.start()
+
+        return task
+
+    finally:
+        db.close()
+
+
+@router.get("/sync-tasks", response_model=List[BdsSyncTaskOut])
+def list_sync_tasks(limit: int = Query(10, ge=1, le=100), db: Session = Depends(get_db)):
+    """查询批量同步任务列表，按创建时间倒序（最新在前）。"""
+    items = db.query(BdsSyncTask).order_by(BdsSyncTask.create_time.desc()).limit(limit).all()
+    return items
+
+
+@router.get("/sync-tasks/latest", response_model=BdsSyncTaskOut)
+def get_latest_sync_task(db: Session = Depends(get_db)):
+    """查询最新一条批量同步任务（供前端轮询进度）。"""
+    task = db.query(BdsSyncTask).order_by(BdsSyncTask.create_time.desc()).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="暂无同步任务记录")
+    return task
+
+
+@router.get("/sync-tasks/{task_id}", response_model=BdsSyncTaskOut)
+def get_sync_task(task_id: int, db: Session = Depends(get_db)):
+    """查询单条批量同步任务详情（含 progress / errors）。"""
+    task = db.query(BdsSyncTask).get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"任务 #{task_id} 不存在")
+    return task
