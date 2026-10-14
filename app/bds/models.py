@@ -409,9 +409,12 @@ class DailyValuation(Base, BaseModel):
     dy_ttm: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="股息率(滚动12月TTM)")
     dy_lfy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="股息率(上一财年LFY)")
 
-    # 联合唯一约束：按 symbol + trade_date 去重（每日估值无修正概念）
+    # 联合唯一约束 + trade_date DESC 单列索引（支撑 ORDER BY trade_date DESC LIMIT 的高频查询，
+    # 避免 120 万行全表扫描 + filesort）
     __table_args__ = (
         UniqueConstraint("symbol", "trade_date", name="uk_bds_daily_valuation"),
+        Index("k_dv_td", "trade_date", postgresql_using="btree",
+              mysql_using="btree"),  # DESC 方向由 MySQL 8.0 自然提供，单列索引足够
     )
 
     # 供 upsert 使用的唯一键
@@ -447,9 +450,10 @@ class DailyMktvalue(Base, BaseModel):
     # ---- 比率类字段（单位：倍） ----
     ev_ebitda: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="企业价值/EBITDA")
 
-    # 联合唯一约束：按 symbol + trade_date 去重（每日市值无修正概念）
+    # 联合唯一约束 + trade_date DESC 单列索引（支撑 ORDER BY trade_date DESC LIMIT 的高频查询）
     __table_args__ = (
         UniqueConstraint("symbol", "trade_date", name="uk_bds_daily_mktvalue"),
+        Index("k_dm_td", "trade_date", postgresql_using="btree", mysql_using="btree"),
     )
 
     # 供 upsert 使用的唯一键
