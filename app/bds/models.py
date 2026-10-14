@@ -496,7 +496,6 @@ class EconomicIndicator(Base, BaseModel):
     # 联合唯一约束 + 复合索引
     __table_args__ = (
         UniqueConstraint("indicator_code", "report_date", name="uk_bds_economic_indicator"),
-        Index("ix_economic_indicator_code_date", "indicator_code", "report_date"),
         Index("ix_economic_indicator_category_date", "category", "report_date"),
     )
 
@@ -526,10 +525,9 @@ class GoldReserve(Base, BaseModel):
     unit: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="单位")
     frequency: Mapped[Optional[str]] = mapped_column(String(8), nullable=True, comment="频率")
 
-    # 联合唯一约束 + 复合索引
+    # 联合唯一约束 + 单列索引
     __table_args__ = (
         UniqueConstraint("country_code", "rpt_date", name="uk_bds_gold_reserve"),
-        Index("k_bds_gold_reserve_country", "country_code"),
         Index("k_bds_gold_reserve_date", "rpt_date"),
     )
 
@@ -568,7 +566,6 @@ class DailyIndicator(Base, BaseModel):
     # 联合唯一约束 + 单列索引
     __table_args__ = (
         UniqueConstraint("indicator_code", "report_date", name="uk_bds_daily_indicator"),
-        Index("k_bds_daily_indicator_code", "indicator_code"),
         Index("k_bds_daily_indicator_date", "report_date"),
     )
 
