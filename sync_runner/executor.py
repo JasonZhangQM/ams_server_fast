@@ -13,11 +13,11 @@ from .config import SLEEP_MIN, SLEEP_MAX, FAIL_STREAK_LIMIT, FAIL_STREAK_SLEEP
 from .sync import sync_one, mark_synced
 
 
-def run_tasks(tasks, mark_synced_when_done=True, on_progress=None):
+def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=None):
     '''执行 (symbol, table) 任务列表，返回结果记录列表。
 
     on_progress: 可选回调，签名 fn(symbol, table, status, done_count, total_count)
-                 每条任务完成后调用，供后端后台线程实时更新 DB 进度。
+    stop_event: 可选 threading.Event，set 后提前中止（最后一次 sync_one 返回后退出循环）
     '''
     results = []
     total = len(tasks)
@@ -34,6 +34,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None):
     fail_streak = 0
     i = 0
     marked = 0
+    stopped = False
     for sym, tables in by_symbol.items():
         sym_statuses = []
         for table in tables:
@@ -55,6 +56,12 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None):
             else:
                 fail_streak += 1
 
+            # 检查停止信号（正在执行的 sync_one 无法中断，等它返回后跳出）
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                print(f'[{i}/{total}] 收到停止信号，中止后续任务')
+                break
+
             pause = random.uniform(SLEEP_MIN, SLEEP_MAX)
             if fail_streak >= FAIL_STREAK_LIMIT:
                 pause += FAIL_STREAK_SLEEP
@@ -68,6 +75,9 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None):
                 print(f'[{i}/{total}] {sym} {table:15s} -> {res["status"]:7s} | '
                       f'已用 {elapsed:.0f}s 预计剩余 {eta:.0f}s | {res["message"][:40]}')
 
+        if stopped:
+            break
+
         # 该 symbol 全部表都非 error → 标记当日已同步
         if mark_synced_when_done and all(st in ('success', 'no_data') for st in sym_statuses):
             mk = mark_synced(sym)
@@ -76,7 +86,8 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None):
             else:
                 print(f'  [警告] {sym} 标记 sync_at 失败：{mk["message"][:60]}')
 
-    print(f'完成，用时 {time.time() - t0:.0f}s | 已标记当日同步 {marked} 只')
+    prefix = '（已停止）' if stopped else '完成'
+    print(f'{prefix}，用时 {time.time() - t0:.0f}s | 已标记当日同步 {marked} 只 | 本次处理 {len(results)}/{total}')
     return results
 
 

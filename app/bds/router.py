@@ -98,6 +98,9 @@ from server_fast.common.pagination import PageResponse
 import threading
 from server_fast.sync_runner import TABLES, resolve_symbols, run_tasks
 
+# 模块级停止信号字典：{task_id: threading.Event}，供 POST /bds/stop/batch-sync 触发
+_stop_events: dict[int, threading.Event] = {}
+
 router = APIRouter(prefix="/bds", tags=["bds"])
 
 
@@ -1101,19 +1104,28 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
                 s.close()
 
         # 4. 执行同步（复用 sync_runner，限速 + 重试 + 连续失败退避 + 当日标记 全在 run_tasks 内）
-        results = run_tasks(tasks, mark_synced_when_done=req.mark_synced, on_progress=on_progress)
+        stop_event = _stop_events.get(task_id)
+        results = run_tasks(
+            tasks,
+            mark_synced_when_done=req.mark_synced,
+            on_progress=on_progress,
+            stop_event=stop_event,
+        )
 
         # 5. 收集失败明细
         for r in results:
             if r["status"] == "error":
                 errors.append({"symbol": r["symbol"], "table": r["table"], "message": r.get("message", "")})
 
-        # 6. 结束
-        task.status = "done"
+        # 6. 结束：检查是否被停止
+        if stop_event is not None and stop_event.is_set():
+            task.status = "stopped"
+        else:
+            task.status = "done"
         task.errors = errors
         task.end_time = date.today()
         db.commit()
-        print(f'[batch-sync #{task_id}] 完成：success={task.success_count}, no_data={task.no_data_count}, error={task.error_count}')
+        print(f'[batch-sync #{task_id}] {task.status}：success={task.success_count}, no_data={task.no_data_count}, error={task.error_count}')
 
     except Exception as e:
         # 兜底：线程异常也要把 task 状态置为 failed
@@ -1124,6 +1136,8 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
         db.commit()
         print(f'[batch-sync #{task_id}] 失败: {e}')
     finally:
+        # 清理停止信号，避免内存泄漏
+        _stop_events.pop(task_id, None)
         db.close()
 
 
@@ -1194,6 +1208,9 @@ def run_batch_sync(req: BatchSyncRequest):
         db.commit()
         db.refresh(task)
 
+        # 注册停止信号（后台线程从 _stop_events[task.id] 取；/stop/batch-sync 端点 set）
+        _stop_events[task.id] = threading.Event()
+
         # 启动后台线程（daemon=True：进程退出时自动终止）
         t = threading.Thread(target=_run_batch_sync_thread, args=(task.id, req), daemon=True)
         t.start()
@@ -1227,3 +1244,27 @@ def get_sync_task(task_id: int, db: Session = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail=f"任务 #{task_id} 不存在")
     return task
+
+
+@router.post("/stop/batch-sync")
+def stop_batch_sync(task_id: int = Query(..., description="要停止的任务 ID")):
+    """停止正在运行的批量同步任务。
+
+    原理：对该任务对应的 threading.Event.set()。后台线程每次 sync_one 返回后检查，
+    发现 set 就跳出循环，不再启动下一次 sync_one。正在执行的 HTTP 请求无法中断，
+    等它自然返回后就停。任务状态最终会被置为 stopped。
+
+    - pending（还没开始跑）：Event.set() 后线程进入 run_tasks 会立即停止，状态=stopped
+    - running（正在跑）：等当前 symbol×table 的 sync_one 返回后停止
+    - done/failed/stopped：返回 400，任务已结束，无需停止
+    """
+    ev = _stop_events.get(task_id)
+    if ev is None:
+        raise HTTPException(status_code=404, detail=f"任务 #{task_id} 不在运行中或不存在")
+
+    if ev.is_set():
+        return {"status": "already_stopped", "message": f"任务 #{task_id} 已发出停止信号"}
+
+    ev.set()
+    print(f'[batch-sync] 已发送停止信号 task #{task_id}')
+    return {"status": "stopping", "message": f"任务 #{task_id} 停止信号已发出，正在等待当前请求返回..."}
