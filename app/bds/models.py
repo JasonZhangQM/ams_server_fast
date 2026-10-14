@@ -585,8 +585,10 @@ class BdsSyncTask(Base, BaseModel):
     __tablename__ = "bds_sync_task"
 
     # ---- 任务参数 ----
-    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit")
-    scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols}")
+    # ⚠️ 列宽 String(16)：新增 scope 取值必须 <= 16 字符，否则 MySQL 会截断/报 1406
+    # index_backfill = 指数成分股同步/回填（POST /bds/sync/index-constituent）
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill")
+    scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols} 或 {index_codes/start_date}")
     tables: Mapped[list] = mapped_column(JSON, nullable=False, comment="要同步的表列表")
     mark_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", comment="全部成功后是否写 sync_at: 1=是 0=否")
     exclude_synced_today: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="是否跳过当日已同步标的: 1=是 0=否")

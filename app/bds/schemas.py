@@ -414,6 +414,20 @@ class BatchSyncRequest(BaseModel):
     max_symbols: int = Field(default=0, ge=0, description="最多处理几只 symbol: 0=不限")
 
 
+class IndexConstituentSyncRequest(BaseModel):
+    """指数成分股同步/回填请求体（POST /bds/sync/index-constituent）。
+
+    指数清单由前端页面手动勾选后显式传入；后端仍会硬校验（空/未知/yfinance → 400）。
+    """
+
+    index_codes: list[str] = Field(
+        min_length=1,
+        description="本次要处理的指数代码清单（页面勾选），如 ['SHSE.000300', 'SZSE.399006']")
+    start_date: Optional[date] = Field(
+        default=None,
+        description="回填起点 YYYY-MM-DD；不传=各指数从库内最新 trade_date+1 增量（库空则从 listed_date 起）")
+
+
 class BdsSyncTaskOut(BaseModel):
     """批量同步任务响应 Schema（对应 bds.BdsSyncTask 模型）。"""
 

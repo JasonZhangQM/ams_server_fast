@@ -25,6 +25,7 @@ bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项�
 - GET  /bds/daily-indicators        美债收益率指标
 - GET  /bds/daily-indicator-codes   美债收益率代码下拉
 - POST /bds/sync/{target}           数据同步（按 target 触发对应 service）
+- POST /bds/sync/index-constituent  指数成分股同步/回填（异步任务，复用 bds_sync_task 轮询进度）
 - POST /bds/sync/mark-synced        标记标的当日已完成批量同步（写 bds_symbol_info.sync_at）
 """
 from datetime import date, datetime, timedelta
@@ -66,6 +67,7 @@ from server_fast.app.bds.schemas import (
     FundIncomeOut,
     GoldReserveOut,
     IndexConstituentOut,
+    IndexConstituentSyncRequest,
     IndexHistoryOut,
     SymbolInfoOut,
     TradeDateOut,
@@ -87,6 +89,7 @@ from server_fast.app.bds.services import (
     upsert_index_history_sql,
     upsert_symbol_info_excel_sql,
     upsert_daily_indicator_sql,
+    plan_index_constituent_backfill,
 )
 from server_fast.app.bds.config import Config
 from server_fast.common.db import SessionLocal, get_db
@@ -350,11 +353,17 @@ def list_index_codes():
     """返回应用配置的指数代码列表。
 
     数据源为 Config.INDEX_CODE 字典，确保前端下拉选项与后端指数配置
-    保持一致，无需依赖数据库查询。每项包含 code（指数代码）和
-    sec_name（指数名称）。
+    保持一致，无需依赖数据库查询。每项包含：
+    - code（指数代码）、sec_name（指数名称）
+    - gm_supported：gm 是否支持该指数（`data_source='yfinance'` 的如 SP500 为 False）
+      ⇒ 前端成分股同步的勾选项据此过滤，不把不支持 gm 的指数下发给回填任务。
     """
     index_codes = [
-        {"code": code, "sec_name": info["sec_name"]}
+        {
+            "code": code,
+            "sec_name": info["sec_name"],
+            "gm_supported": info.get("data_source") != "yfinance",
+        }
         for code, info in Config.INDEX_CODE.items()
     ]
     return {"index_codes": index_codes}
@@ -396,26 +405,70 @@ def list_index_constituents(
     return {"items": result_items, "total": total, "limit": limit, "offset": offset}
 
 
-@router.post("/sync/index-constituent")
-def sync_index_constituent(trade_date: Optional[date] = None):
-    """同步指数成分股数据到数据库。
+@router.post("/sync/index-constituent", response_model=BdsSyncTaskOut)
+def sync_index_constituent(req: IndexConstituentSyncRequest):
+    """启动指数成分股同步/回填（后台线程异步执行），返回 task 供前端轮询进度。
 
-    触发底层 upsert_index_constituent_sql() 函数，遍历配置中所有指数代码，
-    通过 GM 接口获取指定日期（未指定则为最新交易日）的成分股并执行追加操作。
+    请求体（JSON）：
+    - index_codes: 必填，本次要处理的指数代码清单（前端页面勾选）。后端硬校验：
+      空清单 / 未知代码 / `data_source='yfinance'`（如 SP500）→ 400，不静默跳过。
+    - start_date: 可选，回填起点 YYYY-MM-DD。不传则各指数从库内最新 trade_date+1 增量，
+      库中无该指数数据则从 max(listed_date, 2005-01-01) 起；传了则从该日回填到今天。
 
-    参数说明：
-    - trade_date: 可选，指定同步的交易日（%Y-%m-%d），未指定则获取最新交易日数据
+    口径：变更键为成分股名单（symbol 集合），只在"名单变化"的交易日留存快照，不存每日权重；
+    已存交易日自动跳过（断点续跑安全）。
 
-    返回值说明：
-    - status: 同步状态，成功为 "success"
-    - message: 同步结果描述信息
-    - steps: 各 index_code 的结果字典（1=已保存，0=未变化或空数据跳过，-1=失败）
+    停止：POST /bds/stop/batch-sync?task_id=<id>。
+    ⚠️ 与 /run/batch-sync 共用 bds_sync_task 与停止信号 ⇒ 二者全局互斥（有一方 running 则 409）。
     """
+    db = next(get_db())
     try:
-        result = upsert_index_constituent_sql(trade_date=trade_date)
-        return {"status": "success", "message": "指数成分股同步完成", "steps": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # 1. 参数校验（先于建任务，避免非法入参在任务表里留下垃圾记录）
+        try:
+            plan = plan_index_constituent_backfill(req.index_codes, req.start_date)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # 2. 清理僵尸任务 + 互斥检查
+        _cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        # 3. 建任务（scope=index_backfill，与批量同步的 scope 区分开）
+        task = BdsSyncTask(
+            scope="index_backfill",
+            scope_params={
+                "index_codes": [p["code"] for p in plan["per_index"]],
+                "start_date": req.start_date.isoformat() if req.start_date else None,
+            },
+            tables=["index-constituent"],
+            status="running",
+            total_count=plan["total"],
+            done_count=0,
+            success_count=0,
+            no_data_count=0,
+            error_count=0,
+            progress=0,
+            errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        # 4. 注册停止信号并启动后台线程（daemon=True：进程退出时自动终止）
+        _stop_events[task.id] = threading.Event()
+        t = threading.Thread(
+            target=_run_constituent_thread,
+            args=(task.id, [p["code"] for p in plan["per_index"]], req.start_date),
+            daemon=True,
+        )
+        t.start()
+
+        return task
+
+    finally:
+        db.close()
 
 
 @router.get("/index-cum-returns")
@@ -1111,6 +1164,84 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
     finally:
         # 清理停止信号，避免内存泄漏
         _stop_events.pop(task_id, None)
+
+
+# ============================================================================
+# 指数成分股同步 / 历史回填：后台线程异步执行，进度实时写 bds_sync_task 表
+# ============================================================================
+
+def _run_constituent_thread(task_id: int, index_codes: list, start_date):
+    """后台线程：执行指数成分股同步/回填并实时写进度到 DB。
+
+    与 HTTP 调用完全隔离：线程内部自建 SessionLocal，不复用请求 db。
+    复用 bds_sync_task 与 _stop_events ⇒ 与批量同步全局互斥。
+    """
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).get(task_id)
+    errors = []
+
+    try:
+        task.status = "running"
+        task.start_time = datetime.now()
+        db.commit()
+
+        # 进度回调：每次开独立 session，避免长事务；每轮 commit 刷新 update_time，
+        # 防止 5 分钟僵尸清理把仍在跑的长任务误标为 failed
+        def on_progress(index_code, trade_date, done_count, total):
+            s = SessionLocal()
+            try:
+                t = s.query(BdsSyncTask).get(task_id)
+                t.done_count = done_count
+                t.progress = round(done_count / total * 100, 2) if total else 100
+                s.commit()
+            finally:
+                s.close()
+
+        stop_event = _stop_events.get(task_id)
+        counters = upsert_index_constituent_sql(
+            index_codes,
+            start_date=start_date,
+            on_progress=on_progress,
+            stop_event=stop_event,
+        )
+
+        # 计数映射：saved=留存快照数（success）、no_data=gm 空返回、failed=失败
+        task.success_count = sum(c.get("saved", 0) for c in counters.values())
+        task.no_data_count = sum(c.get("no_data", 0) for c in counters.values())
+        task.error_count = sum(c.get("failed", 0) for c in counters.values())
+        for code, c in counters.items():
+            if c.get("aborted"):
+                errors.append({
+                    "symbol": code,
+                    "table": "index-constituent",
+                    "message": "提前中止（被停止，或连续调用失败超限）",
+                })
+
+        # 终态：被停止 ⇒ stopped；有失败但一条都没入库 ⇒ failed；其余 done（失败明细仍可见）
+        if stop_event is not None and stop_event.is_set():
+            task.status = "stopped"
+        elif task.error_count and not task.success_count:
+            task.status = "failed"
+        else:
+            task.status = "done"
+        task.errors = errors or None
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[index-constituent #{task_id}] {task.status}：saved={task.success_count}, '
+              f'no_data={task.no_data_count}, failed={task.error_count}')
+
+    except Exception as e:
+        # 兜底：线程异常也要把 task 状态置为 failed
+        errors.append({"symbol": "", "table": "index-constituent",
+                       "message": f"线程异常: {type(e).__name__}: {e}"})
+        task.status = "failed"
+        task.errors = errors
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[index-constituent #{task_id}] 失败: {e}')
+    finally:
+        _stop_events.pop(task_id, None)
+        db.close()
         db.close()
 
 

@@ -22,6 +22,7 @@ from server_fast.app.bds.services.market_data import (
     upsert_daily_mktvalue_sql,
 )
 from server_fast.app.bds.services.index_constituent import (
+    plan_index_constituent_backfill,
     upsert_index_constituent_sql,
 )
 from server_fast.app.bds.services.fund_data import (
@@ -52,6 +53,7 @@ __all__ = [
     'upsert_daily_mktvalue_sql',
     # 指数成分
     'upsert_index_constituent_sql',
+    'plan_index_constituent_backfill',
     # 财务数据
     'upsert_fund_balance_sql',
     'upsert_fund_cashflow_sql',
