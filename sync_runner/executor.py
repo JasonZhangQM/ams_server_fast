@@ -9,7 +9,7 @@ import random
 
 import pandas as pd
 
-from .config import SLEEP_MIN, SLEEP_MAX, FAIL_STREAK_LIMIT, FAIL_STREAK_SLEEP, RESULT_CSV
+from .config import SLEEP_MIN, SLEEP_MAX, FAIL_STREAK_LIMIT, FAIL_STREAK_SLEEP
 from .sync import sync_one, mark_synced
 
 
@@ -77,8 +77,8 @@ def run_tasks(tasks, mark_synced_when_done=True):
     return results
 
 
-def summarize(results, result_csv=RESULT_CSV):
-    '''打印结果分布 / pivot / 失败明细，写 CSV。
+def summarize(results):
+    '''打印结果分布 / pivot / 失败明细。
 
     返回 bool：True=有 error，False=全部 success/no_data。
     '''
@@ -99,7 +99,4 @@ def summarize(results, result_csv=RESULT_CSV):
             has_err = True
             print(f'\n失败明细（前 20，共 {len(err)}）：')
             print(err.head(20).to_string())
-
-        df.to_csv(result_csv, index=False, encoding='utf-8-sig')
-        print(f'\n结果已落盘: {result_csv}')
     return has_err

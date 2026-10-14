@@ -32,9 +32,6 @@ RETRY_BACKOFF = 5.0       # 重试间隔基数（第 n 次重试前停 RETRY_BAC
 FAIL_STREAK_LIMIT = 5     # 连续失败次数阈值
 FAIL_STREAK_SLEEP = 15.0  # 额外停顿秒数
 
-# ===== 产出 =====
-RESULT_CSV = 'sync_results.csv'
-
 # ===== symbol 前缀白名单（过滤非股票标的）=====
 MARKET_PREFIXES = ('SHSE.', 'SZSE.', 'BJSE.')
 
