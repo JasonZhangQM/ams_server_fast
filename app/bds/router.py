@@ -36,7 +36,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, text
+from sqlalchemy import func, or_, select, text
 
 from server_fast.app.bds.models import (
     BdsSyncTask,
@@ -415,34 +415,86 @@ def list_index_constituents(
     index_code: Optional[str] = Query(default=None, description="指数代码精确匹配"),
     symbol: Optional[str] = Query(default=None, description="成分股代码精确匹配"),
     trade_date: Optional[date] = Query(default=None, description="交易日期 YYYY-MM-DD"),
+    dedup: bool = Query(default=False, description="按成分股代码去重，每只保留交易日期最新的一条"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """查询指数成分股，支持指数代码精确匹配、成分股代码精确匹配和具体交易日期筛选。
 
+    - dedup=False（默认）：返回全部符合条件明细，按 trade_date 降序（同日按 id 升序，翻页稳定）。
+    - dedup=True：按成分股代码（symbol）去重，每只仅保留交易日期最新的一条；
+      若同一交易日该股票同属多个指数，取 index_code 最小的那条（tie-break 确定性，每 symbol 恰一行）。
+      total 为去重后的行数（COUNT(DISTINCT symbol)）。
+
     响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
     """
-    query = db.query(IndexConstituent)
-    # index_code 精确匹配
+    # 公共过滤条件（两个分支共用）
+    filters = []
     if index_code:
-        query = query.filter(IndexConstituent.index_code == index_code)
-    # symbol 精确匹配
+        filters.append(IndexConstituent.index_code == index_code)  # index_code 精确匹配
     if symbol:
-        query = query.filter(IndexConstituent.symbol == symbol)
-    # 具体交易日期精确匹配
+        filters.append(IndexConstituent.symbol == symbol)  # symbol 精确匹配
     if trade_date:
-        query = query.filter(IndexConstituent.trade_date == trade_date)
-    # 按 trade_date 降序
-    query = query.order_by(IndexConstituent.trade_date.desc())
-    total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    # 附加 sec_name 字段（从 Config.INDEX_CODE 查找，不存数据库）
+        filters.append(IndexConstituent.trade_date == trade_date)  # 具体交易日期精确匹配
+
     result_items = []
-    for item in items:
-        item_dict = item.to_dict()
-        item_dict["sec_name"] = Config.INDEX_CODE.get(item.index_code, {}).get("sec_name")
-        result_items.append(item_dict)
+
+    if dedup:
+        # 去重分支：窗口函数按 symbol 分区、trade_date 降序取 rn=1
+        # tie-break：同日跨多指数时取 index_code 最小的那条；id 兜底保证顺序确定
+        rn = func.row_number().over(
+            partition_by=IndexConstituent.symbol,
+            order_by=(
+                IndexConstituent.trade_date.desc(),
+                IndexConstituent.index_code.asc(),
+                IndexConstituent.id.asc(),
+            ),
+        ).label("rn")
+        ranked = (
+            select(
+                IndexConstituent.index_code,
+                IndexConstituent.symbol,
+                IndexConstituent.weight,
+                IndexConstituent.trade_date,
+                rn,
+            )
+            .where(*filters)
+            .subquery()
+        )
+        rows = db.execute(
+            select(ranked)
+            .where(ranked.c.rn == 1)
+            .order_by(ranked.c.trade_date.desc(), ranked.c.index_code.asc(), ranked.c.symbol.asc())
+            .offset(offset)
+            .limit(limit)
+        ).all()
+        # 去重后 total = distinct symbol 数（口径 A 下与去重后的行数严格相等）
+        total = db.query(func.count(func.distinct(IndexConstituent.symbol))).filter(*filters).scalar() or 0
+        for row in rows:
+            item_dict = {
+                "index_code": row.index_code,
+                "symbol": row.symbol,
+                "weight": row.weight,
+                "trade_date": row.trade_date.strftime("%Y-%m-%d") if row.trade_date else None,
+            }
+            # 附加 sec_name 字段（从 Config.INDEX_CODE 查找，不存数据库）
+            item_dict["sec_name"] = Config.INDEX_CODE.get(row.index_code, {}).get("sec_name")
+            result_items.append(item_dict)
+    else:
+        query = db.query(IndexConstituent)
+        if filters:
+            query = query.filter(*filters)
+        # 按 trade_date 降序；同日期行按 id 升序兜底，避免顺序不稳导致翻页重复/漏行
+        query = query.order_by(IndexConstituent.trade_date.desc(), IndexConstituent.id.asc())
+        total = query.count()
+        items = query.offset(offset).limit(limit).all()
+        # 附加 sec_name 字段（从 Config.INDEX_CODE 查找，不存数据库）
+        for item in items:
+            item_dict = item.to_dict()
+            item_dict["sec_name"] = Config.INDEX_CODE.get(item.index_code, {}).get("sec_name")
+            result_items.append(item_dict)
+
     return {"items": result_items, "total": total, "limit": limit, "offset": offset}
 
 

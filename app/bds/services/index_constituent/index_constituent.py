@@ -281,7 +281,7 @@ def upsert_index_constituent_sql(index_codes, start_date: Optional[date] = None,
             logger.error("[致命] gm 终端不可用，中止剩余指数回填")
             break
 
-    logger.info("指数成分股同步结束：%s", counters)
+    # logger.info("指数成分股同步结束：%s", counters)
     return counters
 
 
