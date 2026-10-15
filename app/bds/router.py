@@ -517,13 +517,16 @@ def list_index_cum_returns(
     start_date: Optional[str] = Query(
         default=None, description="起始日期 YYYY-MM-DD，默认当前日期前10年"
     ),
+    symbols: Optional[List[str]] = Query(
+        default=None, description="限定指数代码（可多值）；不传返回 Config.INDEX_CODE 全部"
+    ),
     db: Session = Depends(get_db),
 ):
     """查询指数累计收益率。
 
     逻辑说明：
     1. 查询 bds_index_history 表中 trade_date >= start_date 且 symbol 在
-       Config.INDEX_CODE 字典键中的全部记录。
+       Config.INDEX_CODE 字典键中的全部记录。symbols 多值参数可进一步子集过滤。
     2. 用 pandas 透视数据：行索引为 trade_date（升序），列名为通过
        Config.INDEX_CODE[symbol]['sec_name'] 映射的指数名称，值为 close 收盘价。
     3. 累计收益率计算：(df/df.iloc[0]-1)*100，保留两位小数。
@@ -535,12 +538,25 @@ def list_index_cum_returns(
     if start_date is None:
         start_date = (date.today() - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
 
-    # 查询满足条件的全部指数历史记录（symbol 限定在 Config.INDEX_CODE 键中）
+    # symbol 白名单：symbols 有传就只看传入的，但必须在 INDEX_CODE 内
+    allowed = list(Config.INDEX_CODE.keys())
+    if symbols:
+        allowed = [s for s in symbols if s in Config.INDEX_CODE]
+        if not allowed:
+            # 过滤后无合法 symbol，返回空结构
+            return {
+                "trade_dates": [],
+                "series": {},
+                "max_drawdown": {},
+                "realtime_source": None,
+            }
+
+    # 查询满足条件的全部指数历史记录
     rows = (
         db.query(IndexHistory)
         .filter(
             IndexHistory.trade_date >= start_date,
-            IndexHistory.symbol.in_(list(Config.INDEX_CODE.keys())),
+            IndexHistory.symbol.in_(allowed),
         )
         .all()
     )
