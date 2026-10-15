@@ -114,6 +114,9 @@ class Config:
         '-': {
             '-': ['配股权证', '申购配号', '配股入帐', '新股入帐', '指定交易'],
         },
+        'cash': {
+            'cash': [],  # 资金汇总（upsert_group_cash_sql 写入，无 exec_type 对应）
+        },
     }
 
     MAP_SYMBOL = {  # 代码映射

@@ -83,11 +83,11 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
                     fail_streak = 0
                 time.sleep(pause)
 
-            if i % 10 == 0 or i == total:
-                elapsed = time.time() - t0
-                eta = elapsed / i * (total - i)
-                print(f'[{i}/{total}] {sym} {table:15s} -> {res["status"]:7s} | '
-                      f'已用 {elapsed:.0f}s 预计剩余 {eta:.0f}s | {res["message"][:40]}')
+            # if i % 10 == 0 or i == total:
+            #     elapsed = time.time() - t0
+            #     eta = elapsed / i * (total - i)
+            #     print(f'[{i}/{total}] {sym} {table:15s} -> {res["status"]:7s} | '
+            #           f'已用 {elapsed:.0f}s 预计剩余 {eta:.0f}s | {res["message"][:40]}')
 
         if gm_down or stopped:
             break
@@ -107,7 +107,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
         prefix = '（已停止）'
     else:
         prefix = '完成'
-    print(f'{prefix}，用时 {time.time() - t0:.0f}s | 已标记当日同步 {marked} 只 | 本次处理 {len(results)}/{total}')
+    print(f'{prefix}，用时 {time.time() - t0:.0f}s')
     return results
 
 
