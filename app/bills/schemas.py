@@ -236,3 +236,73 @@ class ProfitYearOut(BaseModel):
     id: int  # 主键
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间
+
+
+# =========================================================================
+# 请求 Schema（Pydantic 入参）
+# =========================================================================
+
+
+class BillUpdate(BaseModel):
+    """Bill 修改请求（PATCH /bills/bills/{id}）。
+
+    所有字段均为可选，只传需要修改的字段。None 表示不修改该字段。
+    Bill 含唯一约束 (account, trade_time, symbol, exec_type, amount_act, id_agree, cash)，
+    修改唯一键字段可能触发 IntegrityError，路由层会捕获并返回 400。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    # 基本信息
+    trade_time: Optional[datetime] = None  # 交易时间
+    symbol: Optional[str] = None  # 代码
+    name: Optional[str] = None  # 名称
+    exec_type: Optional[str] = None  # 操作类型
+    category1: Optional[str] = None  # 一级分类
+    category: Optional[str] = None  # 总分类
+    b_s: Optional[str] = None  # 买/卖
+    c_p: Optional[str] = None  # 沽/购
+    o_c: Optional[str] = None  # 开/平
+
+    # 成交数据
+    price: Optional[Decimal] = None  # 成交价
+    vol: Optional[int] = None  # 成交量
+    amount: Optional[Decimal] = None  # 成交额
+    amount_act: Optional[Decimal] = None  # 发生额
+    balance: Optional[int] = None  # 余额
+
+    # 费用明细
+    fee_tax: Optional[Decimal] = None  # 税费合计
+    fees: Optional[Decimal] = None  # 手续费/佣金
+    taxes: Optional[Decimal] = None  # 印花税
+    fee_exec1: Optional[Decimal] = None  # 过户费
+    fee_exec2: Optional[Decimal] = None  # 交易过户费
+    fee_exec3: Optional[Decimal] = None  # 行权过户费
+    fee_hand: Optional[Decimal] = None  # 经手费
+    fee_sr: Optional[Decimal] = None  # 证管费
+    fee_clear: Optional[Decimal] = None  # 清算费
+    fee_reg: Optional[Decimal] = None  # 交易规费
+    fee_other: Optional[Decimal] = None  # 其他费用
+    premium: Optional[Decimal] = None  # 权利金收支
+    cash: Optional[Decimal] = None  # 资金余额
+
+    # 编号与账户信息
+    id_exec: Optional[str] = None  # 成交编号
+    id_agree: Optional[str] = None  # 流水号
+    currency: Optional[str] = None  # 币种
+    account_id: Optional[str] = None  # 账号
+    market: Optional[str] = None  # 市场
+    account: Optional[str] = None  # 账户
+
+
+class GroupUpdate(BaseModel):
+    """Group 修改请求（PATCH /bills/group/{id}）。
+
+    仅允许修改 profit_time（收益试算时间）和 value_time（市值更新时间），
+    其余字段由后端批量导入/同步流程自动生成，不允许前端手动编辑。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    profit_time: Optional[datetime] = None  # 收益试算时间
+    value_time: Optional[datetime] = None  # 市值更新时间

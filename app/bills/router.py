@@ -12,15 +12,18 @@
 from typing import Any, Callable, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server_fast.app.bills.config import Config
 from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol, Profit, ProfitYear
 from server_fast.app.bills.schemas import (
     BillOut,
+    BillUpdate,
     GroupAccOut,
     GroupOut,
     GroupSymbolOut,
+    GroupUpdate,
     ProfitOut,
     ProfitYearOut,
 )
@@ -288,6 +291,69 @@ def list_profit_years(
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
+# =========================================================================
+# PATCH 修改路由（2 个，按 id 更新）
+# =========================================================================
+
+
+@router.patch("/bills/{id_}")
+def update_bill(
+    id_: int,
+    payload: BillUpdate,
+    db: Session = Depends(get_db),
+):
+    """修改 Bill 记录（PATCH /bills/bills/{id}）。
+
+    只更新 payload 中非 None 的字段。None 表示不修改该字段。
+    Bill 含唯一约束 (account, trade_time, symbol, exec_type, amount_act, id_agree, cash)，
+    修改唯一键字段可能触发 IntegrityError，捕获后返回 400。
+    """
+    bill = db.get(Bill, id_)
+    if bill is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        data = payload.model_dump(exclude_none=True)
+        for field, value in data.items():
+            setattr(bill, field, value)
+        db.commit()
+        return {"status": "success", "message": "修改成功"}
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"唯一约束冲突：{str(e)}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
+
+
+@router.patch("/group/{id_}")
+def update_group(
+    id_: int,
+    payload: GroupUpdate,
+    db: Session = Depends(get_db),
+):
+    """修改 Group 记录（PATCH /bills/group/{id}）。
+
+    仅允许修改 profit_time 和 value_time 两个时间戳字段。
+    其余字段由后端批量导入/同步流程自动生成，不允许前端手动编辑。
+    """
+    group = db.get(Group, id_)
+    if group is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        data = payload.model_dump(exclude_none=True)
+        for field, value in data.items():
+            setattr(group, field, value)
+        db.commit()
+        return {"status": "success", "message": "修改成功"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
+
+
+# =========================================================================
+# 同步路由
+# =========================================================================
+
 # 合并后的同步路由：顺序执行实时估值 → 标的汇总 → 账户汇总
 @router.post("/sync/group")
 def sync_group():
@@ -305,10 +371,6 @@ def sync_group():
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
         ]
     )
-
-
-# =========================================================================
-# 定时脚本拆分路由（对应 run.py 中 bills 部分8个步骤，顺序执行）
 # =========================================================================
 
 @router.post("/run/batch-import")
