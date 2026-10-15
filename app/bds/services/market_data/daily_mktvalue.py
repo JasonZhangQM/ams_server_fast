@@ -6,7 +6,7 @@
 但 API 签名一致（fields 为第二位置参数，无 rpt_type/data_type）。
 """
 import logging
-from datetime import date, datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import func
 from gm.api import stk_get_daily_mktvalue
@@ -17,6 +17,8 @@ from server_fast.app.bds.models import DailyMktvalue
 # 复用 fund_data 的标量清洗工具，避免重复实现
 from server_fast.app.bds.services.fund_data.fund_reports import _clean_scalar, _to_date
 from server_fast.common.utils import call_with_timeout
+# 目标交易日规则与每日估值共用（交易日且已收盘取当日，否则取前一交易日）
+from server_fast.app.bds.services.market_data.daily_valuation import resolve_daily_end_date
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -68,6 +70,9 @@ def upsert_daily_mktvalue_sql(symbols):
     - 数据库无该 symbol 数据：从 EARLIEST_START_DATE（1901-01-01）全量获取，
       gm 会自动截断到该股首个交易日
 
+    目标交易日（end_date）：由 resolve_daily_end_date() 决定 —— 交易日且已收盘
+    （>=15:00）取当日，否则取前一交易日；库内已追平该日即跳过（steps=-2，不调 gm）。
+
     去重规则（按 symbol + trade_date 直接覆盖）：
     - 每日市值无修正概念，无需 pub_date 最新保留逻辑
     - 已有记录：直接更新所有字段
@@ -80,7 +85,9 @@ def upsert_daily_mktvalue_sql(symbols):
     steps = {}
     errors = {}
     logger.info("市值指标数据获取并导入")
-    end_date = datetime.now().strftime("%Y-%m-%d")
+    # 目标交易日：交易日且已收盘(>=15:00)取当日，否则取前一交易日
+    end_date_dt = resolve_daily_end_date()
+    end_date = end_date_dt.strftime("%Y-%m-%d")
     for symbol in symbols:
         try:
             # 查询数据库中该 symbol 的最大 trade_date，用于增量更新
@@ -93,10 +100,10 @@ def upsert_daily_mktvalue_sql(symbols):
             # 增量起点：有数据则从最新 trade_date + 1 天，否则从统一起点全量获取
             if max_trade_date is not None:
                 start_date = (max_trade_date + timedelta(days=1)).strftime("%Y-%m-%d")
-                # 边界保护：若 DB 已追平今日，start_date > end_date 会触发 gm "开始时间晚于结束时间"错误
-                if start_date > end_date:
-                    logger.info(f"->{symbol} 已是最新（{max_trade_date}），跳过")
-                    steps[symbol] = 0
+                # 已追平目标交易日则无需调 gm；-2 区别于「gm 返回空」的 0（见 router._build_sync_response）
+                if max_trade_date >= end_date_dt:
+                    logger.info(f"->{symbol} 已是最新（{max_trade_date} ≥ {end_date_dt}），跳过")
+                    steps[symbol] = -2
                     continue
             else:
                 start_date = dbsCfg.EARLIEST_START_DATE

@@ -163,14 +163,17 @@ def _extract_gm_code(raw_error: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _build_sync_response(symbol: str, steps: dict, errors: dict | None = None) -> dict:
+def _build_sync_response(symbol: str, steps: dict, errors: dict | None = None,
+                         skip_label: str = "报告期") -> dict:
     """根据 steps 中 symbol 对应的保存条数构建同步响应。
 
-    - -2：跳过（库内报告期已是最新报告期，未调 gm）
+    - -2：跳过（库内已是最新<skip_label>，未调 gm）
     - -1：同步失败（gm 终端未启动或接口异常）
     - 0：无数据可导入
     - >0：成功导入 count 条
 
+    skip_label: 仅影响 -2 分支文案的中缀 —— 日频两表（每日估值/市值）传「交易日」，
+                报告期类端点走默认「报告期」以保持原文案不变。
     errors: dict 可选，service 返回的原始错误字典 {symbol: str(e)}。
             若 errors[symbol] 命中 gm 终端断连，response 会附加 fatal=True + gm_code 字段，
             调用方（sync_runner）应立即中止整个批量同步。
@@ -181,7 +184,7 @@ def _build_sync_response(symbol: str, steps: dict, errors: dict | None = None) -
 
     count = steps.get(symbol, 0)
     if count == -2:
-        return {"status": "no_data", "message": f"已是最新报告期，无需导入：{symbol}"}
+        return {"status": "no_data", "message": f"已是最新{skip_label}，无需导入：{symbol}"}
     if count == -1:
         body: dict = {"status": "error"}
         if fatal:
@@ -845,11 +848,15 @@ def list_finance_derivs(
 
 @router.post("/sync/daily-valuation")
 def sync_daily_valuation(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
-    """同步估值指标数据，接收单个股票代码，获取并入库。"""
+    """同步估值指标数据，接收单个股票代码，获取并入库。
+
+    目标交易日取「交易日且已收盘(>=15:00)的当日，否则前一交易日」；
+    库内已追平则跳过、返回 no_data（未调 gm）。
+    """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
     steps, errors = upsert_daily_valuation_sql([symbol])
-    return _build_sync_response(symbol, steps, errors)
+    return _build_sync_response(symbol, steps, errors, skip_label="交易日")
 
 
 @router.get("/daily-valuations", response_model=PageResponse[DailyValuationOut])
@@ -881,11 +888,15 @@ def list_daily_valuations(
 
 @router.post("/sync/daily-mktvalue")
 def sync_daily_mktvalue(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
-    """同步每日市值数据，接收单个股票代码，获取并入库。"""
+    """同步每日市值数据，接收单个股票代码，获取并入库。
+
+    目标交易日取「交易日且已收盘(>=15:00)的当日，否则前一交易日」；
+    库内已追平则跳过、返回 no_data（未调 gm）。
+    """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
     steps, errors = upsert_daily_mktvalue_sql([symbol])
-    return _build_sync_response(symbol, steps, errors)
+    return _build_sync_response(symbol, steps, errors, skip_label="交易日")
 
 
 @router.get("/daily-mktvalues", response_model=PageResponse[DailyMktvalueOut])

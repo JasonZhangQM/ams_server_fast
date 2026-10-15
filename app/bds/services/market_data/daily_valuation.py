@@ -7,7 +7,7 @@
 - 共用 fund_data 的 _clean_scalar/_to_date 工具函数
 """
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pandas as pd
 from sqlalchemy import func
@@ -17,7 +17,7 @@ from server_fast.config import settings
 from server_fast.common.utils import call_with_timeout, upsert_df_to_db
 from server_fast.common.db import SessionLocal
 from server_fast.app.bds.config import Config as dbsCfg
-from server_fast.app.bds.models import DailyValuation
+from server_fast.app.bds.models import DailyValuation, TradeDate
 # 复用 fund_data 的标量清洗工具，避免重复实现
 from server_fast.app.bds.services.fund_data.fund_reports import _clean_scalar, _to_date
 
@@ -25,6 +25,41 @@ logger = logging.getLogger("uvicorn.error")
 
 # 估值指标字段列表（gm API fields 参数，20个，不超过限制）
 DAILY_VALUATION_FIELDS = "pe_ttm,pe_lyr,pe_mrq,pe_ttm_cut,pe_lyr_cut,pe_mrq_cut,pb_lyr,pb_mrq,pcf_ttm_oper,pcf_ttm_ncf,pcf_lyr_oper,pcf_lyr_ncf,ps_ttm,ps_lyr,ps_mrq,peg_lyr,peg_1q,peg_3q,dy_ttm,dy_lfy"
+
+# 收盘时刻（A 股）：与 app/irs/service/option_monitor.py 的 15:00 口径保持一致
+MARKET_CLOSE = time(15, 0)
+
+
+def resolve_daily_end_date(now: datetime | None = None) -> date:
+    """确定「每日估值 / 每日市值」本轮同步的目标交易日（end_date）。
+
+    规则（与 app/irs/service/option_monitor.py:111-128 等价，全项目统一口径）：
+    1. latest = bds_trade_date 中 <= 当日的最大交易日；当日是交易日则为当日，
+       否则为当日前最近交易日。
+    2. 若 latest == 当日（即当日为交易日）且当前时间 < 15:00（未收盘），
+       则退化到当日之前的最近交易日。
+    3. 日历表为空 / 无更早交易日 ⇒ 回落当日（容错）。
+
+    ⚠️ bds_trade_date 含未来交易日（MAX=2026-12-31、约 55 个），必须 `<= today` 截断。
+    """
+    now = now or datetime.now()
+    today = now.date()
+    with SessionLocal() as db:
+        latest = (
+            db.query(func.max(TradeDate.trade_date))
+            .filter(TradeDate.trade_date <= today)
+            .scalar()
+        )
+        if latest is None:
+            return today
+        if latest == today and now.time() < MARKET_CLOSE:
+            prev = (
+                db.query(func.max(TradeDate.trade_date))
+                .filter(TradeDate.trade_date < today)
+                .scalar()
+            )
+            return prev or latest
+        return latest
 
 
 def _fetch_daily_valuation_batched(symbol, start_date, end_date):
@@ -70,6 +105,9 @@ def upsert_daily_valuation_sql(symbols):
     - 数据库无该 symbol 数据：从 EARLIEST_START_DATE（1901-01-01）全量获取，
       gm 会自动截断到该股首个交易日
 
+    目标交易日（end_date）：由 resolve_daily_end_date() 决定 —— 交易日且已收盘
+    （>=15:00）取当日，否则取前一交易日；库内已追平该日即跳过（steps=-2，不调 gm）。
+
     去重规则（按 symbol + trade_date 直接覆盖）：
     - 每日估值无修正概念，无需 pub_date 最新保留逻辑
     - 已有记录：直接更新所有字段
@@ -82,7 +120,9 @@ def upsert_daily_valuation_sql(symbols):
     steps = {}
     errors = {}
     logger.info("估值指标数据获取并导入")
-    end_date = datetime.now().strftime("%Y-%m-%d")
+    # 目标交易日：交易日且已收盘(>=15:00)取当日，否则取前一交易日
+    end_date_dt = resolve_daily_end_date()
+    end_date = end_date_dt.strftime("%Y-%m-%d")
     for symbol in symbols:
         try:
             # 查询数据库中该 symbol 的最大 trade_date，用于增量更新
@@ -95,10 +135,10 @@ def upsert_daily_valuation_sql(symbols):
             # 增量起点：有数据则从最新 trade_date + 1 天，否则从统一起点全量获取
             if max_trade_date is not None:
                 start_date = (max_trade_date + timedelta(days=1)).strftime("%Y-%m-%d")
-                # 边界保护：若 DB 已追平今日，start_date > end_date 会触发 gm "开始时间晚于结束时间"错误
-                if start_date > end_date:
-                    logger.info(f"->{symbol} 已是最新（{max_trade_date}），跳过")
-                    steps[symbol] = 0
+                # 已追平目标交易日则无需调 gm；-2 区别于「gm 返回空」的 0（见 router._build_sync_response）
+                if max_trade_date >= end_date_dt:
+                    logger.info(f"->{symbol} 已是最新（{max_trade_date} ≥ {end_date_dt}），跳过")
+                    steps[symbol] = -2
                     continue
             else:
                 start_date = dbsCfg.EARLIEST_START_DATE
