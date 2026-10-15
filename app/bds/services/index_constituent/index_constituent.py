@@ -15,6 +15,7 @@
 import bisect
 import logging
 import random
+import re
 import time
 from datetime import date, datetime, timedelta
 from typing import Callable, Optional
@@ -43,6 +44,24 @@ MAX_CONSEC_FAIL = 10
 
 # 单次 gm 调用超时（gm 终端未启动时会无限阻塞）
 GM_TIMEOUT = 30
+
+# ---------------------------------------------------------------------------
+# gm 致命错误检测（与 bds/router.py 的批量同步用同一口径）
+# ---------------------------------------------------------------------------
+_GM_FATAL_CODE_RE = re.compile(r'"status"\s*:\s*(\d+)')
+_GM_FATAL_HINTS = ('1001', '无法连接到终端服务', '终端服务', 'TimeoutError', '连接超时',
+                   '无法连接', 'gm 终端', '请检查 gm 终端')
+
+
+def _is_gm_fatal(raw_error: str) -> bool:
+    """判断 gm 错误是否为终端断连等致命错误（需立即中止所有指数回填）。"""
+    if not raw_error:
+        return False
+    m = _GM_FATAL_CODE_RE.search(raw_error)
+    if m and m.group(1) in ('1001', '1002'):
+        return True
+    raw_lower = raw_error.lower()
+    return any(h.lower() in raw_lower for h in _GM_FATAL_HINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +276,11 @@ def upsert_index_constituent_sql(index_codes, start_date: Optional[date] = None,
         counters[code] = _backfill_inner(
             engine, code, this_start, trade_dates, on_progress, stop_event, progress, total)
 
+        # gm 致命错误 → 后续指数不再跑，直接结束
+        if counters[code].get("gm_fatal"):
+            logger.error("[致命] gm 终端不可用，中止剩余指数回填")
+            break
+
     logger.info("指数成分股同步结束：%s", counters)
     return counters
 
@@ -312,10 +336,18 @@ def _backfill_inner(engine, index_code: str, start_date: date, trade_dates: list
             _tick(td)
             continue
 
-        # ---- 调 gm（单日失败不中断整指数）----
+        # ---- 调 gm（单日失败不中断整指数；gm 致命错误立即中止所有指数）----
         try:
             df = _call_gm(index_code, td)
         except Exception as e:
+            raw = str(e)
+            if _is_gm_fatal(raw):
+                # gm 终端断连等致命错误：立即中止，不等 MAX_CONSEC_FAIL
+                result["failed"] += 1
+                result["aborted"] = True
+                result["gm_fatal"] = True
+                logger.error("[致命] gm 终端不可用，中止 %s 回填：%s", index_code, raw[:120])
+                break
             result["failed"] += 1
             consec_fail += 1
             logger.warning("->%s %s 调用失败（连续 %d/%d 次）：%s",

@@ -96,6 +96,7 @@ from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
 # 批量同步后台线程需要的依赖
+import re
 import threading
 from server_fast.sync_runner import TABLES, resolve_symbols, run_tasks
 
@@ -136,19 +137,59 @@ def _run_sync(task_name: str, func) -> dict:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _build_sync_response(symbol: str, steps: dict) -> dict:
+_GM_FATAL_CODE_RE = re.compile(r'"status"\s*:\s*(\d+)')
+_GM_FATAL_HINTS = ('1001', '无法连接到终端服务', '终端服务', 'TimeoutError', '连接超时', '无法连接',
+                   'gm 终端', '请检查 gm 终端')
+
+
+def _is_gm_fatal(raw_error: str) -> bool:
+    """判断 gm 错误是否为终端断连等致命错误（需立即中止批量同步）。"""
+    if not raw_error:
+        return False
+    # 先匹配 gm 结构化错误里的 status 码
+    m = _GM_FATAL_CODE_RE.search(raw_error)
+    if m and m.group(1) in ('1001', '1002'):  # 1001=无法连接, 1002=连接超时
+        return True
+    # 再关键词兜底
+    raw_lower = raw_error.lower()
+    return any(h.lower() in raw_lower for h in _GM_FATAL_HINTS)
+
+
+def _extract_gm_code(raw_error: str) -> int | None:
+    """从 gm 原始错误字符串里提取 status 码。"""
+    if not raw_error:
+        return None
+    m = _GM_FATAL_CODE_RE.search(raw_error)
+    return int(m.group(1)) if m else None
+
+
+def _build_sync_response(symbol: str, steps: dict, errors: dict | None = None) -> dict:
     """根据 steps 中 symbol 对应的保存条数构建同步响应。
 
     - -2：跳过（库内报告期已是最新报告期，未调 gm）
     - -1：同步失败（gm 终端未启动或接口异常）
     - 0：无数据可导入
     - >0：成功导入 count 条
+
+    errors: dict 可选，service 返回的原始错误字典 {symbol: str(e)}。
+            若 errors[symbol] 命中 gm 终端断连，response 会附加 fatal=True + gm_code 字段，
+            调用方（sync_runner）应立即中止整个批量同步。
     """
+    raw = (errors or {}).get(symbol, '') if errors else ''
+    gm_code = _extract_gm_code(raw)
+    fatal = _is_gm_fatal(raw)
+
     count = steps.get(symbol, 0)
     if count == -2:
         return {"status": "no_data", "message": f"已是最新报告期，无需导入：{symbol}"}
     if count == -1:
-        return {"status": "error", "message": f"同步失败：{symbol}，请检查 gm 终端是否启动"}
+        body: dict = {"status": "error"}
+        if fatal:
+            body.update(fatal=True, gm_code=gm_code,
+                        message=f"gm 终端不可用（code={gm_code or '?'}）：{symbol}")
+        else:
+            body.update(message=f"同步失败：{symbol}，请检查 gm 终端是否启动")
+        return body
     if count == 0:
         return {"status": "no_data", "message": f"无数据可导入：{symbol}，请检查 gm 终端是否启动"}
     return {"status": "success", "message": f"同步完成：{symbol}，更新 {count} 条", "steps": steps}
@@ -311,7 +352,7 @@ def sync_index_history():
     """
     try:
         # 调用底层服务函数执行同步，返回各 symbol 的获取条数字典
-        steps = upsert_index_history_sql()
+        steps, _errors = upsert_index_history_sql()
         # 统计实际有更新数据的 symbol 数量（获取条数 > 0 表示有新增数据）
         updated_count = sum(1 for count in steps.values() if count > 0)
         return {"status": "ok", "message": "index-history synced", "updated_count": updated_count}
@@ -609,8 +650,8 @@ def sync_fund_balance(
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_fund_balance_sql([symbol], force=force)
-    return _build_sync_response(symbol, steps)
+    steps, errors = upsert_fund_balance_sql([symbol], force=force)
+    return _build_sync_response(symbol, steps, errors)
 
 
 def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit, offset):
@@ -659,8 +700,8 @@ def sync_fund_income(
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_fund_income_sql([symbol], force=force)
-    return _build_sync_response(symbol, steps)
+    steps, errors = upsert_fund_income_sql([symbol], force=force)
+    return _build_sync_response(symbol, steps, errors)
 
 
 @router.get("/fund-incomes", response_model=PageResponse[FundIncomeOut])
@@ -688,8 +729,8 @@ def sync_fund_cashflow(
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_fund_cashflow_sql([symbol], force=force)
-    return _build_sync_response(symbol, steps)
+    steps, errors = upsert_fund_cashflow_sql([symbol], force=force)
+    return _build_sync_response(symbol, steps, errors)
 
 
 @router.get("/fund-cashflows", response_model=PageResponse[FundCashflowOut])
@@ -717,8 +758,8 @@ def sync_finance_deriv(
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_finance_deriv_sql([symbol], force=force)
-    return _build_sync_response(symbol, steps)
+    steps, errors = upsert_finance_deriv_sql([symbol], force=force)
+    return _build_sync_response(symbol, steps, errors)
 
 
 @router.get("/finance-derivs", response_model=PageResponse[FinanceDerivOut])
@@ -739,8 +780,8 @@ def sync_daily_valuation(symbol: str = Query(..., description="股票代码，�
     """同步估值指标数据，接收单个股票代码，获取并入库。"""
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_daily_valuation_sql([symbol])
-    return _build_sync_response(symbol, steps)
+    steps, errors = upsert_daily_valuation_sql([symbol])
+    return _build_sync_response(symbol, steps, errors)
 
 
 @router.get("/daily-valuations", response_model=PageResponse[DailyValuationOut])
@@ -775,8 +816,8 @@ def sync_daily_mktvalue(symbol: str = Query(..., description="股票代码，精
     """同步每日市值数据，接收单个股票代码，获取并入库。"""
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    steps = upsert_daily_mktvalue_sql([symbol])
-    return _build_sync_response(symbol, steps)
+    steps, errors = upsert_daily_mktvalue_sql([symbol])
+    return _build_sync_response(symbol, steps, errors)
 
 
 @router.get("/daily-mktvalues", response_model=PageResponse[DailyMktvalueOut])
@@ -1138,17 +1179,24 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
             stop_event=stop_event,
         )
 
-        # 5. 收集失败明细
+        # 5. 收集失败明细（error + fatal 都收）
+        fatal_hit = False
         for r in results:
-            if r["status"] == "error":
+            if r["status"] == "fatal":
+                fatal_hit = True
+                errors.append({"symbol": r["symbol"], "table": r["table"],
+                               "message": f"[致命] gm 终端不可用：{r.get('message', '')}"})
+            elif r["status"] == "error":
                 errors.append({"symbol": r["symbol"], "table": r["table"], "message": r.get("message", "")})
 
-        # 6. 结束：检查是否被停止
-        if stop_event is not None and stop_event.is_set():
+        # 6. 结束终态判断（优先级：gm 断连 > 用户停止 > 正常完成）
+        if fatal_hit:
+            task.status = "failed"
+        elif stop_event is not None and stop_event.is_set():
             task.status = "stopped"
         else:
             task.status = "done"
-        task.errors = errors
+        task.errors = errors or None
         task.end_time = date.today()
         db.commit()
         print(f'[batch-sync #{task_id}] {task.status}：success={task.success_count}, no_data={task.no_data_count}, error={task.error_count}')
@@ -1209,16 +1257,26 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
         task.success_count = sum(c.get("saved", 0) for c in counters.values())
         task.no_data_count = sum(c.get("no_data", 0) for c in counters.values())
         task.error_count = sum(c.get("failed", 0) for c in counters.values())
+        gm_fatal_hit = False
         for code, c in counters.items():
-            if c.get("aborted"):
+            if c.get("gm_fatal"):
+                gm_fatal_hit = True
+                errors.append({
+                    "symbol": code,
+                    "table": "index-constituent",
+                    "message": "[致命] gm 终端不可用，回填已中止",
+                })
+            elif c.get("aborted"):
                 errors.append({
                     "symbol": code,
                     "table": "index-constituent",
                     "message": "提前中止（被停止，或连续调用失败超限）",
                 })
 
-        # 终态：被停止 ⇒ stopped；有失败但一条都没入库 ⇒ failed；其余 done（失败明细仍可见）
-        if stop_event is not None and stop_event.is_set():
+        # 终态：gm 断连 > 用户停止 > 全部 error 无 success > 正常完成
+        if gm_fatal_hit:
+            task.status = "failed"
+        elif stop_event is not None and stop_event.is_set():
             task.status = "stopped"
         elif task.error_count and not task.success_count:
             task.status = "failed"

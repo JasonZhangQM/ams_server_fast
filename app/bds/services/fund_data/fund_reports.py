@@ -136,6 +136,7 @@ def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name, force=False
     _mdl = model
     _field_list = fields_str.split(",")
     steps = {}
+    errors = {}
     logger.info(f"{log_name}数据获取并导入")
     end_date = datetime.now().strftime("%Y-%m-%d")
     for symbol in symbols:
@@ -206,9 +207,11 @@ def _upsert_fund_sql(symbols, model, fields_str, api_func, log_name, force=False
             logger.info(f"->{symbol} 成功：{saved_count}")
             steps[symbol] = saved_count
         except Exception as e:
-            logger.error(f"->{symbol} 失败：{str(e)}")
+            raw = str(e)
+            logger.error(f"->{symbol} 失败：{raw}")
             steps[symbol] = -1
-    return steps
+            errors[symbol] = raw[:500]
+    return steps, errors
 
 
 def upsert_fund_balance_sql(symbols, force=False):

@@ -108,6 +108,7 @@ def upsert_index_history_sql():
     _mdl = IndexHistory
     _index_code = dbsCfg.INDEX_CODE
     steps = {}  # 记录每个 symbol 的获取条数
+    errors = {}
     logger.info("指数历史行情获取并导入")
     for symbol, info in _index_code.items():
         try:
@@ -167,7 +168,9 @@ def upsert_index_history_sql():
                 logger.info(f"->{symbol} 无需导入")
                 steps[symbol] = 0
         except Exception as e:
+            raw = str(e)
             # 单步失败不中断后续 symbol，记录错误并继续
-            logger.error(f"->{symbol} 失败：{str(e)}")
+            logger.error(f"->{symbol} 失败：{raw}")
             steps[symbol] = -1
-    return steps
+            errors[symbol] = raw[:500]
+    return steps, errors

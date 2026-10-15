@@ -78,6 +78,7 @@ def upsert_daily_mktvalue_sql(symbols):
     _mdl = DailyMktvalue
     _field_list = DAILY_MKTVALUE_FIELDS.split(",")
     steps = {}
+    errors = {}
     logger.info("市值指标数据获取并导入")
     end_date = datetime.now().strftime("%Y-%m-%d")
     for symbol in symbols:
@@ -135,7 +136,9 @@ def upsert_daily_mktvalue_sql(symbols):
             logger.info(f"->{symbol} 成功：{saved_count}")
             steps[symbol] = saved_count
         except Exception as e:
+            raw = str(e)
             # 单步失败不中断后续 symbol，记录错误并继续
-            logger.error(f"->{symbol} 失败：{str(e)}")
+            logger.error(f"->{symbol} 失败：{raw}")
             steps[symbol] = -1
-    return steps
+            errors[symbol] = raw[:500]
+    return steps, errors

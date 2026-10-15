@@ -17,7 +17,9 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
     '''执行 (symbol, table) 任务列表，返回结果记录列表。
 
     on_progress: 可选回调，签名 fn(symbol, table, status, done_count, total_count)
-    stop_event: 可选 threading.Event，set 后提前中止（最后一次 sync_one 返回后退出循环）
+    stop_event: 可选 threading.Event，set 后提前中止（最后一次 sync_one 返回后跳出）
+
+    返回结果里若含 status='fatal' 表示 gm 终端断连，调用方应将任务标记为 failed。
     '''
     results = []
     total = len(tasks)
@@ -35,6 +37,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
     i = 0
     marked = 0
     stopped = False
+    gm_down = False
     for sym, tables in by_symbol.items():
         sym_statuses = []
         for table in tables:
@@ -50,6 +53,12 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
                 except Exception as exc:
                     # 回调异常不影响主流程（DB 挂了也要继续同步）
                     print(f'  [警告] on_progress 回调异常: {exc}')
+
+            # gm 终端断连 → 立即中止，不等用户 stop_event
+            if res['status'] == 'fatal':
+                gm_down = True
+                print(f'[{i}/{total}] [致命] gm 终端不可用: {sym} {table} → {res["message"][:80]}')
+                break
 
             if res['status'] in ('success', 'no_data'):
                 fail_streak = 0
@@ -80,7 +89,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
                 print(f'[{i}/{total}] {sym} {table:15s} -> {res["status"]:7s} | '
                       f'已用 {elapsed:.0f}s 预计剩余 {eta:.0f}s | {res["message"][:40]}')
 
-        if stopped:
+        if gm_down or stopped:
             break
 
         # 该 symbol 全部表都非 error → 标记当日已同步
@@ -91,7 +100,13 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
             else:
                 print(f'  [警告] {sym} 标记 sync_at 失败：{mk["message"][:60]}')
 
-    prefix = '（已停止）' if stopped else '完成'
+    # 结束日志前缀：gm 断连 > 用户停止 > 正常完成
+    if gm_down:
+        prefix = '（gm 终端不可用，已中止）'
+    elif stopped:
+        prefix = '（已停止）'
+    else:
+        prefix = '完成'
     print(f'{prefix}，用时 {time.time() - t0:.0f}s | 已标记当日同步 {marked} 只 | 本次处理 {len(results)}/{total}')
     return results
 
@@ -99,7 +114,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
 def summarize(results):
     '''打印结果分布 / pivot / 失败明细。
 
-    返回 bool：True=有 error，False=全部 success/no_data。
+    返回 bool：True=有 error/fatal，False=全部 success/no_data。
     '''
     df = pd.DataFrame(results)
     print('本次执行条数:', len(df))
@@ -113,7 +128,7 @@ def summarize(results):
                    .fillna(0).astype(int))
         print(pivot.to_string())
 
-        err = df[df['status'] == 'error']
+        err = df[df['status'].isin(['error', 'fatal'])]
         if not err.empty:
             has_err = True
             print(f'\n失败明细（前 20，共 {len(err)}）：')
