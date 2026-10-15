@@ -20,7 +20,7 @@ TABLES = [
 ]
 
 # ===== 限速：每次 HTTP 请求后随机停顿（秒），避免 gm 接口锁定 =====
-SLEEP_MIN, SLEEP_MAX = 1.0, 3.0
+SLEEP_MIN, SLEEP_MAX = 0.1, 1.0
 
 # ===== 超时 / 重试 =====
 REQUEST_TIMEOUT = 60      # 单只单表超时（秒）。首次全量（1901 起点）可能超过 60s；
