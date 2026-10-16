@@ -262,10 +262,17 @@ def list_symbol_infos(
     exclude_synced_today: bool = Query(
         False, description="为 True 时排除 sync_at 等于当日（服务器本地日）的标的，用于批量同步断点续跑"
     ),
-    include_delisted: bool = Query(
-        False,
-        description="为 True 时包含已实际退市（delisted_date <= 今日）的标的；默认排除。"
-                    "已公告但未到退市日的标的始终保留。",
+    include_delisted: Optional[bool] = Query(
+        None,
+        description="已废弃，保留向后兼容；请使用 trading_status。"
+                    "旧客户端：显式传 True 包含退市，显式传 False 排除退市。"
+                    "新前端不再使用本参数。",
+        deprecated=True,
+    ),
+    trading_status: Optional[str] = Query(
+        None,
+        description="退市状态筛选：trading=仅在市（含已公告未退市）；delisted=仅已实际退市；不传=全部",
+        pattern="^(trading|delisted)$",
     ),
     limit: int = Query(86, ge=1),
     offset: int = Query(0, ge=0),
@@ -284,26 +291,39 @@ def list_symbol_infos(
     query = db.query(SymbolInfo)
     if symbol:
         query = query.filter(SymbolInfo.symbol == symbol)
-    if industry:
-        query = query.filter(SymbolInfo.industry == industry)
-    if market:
+    # 市场 / 板块 / 行业：精确匹配，传 '__EMPTY__' 时筛选 NULL 或空串
+    if market == '__EMPTY__':
+        query = query.filter(or_(SymbolInfo.market.is_(None), SymbolInfo.market == ''))
+    elif market:
         query = query.filter(SymbolInfo.market == market)
-    if board:
+    if board == '__EMPTY__':
+        query = query.filter(or_(SymbolInfo.board.is_(None), SymbolInfo.board == ''))
+    elif board:
         query = query.filter(SymbolInfo.board == board)
-    if not include_delisted:
-        # 排除「已实际退市」的标的：只保留在市（NULL）与已公告未退市（未来日期）。
-        # ⚠️ 判据必须是 <= 今日；不可用 IS NOT NULL（信达/东兴证券的退市日 2026-10-19
-        #    是未来日期、仍在交易），也不可用 != 2038-01-01（gm 占位值已在落库时转 NULL）。
-        #    批量同步的 scope='all' 依赖本默认值，否则会对 338 只退市股反复空跑 gm。
+    if industry == '__EMPTY__':
+        query = query.filter(or_(SymbolInfo.industry.is_(None), SymbolInfo.industry == ''))
+    elif industry:
+        query = query.filter(SymbolInfo.industry == industry)
+    # 退市状态筛选
+    # - trading_status 显式传值时优先：trading=仅在市，delisted=仅退市
+    # - 新前端不传任何参数 → ts=None → 全部
+    # - 旧客户端显式传 include_delisted=False → ts='trading'（保持旧默认：排除退市）
+    today = date.today()
+    if trading_status == 'delisted':
+        query = query.filter(SymbolInfo.delisted_date.isnot(None), SymbolInfo.delisted_date <= today)
+    elif trading_status == 'trading' or (trading_status is None and include_delisted is False):
+        # 显式选了 trading，或旧客户端显式传 include_delisted=False 的兼容
         query = query.filter(
-            or_(SymbolInfo.delisted_date.is_(None), SymbolInfo.delisted_date > date.today())
+            or_(SymbolInfo.delisted_date.is_(None), SymbolInfo.delisted_date > today)
         )
+    # trading_status=None 且 include_delisted 为 None/True → 全部，不过滤
     if keyword:
-        # 关键字对 symbol 和 name 做 OR 模糊匹配，支持输入代码或名称搜索
+        # 关键字对 symbol / name / sec_abbr 做 OR 模糊匹配，支持输入代码、全称、拼音缩写搜索
         query = query.filter(
             or_(
                 SymbolInfo.symbol.contains(keyword),
                 SymbolInfo.name.contains(keyword),
+                SymbolInfo.sec_abbr.contains(keyword),
             )
         )
     if exclude_synced_today:
