@@ -262,13 +262,6 @@ def list_symbol_infos(
     exclude_synced_today: bool = Query(
         False, description="为 True 时排除 sync_at 等于当日（服务器本地日）的标的，用于批量同步断点续跑"
     ),
-    include_delisted: Optional[bool] = Query(
-        None,
-        description="已废弃，保留向后兼容；请使用 trading_status。"
-                    "旧客户端：显式传 True 包含退市，显式传 False 排除退市。"
-                    "新前端不再使用本参数。",
-        deprecated=True,
-    ),
     trading_status: Optional[str] = Query(
         None,
         description="退市状态筛选：trading=仅在市（含已公告未退市）；delisted=仅已实际退市；不传=全部",
@@ -286,7 +279,7 @@ def list_symbol_infos(
     - market / board  → == 精确匹配（取值域固定，前端用常量下拉）
     - keyword         → symbol/name 任一包含即命中（OR，远程搜索保留模糊）
     - exclude_synced_today → 剔除当日已批量同步完成的标的（sync_at 为空或不为当日者保留）
-    - include_delisted     → 默认 False，排除已实际退市标的（见下）
+    - trading_status  → 退市状态筛选：trading=仅在市，delisted=仅已退市，不传=全部（见下）
     """
     query = db.query(SymbolInfo)
     if symbol:
@@ -304,19 +297,17 @@ def list_symbol_infos(
         query = query.filter(or_(SymbolInfo.industry.is_(None), SymbolInfo.industry == ''))
     elif industry:
         query = query.filter(SymbolInfo.industry == industry)
-    # 退市状态筛选
-    # - trading_status 显式传值时优先：trading=仅在市，delisted=仅退市
-    # - 新前端不传任何参数 → ts=None → 全部
-    # - 旧客户端显式传 include_delisted=False → ts='trading'（保持旧默认：排除退市）
+    # 退市状态筛选（三态，无「默认排除退市」的隐式行为）
+    # - trading  = 仅在市（delisted_date 为 NULL，或为未来日期 ⇒ 已公告未退市）
+    # - delisted = 仅已实际退市（delisted_date 已到期）
+    # - 不传     = 全部，不过滤
     today = date.today()
     if trading_status == 'delisted':
         query = query.filter(SymbolInfo.delisted_date.isnot(None), SymbolInfo.delisted_date <= today)
-    elif trading_status == 'trading' or (trading_status is None and include_delisted is False):
-        # 显式选了 trading，或旧客户端显式传 include_delisted=False 的兼容
+    elif trading_status == 'trading':
         query = query.filter(
             or_(SymbolInfo.delisted_date.is_(None), SymbolInfo.delisted_date > today)
         )
-    # trading_status=None 且 include_delisted 为 None/True → 全部，不过滤
     if keyword:
         # 关键字对 symbol / name / sec_abbr 做 OR 模糊匹配，支持输入代码、全称、拼音缩写搜索
         query = query.filter(
@@ -1348,6 +1339,7 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
             index_code=req.index_code,
             max_symbols=req.max_symbols,
             exclude_synced_today=req.exclude_synced_today,
+            trading_status=req.trading_status,
         )
 
         tasks = [(s, t) for s in syms for t in tables]
@@ -1548,6 +1540,12 @@ def run_batch_sync(req: BatchSyncRequest):
             raise HTTPException(status_code=400, detail="scope=industry 时 industry 必填")
         if req.scope == "explicit" and not req.symbols:
             raise HTTPException(status_code=400, detail="scope=explicit 时 symbols 必填")
+        # 退市口径校验（schema 未加 pattern ⇒ 由这里统一返 400，与 scope 的校验方式保持一致）
+        if req.trading_status not in ("trading", "delisted", "all"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"非法 trading_status: {req.trading_status}（应为 trading/delisted/all）",
+            )
 
         # 组装 scope_params
         scope_params = {}
@@ -1564,6 +1562,7 @@ def run_batch_sync(req: BatchSyncRequest):
             tables=req.tables or TABLES,
             mark_synced=1 if req.mark_synced else 0,
             exclude_synced_today=1 if req.exclude_synced_today else 0,
+            trading_status=req.trading_status,
             max_symbols=req.max_symbols,
             status="pending",
             total_count=0,

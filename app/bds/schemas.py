@@ -413,6 +413,11 @@ class BatchSyncRequest(BaseModel):
     tables: Optional[list[str]] = Field(default=None, description="要同步的表列表，默认 6 张全跑")
     mark_synced: bool = Field(default=True, description="全部成功后是否写 sync_at 标记")
     exclude_synced_today: bool = Field(default=False, description="是否跳过当日已同步标的")
+    trading_status: str = Field(
+        default='trading',
+        description="退市口径: trading=仅在市（默认，含已公告未退市）/delisted=仅已退市/all=全部；"
+                    "仅作用于 all/industry/index，explicit 手写清单不做退市过滤",
+    )
     max_symbols: int = Field(default=0, ge=0, description="最多处理几只 symbol: 0=不限")
 
 
@@ -441,6 +446,7 @@ class BdsSyncTaskOut(BaseModel):
     tables: list = Field(description="要同步的表列表")
     mark_synced: int = Field(description="是否写 sync_at: 1=是 0=否")
     exclude_synced_today: int = Field(description="是否跳过当日已同步: 1=是 0=否")
+    trading_status: str = Field(description="退市口径: trading=仅在市/delisted=仅退市/all=全部")
     max_symbols: int = Field(description="最多处理几只 symbol: 0=不限")
     status: str = Field(description="状态: pending/running/done/failed")
     total_count: int = Field(description="任务总数")

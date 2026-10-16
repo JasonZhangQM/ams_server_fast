@@ -623,6 +623,10 @@ class BdsSyncTask(Base, BaseModel):
     tables: Mapped[list] = mapped_column(JSON, nullable=False, comment="要同步的表列表")
     mark_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", comment="全部成功后是否写 sync_at: 1=是 0=否")
     exclude_synced_today: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="是否跳过当日已同步标的: 1=是 0=否")
+    # 退市口径（三态，与 /bds/symbol-infos 的 trading_status 同枚举；不传该端点时=全部）
+    # ⚠️ 列宽 String(8) 刚好容纳 delisted（8 字符）
+    # ⚠️ 仅作用于 all / industry / index；explicit 手写清单=用户显式意图，不做退市过滤
+    trading_status: Mapped[str] = mapped_column(String(8), nullable=False, server_default="trading", comment="退市口径: trading=仅在市/delisted=仅退市/all=全部")
     max_symbols: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="最多处理几只 symbol: 0=不限")
 
     # ---- 任务状态 ----

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """批量同步 CLI 入口。
 
-与 run2-批量同步.ipynb 共用 sync_runner 包的功能函数。
-核心逻辑（限速 / 重试 / 连续失败退避 / 当日标记 / 增量幂等）全部维护一份，
-CLI 和 notebook 两条入口都走同一套，避免维护两份同步逻辑。
+本 CLI 是批量同步的唯一入口（此前的 run2-批量同步.ipynb 已废弃，仓库内不再存在）。
+核心逻辑（限速 / 重试 / 连续失败退避 / 当日标记 / 增量幂等）集中在 sync_runner 包，
+后端后台线程（POST /bds/run/batch-sync）与本 CLI 共用同一套，避免维护两份同步逻辑。
 
 依赖：
   1. 后端已启动：conda run -n fast311 uvicorn server_fast.main:app --host 0.0.0.0 --port 8008
@@ -24,6 +24,23 @@ CLI 和 notebook 两条入口都走同一套，避免维护两份同步逻辑。
 
   # 全市场试跑前 10 只（验证接口通不通，不写 sync_at 避免被标记）
   python run2_batch_sync.py all --max 10 --no-mark-synced
+
+--- 退市口径（--trading-status，默认 trading=仅在市）---
+  作用范围：all / industry / index 三个 scope。
+  ⚠️ explicit 手写清单**不受此参数约束**（填什么跑什么，见下）。
+
+  # 默认：不扫退市股（推荐，与网页端「退市状态=仅在市」一致）
+  python run2_batch_sync.py all --exclude-synced-today
+
+  # 全部：含 338 只已退市股（慎用，会比默认多 2,000+ 个任务）
+  python run2_batch_sync.py all --trading-status all
+
+  # 仅已退市：用于退市股历史数据回补（首次全量、真打 gm、耗时极长）
+  #               勿配 --mark-synced（会把退市股计入「当日已同步」统计）
+  python run2_batch_sync.py all --trading-status delisted --no-mark-synced --max 5
+
+  # 手写清单不受退市口径约束：600001（邯郸钢铁）已退市，仍然照跑
+  python run2_batch_sync.py explicit --symbols SHSE.600001
 
 --- 指数成分股 ---
   # 沪深 300 全部成分 + 跳过当日已同步
@@ -60,12 +77,12 @@ CLI 和 notebook 两条入口都走同一套，避免维护两份同步逻辑。
 子命令与 scope 对照
 ========================================================================
 
-子命令        | scope       | symbol 来源
------------- | ----------- | ------------------------------------------
-all          | all         | bds_symbol_info 全市场股票
-index        | index       | bds_index_constituents 成分股
-industry     | industry    | bds_symbol_info 按 industry 过滤
-explicit     | explicit    | CLI 参数 --symbols 手写清单
+子命令        | scope       | symbol 来源                                | 受 --trading-status 约束
+------------ | ----------- | ------------------------------------------ | ----------------------
+all          | all         | bds_symbol_info 全市场股票                  | 是
+index        | index       | bds_index_constituents 成分股               | 是
+industry     | industry    | bds_symbol_info 按 industry 过滤            | 是
+explicit     | explicit    | CLI 参数 --symbols 手写清单                 | **否**
 
 ========================================================================
 同步状态三态（后端接口 body.status）
@@ -118,6 +135,9 @@ def build_parser():
     def _common(sp):
         sp.add_argument('--tables', nargs='+', default=None,
                         help='覆盖默认表列表（默认全跑 6 张）。例：--tables fund-balance fund-income')
+        sp.add_argument('--trading-status', choices=['trading', 'delisted', 'all'], default='trading',
+                        help='退市口径: trading=仅在市(默认) / delisted=仅已退市 / all=全部。'
+                             '仅作用于 all/industry/index；explicit 手写清单不受此参数约束')
         sp.add_argument('--max', type=int, default=0,
                         help='只取前 N 只 symbol（0=不限）。试跑用，避免一次性打太多 gm 请求')
         sp.add_argument('--exclude-synced-today', action='store_true',
@@ -159,6 +179,7 @@ def main():
         index_code=getattr(args, 'code', ''),
         max_symbols=args.max,
         exclude_synced_today=args.exclude_synced_today,
+        trading_status=args.trading_status,
     )
 
     # --tables 传了就用，没传就用 sync_runner.TABLES 默认值（6 张表全跑）
