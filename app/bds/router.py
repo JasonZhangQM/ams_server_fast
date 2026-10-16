@@ -75,6 +75,9 @@ from server_fast.app.bds.schemas import (
 from server_fast.app.bds.services import (
     fetch_realtime_index_prices,
     insert_trade_date_em_sql,
+    refresh_table_stat,
+    resolve_total,
+    STAT_TABLES,
     upsert_all_gold_reserves_sql,
     upsert_all_daily_indicators_sql,
     upsert_daily_valuation_sql,
@@ -872,18 +875,28 @@ def list_daily_valuations(
     排序规则：trade_date 降序。
     symbol 使用精确匹配（走 uk(symbol, trade_date) 复合索引最左前缀，~3ms），
     原 LIKE '%xxx%' 前导通配无法走 B+Tree 索引，120 万行下需全表扫描 ~7s。
+
+    ⚠️ 无筛选时 total 不数全表（643 万行 COUNT(*) 需 5~8s，占首屏 87%），改读
+    bds_table_stat 缓存（批量同步收尾重算，见 services/table_stat.py）；缓存缺失/过旧
+    则回落 information_schema 估算并置 total_is_estimated=true。有筛选走精确 COUNT(*)。
     """
     query = db.query(DailyValuation)
     if symbol:
         query = query.filter(DailyValuation.symbol == symbol)
     if start_date:
         query = query.filter(DailyValuation.trade_date >= start_date)
-    total = query.count()
+    total, total_estimated = resolve_total(db, query, DailyValuation, bool(symbol or start_date))
     items = (
         query.order_by(DailyValuation.trade_date.desc())
         .offset(offset).limit(limit).all()
     )
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.post("/sync/daily-mktvalue")
@@ -911,18 +924,51 @@ def list_daily_mktvalues(
 
     排序规则：trade_date 降序。
     symbol 使用精确匹配（走 uk(symbol, trade_date) 复合索引最左前缀，~3ms）。
+
+    无筛选时 total 同 /daily-valuations：读 bds_table_stat 缓存，不数全表。
     """
     query = db.query(DailyMktvalue)
     if symbol:
         query = query.filter(DailyMktvalue.symbol == symbol)
     if start_date:
         query = query.filter(DailyMktvalue.trade_date >= start_date)
-    total = query.count()
+    total, total_estimated = resolve_total(db, query, DailyMktvalue, bool(symbol or start_date))
     items = (
         query.order_by(DailyMktvalue.trade_date.desc())
         .offset(offset).limit(limit).all()
     )
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.post("/refresh-table-stat")
+def refresh_table_stat_endpoint(
+    tables: Optional[List[str]] = Query(
+        None, description="同步目标名列表（如 daily-valuation）；留空=全部登记表"
+    ),
+    db: Session = Depends(get_db),
+):
+    """手工重算列表页总数缓存（bds_table_stat）。
+
+    正常由批量同步收尾自动刷新；本端点用于手工校准，例如批量同步没跑而数据已变，
+    或想让「共 N 条」立刻变准（2026-10-16 建立的 L1-b 计数表）。
+
+    ⚠️ 一次全表精确 COUNT(*)：600 万行级每表 5~8s，串行执行。
+    返回 {表名: 精确行数}，如 {"bds_daily_valuation": 6442891}。
+    """
+    if tables:
+        unknown = [t for t in tables if t not in STAT_TABLES]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"未知同步目标名：{unknown}，可选：{list(STAT_TABLES)}",
+            )
+    return {"status": "ok", "tables": refresh_table_stat(db, targets=tables)}
 
 
 @router.get("/economic-indicators", response_model=PageResponse[EconomicIndicatorOut])
@@ -1279,6 +1325,17 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
         task.end_time = date.today()
         db.commit()
         print(f'[batch-sync #{task_id}] {task.status}：success={task.success_count}, no_data={task.no_data_count}, error={task.error_count}')
+
+        # 7. 重算列表页总数缓存（bds_table_stat）：best-effort，失败不影响已成型的任务终态。
+        #    只重算本次批量同步覆盖到的表（两张 6M 日频表各 5~8s，跑批内可忽略）。
+        #    放在终态 commit 之后，前端轮询不会被这段耗时拖住。
+        try:
+            refreshed = refresh_table_stat(db, targets=tables)
+            if refreshed:
+                print(f'[batch-sync #{task_id}] 已重算总数缓存: {refreshed}')
+        except Exception as e:
+            db.rollback()
+            print(f'[batch-sync #{task_id}] 重算总数缓存失败（不影响任务）: {type(e).__name__}: {e}')
 
     except Exception as e:
         # 兜底：线程异常也要把 task 状态置为 failed

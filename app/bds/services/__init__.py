@@ -8,6 +8,7 @@
 - index_constituent/  指数成分
 - symbol_info/        证券信息
 - trade_date/         交易日历
+- table_stat.py       列表页总数缓存（跨数据域：bds_table_stat 读写）
 """
 from server_fast.app.bds.services.trade_date import (
     insert_trade_date_em_sql,
@@ -40,6 +41,11 @@ from server_fast.app.bds.services.macro_data import (
     upsert_all_daily_indicators_sql,
     upsert_daily_indicator_sql,
 )
+from server_fast.app.bds.services.table_stat import (
+    STAT_TABLES,
+    refresh_table_stat,
+    resolve_total,
+)
 
 __all__ = [
     # 交易日历
@@ -67,4 +73,8 @@ __all__ = [
     'upsert_gold_reserve_sql',
     'upsert_all_daily_indicators_sql',
     'upsert_daily_indicator_sql',
+    # 列表页总数缓存（跨数据域）
+    'STAT_TABLES',
+    'refresh_table_stat',
+    'resolve_total',
 ]

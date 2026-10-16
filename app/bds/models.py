@@ -9,7 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import JSON, Date, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, JSON, Date, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
@@ -612,3 +612,29 @@ class BdsSyncTask(Base, BaseModel):
 
     def __str__(self) -> str:
         return f"task-{self.id}({self.scope})"
+
+
+class BdsTableStat(Base, BaseModel):
+    """列表页总数缓存（对应表 bds_table_stat）。
+
+    用途：bds 列表端点的分页 total 若走 `COUNT(*)`，在 600 万行级的日频表
+    （bds_daily_valuation / bds_daily_mktvalue）上无筛选时需 5~8 秒
+    （innodb_buffer_pool_size 仅 128MB，二级索引 ~192MB 全读盘，重复执行不复用），
+    而真正取数只 6ms。本表缓存「表总行数」，无筛选时 O(1) 读到。
+
+    - 写入时机：批量同步收尾重算（+ 手工 POST /bds/refresh-table-stat）
+    - 读取口径：见 services/table_stat.py 的 resolve_total
+    - 统计时间 = BaseModel.update_time（行被重算时刷新），不另设 updated_at 列
+    """
+
+    __tablename__ = "bds_table_stat"
+
+    table_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="目标表名")
+    row_count: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="该表总行数")
+    is_exact: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1", comment="1=精确统计 0=估算"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("table_name", name="uk_bds_table_stat"),
+    )

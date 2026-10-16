@@ -27,6 +27,11 @@ class PageResponse(BaseModel, Generic[T]):
 
     items  - 当前页数据列表
     total  - 满足过滤条件的总记录数（非当前页条数）
+    total_is_estimated - total 是否为估算值
+
+        默认 False（精确）。仅当后端「无筛选 + 表极大」走 bds_table_stat 计数表缓存
+        且缓存缺失/过旧、回落 information_schema 估算时置 True，
+        前端据此把分页器前缀显示为「共 ≈N 条」。
     limit  - 每页条数
     offset - 偏移量
     """
@@ -37,3 +42,4 @@ class PageResponse(BaseModel, Generic[T]):
     total: int
     limit: int
     offset: int
+    total_is_estimated: bool = False
