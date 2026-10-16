@@ -108,6 +108,38 @@ _stop_events: dict[int, threading.Event] = {}
 
 router = APIRouter(prefix="/bds", tags=["bds"])
 
+# 列表接口 offset 上限（护栏，不改变分页语义）
+#
+# 背景：MySQL 的 OFFSET 分页必须先丢弃前 offset 行才能返回本页，代价 O(offset)。
+# 两张 6M 级日频表（bds_daily_valuation / bds_daily_mktvalue）实测在 offset≈9万~10万
+# 处执行计划从 `type=index key=k_dv_td` 退化为 `type=ALL + Using filesort`（扫 636 万行，
+# 与 offset 大小无关），耗时从 2s 跳到 61s；点「最后一页」（offset=6,885,940）更需 142s
+# （全表扫描 31s + filesort ~111s）。前端 axios 默认 10s 超时必然失败，且端点是同步 def，
+# 客户端断开不取消服务端查询 ⇒ 每次点击白占一个连接与线程 142s，连点会冲掉
+# innodb_buffer_pool_size(128MB) 并拖慢其他请求。
+#
+# ⚠️ 取值必须落在执行计划悬崖之前。实测（bds_daily_valuation，6,431,637 行，128MB buffer pool）：
+#   offset=90,000   → type=index  key=k_dv_td            1.81s  ✅ 仍走索引
+#   offset=95,000+  → type=ALL + Using filesort          92s    ❌ 全表扫描 + 完整排序
+# 悬崖精确位置在 90,000~95,000 之间（9 万仍在索引上）。取 50,000：末页实测 0.6~1.3s（两表），
+# 距悬崖留一倍余量，可达深度是 10,000 的 5 倍。曾试 100,000（崖后：末页 86.4s、前端 10s 必超时，
+# 且被放行的正是必然失败的那一页）⇒ 已否，上限必须停在悬崖之前。
+# 另：任一 symbol 的全部历史行数上限 = 交易日总数 8,742，故带 symbol 筛选的请求永不触顶。
+MAX_LIST_OFFSET = 50_000
+
+
+def _guard_list_offset(offset: int) -> None:
+    """拦截过深的 offset（见 MAX_LIST_OFFSET 说明），避免 61~142s 的深翻页查询。"""
+    if offset > MAX_LIST_OFFSET:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"offset 超出上限 {MAX_LIST_OFFSET}（当前 offset={offset}）。"
+                "深翻页需全表扫描，耗时可达数分钟；请用「股票代码」或「交易起始日」"
+                "筛选缩小范围后再翻页。"
+            ),
+        )
+
 
 def _cleanup_zombies(db: Session, minutes: int = 5) -> int:
     """清理僵尸任务（running 状态超过指定分钟数未更新）。返回清理数量。"""
@@ -879,7 +911,9 @@ def list_daily_valuations(
     ⚠️ 无筛选时 total 不数全表（643 万行 COUNT(*) 需 5~8s，占首屏 87%），改读
     bds_table_stat 缓存（批量同步收尾重算，见 services/table_stat.py）；缓存缺失/过旧
     则回落 information_schema 估算并置 total_is_estimated=true。有筛选走精确 COUNT(*)。
+    ⚠️ offset 受 MAX_LIST_OFFSET 护栏限制（深翻页会退化为全表扫描 + filesort）。
     """
+    _guard_list_offset(offset)
     query = db.query(DailyValuation)
     if symbol:
         query = query.filter(DailyValuation.symbol == symbol)
@@ -926,7 +960,9 @@ def list_daily_mktvalues(
     symbol 使用精确匹配（走 uk(symbol, trade_date) 复合索引最左前缀，~3ms）。
 
     无筛选时 total 同 /daily-valuations：读 bds_table_stat 缓存，不数全表。
+    ⚠️ offset 同受 MAX_LIST_OFFSET 护栏限制。
     """
+    _guard_list_offset(offset)
     query = db.query(DailyMktvalue)
     if symbol:
         query = query.filter(DailyMktvalue.symbol == symbol)
