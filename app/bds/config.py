@@ -16,12 +16,21 @@ class Config:
     # 调整起点只改这一处。例外：wscn 日历源起点仍为 2015-01-01（见 economic_indicator.py）
     EARLIEST_START_DATE = "1901-01-01"
 
-    FOLDER_SYMBOL = Path('C:\quant_man\statement\代码信息')
+    FOLDER_SYMBOL = Path(r'C:\quant_man\statement\代码信息')
 
-    MAP_MARKET_CODE = { #代码市场映射
-        '6':'SHSE',
-        '0':'SZSE','3':'SZSE',
-        '4':'BJSE','8':'BJSE','9':'BJSE'
+    # 代码【前两位】-> 交易所：用于把纯 6 位代码补成完整 symbol（如 601398 → SHSE.601398）。
+    # ⚠️ 键是两位（不是首字符）：科创板 68xxxx 与深市 00xxxx 首字符分别为 6 / 0，
+    #    若按首字符匹配就会把科创板误判成沪主板；北交所 920xxx 更需要前两位区分。
+    # 与 services/symbol_info/market_board.py 的板块映射一一对应（60/68→沪、00/30→深、43/83/87/92→北交所）。
+    MAP_MARKET_CODE = { #代码前两位 -> 交易所
+        '60':'SHSE',  # 沪市主板
+        '68':'SHSE',  # 科创板
+        '00':'SZSE',  # 深市主板
+        '30':'SZSE',  # 创业板
+        '43':'BJSE',  # 北交所（老三板遗留代码段）
+        '83':'BJSE',  # 北交所
+        '87':'BJSE',  # 北交所
+        '92':'BJSE'   # 北交所（新代码段，em 当前 353 只全在此段）
     }
     
     INDEX_CODE = { #指数代码映射

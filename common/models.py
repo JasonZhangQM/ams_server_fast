@@ -60,14 +60,18 @@ class BaseModel:
         return dtype_dict
 
     @classmethod
-    def map_fields(cls) -> dict:
-        """将 cols_map_fields 翻转为 {别名: db_field} 字典。
+    def map_fields(cls, fields: dict = None) -> dict:
+        """将 {db_field: [别名...]} 翻转为 {别名: db_field} 字典。
 
         例：{'serial_number': ['成交编号', '合同编号']}
         ----> {'成交编号': 'serial_number', '合同编号': 'serial_number'}
+
+        :param fields: 待翻转的映射字典；为 None（默认）时使用 cls.cols_map_fields。
+            同一模型的多个数据通道若表头不同，可各持一份映射并显式传入，
+            例如 SymbolInfo.map_fields(SymbolInfo.cols_map_fields_gm)。
         """
         field_dict = {}
-        for key, value in cls.cols_map_fields.items():
+        for key, value in (fields if fields is not None else cls.cols_map_fields).items():
             for name in value:
                 field_dict[name] = key
         return field_dict

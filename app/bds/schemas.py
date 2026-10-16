@@ -34,9 +34,9 @@ class SymbolInfoOut(BaseModel):
     symbol: str  # 代码
     name: str  # 名称
     industry: Optional[str] = None  # 所属行业
+    market: Optional[str] = None  # 市场：上交所/深交所/北交所；非 A 股为 NULL
+    board: Optional[str] = None  # 板块：主板/创业板/科创板/北交所；非 A 股为 NULL
     online_date: Optional[date] = None  # 上市日期
-    price: Optional[Decimal] = None  # 最新价
-    rate: Optional[Decimal] = None  # 涨幅%
     pe_lyr: Optional[Decimal] = None  # PE(静)
     pe_ttm: Optional[Decimal] = None  # PE(TTM)
     pb: Optional[Decimal] = None  # PB
@@ -47,6 +47,8 @@ class SymbolInfoOut(BaseModel):
     gpm: Optional[Decimal] = None  # 毛利率(%)
     dar: Optional[Decimal] = None  # 负债率(%)
     latest_rpt_date: Optional[date] = None  # 最新报告期(含快报)
+    sec_abbr: Optional[str] = None  # 拼音缩写（来源 gm）
+    delisted_date: Optional[date] = None  # 退市日期（在市为 NULL；可能为未来日期）
     sync_at: Optional[date] = None  # 同步日期：批量同步完成当日写今日，重跑据此过滤
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间

@@ -69,7 +69,10 @@ def act_sql_engine(engine, sql: str, params=None):
             raise e
 
 
-def upsert_df_to_db(df: pd.DataFrame, table: str, engine, unique_keys: list, update_columns: list = None):
+def upsert_df_to_db(
+    df: pd.DataFrame, table: str, engine, unique_keys: list,
+    update_columns: list = None, keep_columns: list = None,
+):
     """基于联合唯一键执行 UPSERT。
 
     :param df: 待同步 DataFrame
@@ -78,6 +81,11 @@ def upsert_df_to_db(df: pd.DataFrame, table: str, engine, unique_keys: list, upd
     :param unique_keys: 联合唯一键列表（如 ["user_id", "order_no"]）
     :param update_columns: 需更新的列；为 None 时默认更新除联合唯一键外的所有列；
         传空列表 [] 表示仅插入、已存在记录不更新（使用 INSERT IGNORE）
+    :param keep_columns: 「只补空」列；这些列生成的更新表达式为
+        col=COALESCE(col, VALUES(col))，即【已有值优先】，仅当库里该列为 NULL 时才写入新值。
+        为 None（默认）时所有列仍走 col=VALUES(col)，行为与改动前完全一致。
+        用途：gm 通道把 sec_name / listed_date 回填进已有的 name / online_date 时，
+        不得覆盖东财 Excel 已写好的值（否则名称会随两条通道的执行顺序漂移）。
     """
     df = df.replace({np.nan: None})
     columns = df.columns.tolist()
@@ -87,7 +95,11 @@ def upsert_df_to_db(df: pd.DataFrame, table: str, engine, unique_keys: list, upd
     cols_str = ', '.join(columns)
     vals_str = ', '.join([f':{col}' for col in columns])
     if update_columns:  # 有需更新的列：ON DUPLICATE KEY UPDATE
-        update_str = ", ".join([f"{col}=VALUES({col})" for col in update_columns])
+        keep = set(keep_columns or [])
+        update_str = ", ".join([
+            f"{col}=COALESCE({col}, VALUES({col}))" if col in keep else f"{col}=VALUES({col})"
+            for col in update_columns
+        ])
         sql = f'''
             INSERT INTO {table} ({cols_str})
             VALUES ({vals_str})

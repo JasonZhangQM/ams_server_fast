@@ -14,7 +14,9 @@ from server_fast.app.bds.services.trade_date import (
     insert_trade_date_em_sql,
 )
 from server_fast.app.bds.services.symbol_info import (
+    sync_symbol_info_all,
     upsert_symbol_info_excel_sql,
+    upsert_symbol_info_gm_sql,
 )
 from server_fast.app.bds.services.market_data import (
     fetch_realtime_index_prices,
@@ -51,7 +53,9 @@ __all__ = [
     # 交易日历
     'insert_trade_date_em_sql',
     # 证券信息
+    'sync_symbol_info_all',
     'upsert_symbol_info_excel_sql',
+    'upsert_symbol_info_gm_sql',
     # 行情数据
     'fetch_realtime_index_prices',
     'upsert_index_history_sql',

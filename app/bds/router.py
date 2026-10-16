@@ -90,7 +90,7 @@ from server_fast.app.bds.services import (
     upsert_gold_reserve_sql,
     upsert_index_constituent_sql,
     upsert_index_history_sql,
-    upsert_symbol_info_excel_sql,
+    sync_symbol_info_all,
     upsert_daily_indicator_sql,
     plan_index_constituent_backfill,
 )
@@ -256,9 +256,16 @@ def list_trade_dates(
 def list_symbol_infos(
     symbol: Optional[str] = Query(None, description="代码精确匹配（对应 UK 最左前缀）"),
     industry: Optional[str] = Query(None, description="行业精确匹配（list_filter）"),
+    market: Optional[str] = Query(None, description="市场精确匹配：上交所/深交所/北交所"),
+    board: Optional[str] = Query(None, description="板块精确匹配：主板/创业板/科创板/北交所"),
     keyword: Optional[str] = Query(None, description="代码或名称任一模糊匹配（OR，用于远程搜索）"),
     exclude_synced_today: bool = Query(
         False, description="为 True 时排除 sync_at 等于当日（服务器本地日）的标的，用于批量同步断点续跑"
+    ),
+    include_delisted: bool = Query(
+        False,
+        description="为 True 时包含已实际退市（delisted_date <= 今日）的标的；默认排除。"
+                    "已公告但未到退市日的标的始终保留。",
     ),
     limit: int = Query(86, ge=1),
     offset: int = Query(0, ge=0),
@@ -269,14 +276,28 @@ def list_symbol_infos(
     过滤规则：
     - symbol          → == 精确匹配（对应 UK 最左前缀）
     - industry        → == 精确匹配
+    - market / board  → == 精确匹配（取值域固定，前端用常量下拉）
     - keyword         → symbol/name 任一包含即命中（OR，远程搜索保留模糊）
     - exclude_synced_today → 剔除当日已批量同步完成的标的（sync_at 为空或不为当日者保留）
+    - include_delisted     → 默认 False，排除已实际退市标的（见下）
     """
     query = db.query(SymbolInfo)
     if symbol:
         query = query.filter(SymbolInfo.symbol == symbol)
     if industry:
         query = query.filter(SymbolInfo.industry == industry)
+    if market:
+        query = query.filter(SymbolInfo.market == market)
+    if board:
+        query = query.filter(SymbolInfo.board == board)
+    if not include_delisted:
+        # 排除「已实际退市」的标的：只保留在市（NULL）与已公告未退市（未来日期）。
+        # ⚠️ 判据必须是 <= 今日；不可用 IS NOT NULL（信达/东兴证券的退市日 2026-10-19
+        #    是未来日期、仍在交易），也不可用 != 2038-01-01（gm 占位值已在落库时转 NULL）。
+        #    批量同步的 scope='all' 依赖本默认值，否则会对 338 只退市股反复空跑 gm。
+        query = query.filter(
+            or_(SymbolInfo.delisted_date.is_(None), SymbolInfo.delisted_date > date.today())
+        )
     if keyword:
         # 关键字对 symbol 和 name 做 OR 模糊匹配，支持输入代码或名称搜索
         query = query.filter(
@@ -331,8 +352,15 @@ def sync_trade_date():
 
 @router.post("/sync/symbol-info")
 def sync_symbol_info():
-    """同步证券信息（触发 upsert_symbol_info_excel_sql）。"""
-    return _run_sync("symbol-info", upsert_symbol_info_excel_sql)
+    """同步证券信息：东财 Excel + gm 串行执行（前端一个「同步证券信息」按钮）。
+
+    返回 steps 数组，前端 executeSync 会拼成「同步成功：东财Excel:更新N条; gm证券信息:更新M条」。
+    任一通道失败 ⇒ 500（detail 指明通道；已成功通道的写入仍生效，端点幂等、可重跑）。
+    """
+    try:
+        return sync_symbol_info_all()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/sync/mark-synced")

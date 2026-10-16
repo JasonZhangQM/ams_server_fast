@@ -25,11 +25,21 @@ class SymbolInfo(Base, BaseModel):
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, comment="代码")
     name: Mapped[str] = mapped_column(String(32), nullable=False, comment="名称")
     industry: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="所属行业")
+    # ---- 市场 / 板块：由 symbol 前缀推导（services/symbol_info/market_board.py）----
+    # em（东财 Excel）与 gm（get_instruments）两条通道都写；值为 symbol 的纯函数
+    # ⇒ 两通道结果必然相同、无漂移风险，故无需 keep_columns 护栏。
+    # 非 A 股（4 只沪指 + SZSE.399006 + SPX/NDX/NDX100/GC00Y）为 NULL。
+    market: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, comment="市场：上交所/深交所/北交所；非 A 股为 NULL"
+    )
+    board: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, comment="板块：主板/创业板/科创板/北交所；非 A 股为 NULL"
+    )
     online_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="上市日期")
 
-    # ---- 行情/估值指标：除 price 精度为 4 位外，其余均为 Numeric(12, 2) ----
-    price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最新价")
-    rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="涨幅%")
+    # ---- 估值指标：均为 Numeric(12, 2) ----
+    # 本表只放【静态】证券信息；日频行情值（最新价/涨幅/昨收/涨跌停/复权因子）随行情
+    # 每日变化，不落本表（原 price / rate 两列已于 2026-10-16 删除）。
     pe_lyr: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="PE(静)")
     pe_ttm: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="PE(TTM)")
     pb: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True, comment="PB")
@@ -47,6 +57,15 @@ class SymbolInfo(Base, BaseModel):
         Date, nullable=True, comment="报告期：最新报告期(含快报)"
     )
 
+    # ---- gm 补充字段（POST /bds/sync/symbol-info 的 gm 通道写入）----
+    # ⚠️ 本组字段只由 gm 路径维护；东财 Excel 的 df 中不含它们，故
+    #    ON DUPLICATE KEY UPDATE 不会清空（机制同 sync_at，见 MEMORY §1.11）。
+    sec_abbr: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="拼音缩写(gm)")
+    delisted_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True,
+        comment="退市日期；在市为 NULL（gm 占位值 2038-01-01 已转 NULL），可能为未来日期",
+    )
+
     # ---- 批量同步标记 ----
     # 注意：本列不由『东财 Excel 全量 upsert』维护（Excel 无此列），
     # 仅由 POST /bds/sync/mark-synced 写入。upsert_df_to_db 的
@@ -58,15 +77,18 @@ class SymbolInfo(Base, BaseModel):
     )
 
     # ---- 附加类属性：被 BaseModel 的 map_fields() 等方法使用 ----
-    # 字段匹配外部表头：{db_field: [别名...]}
-    cols_map_fields = {
+    # 两条数据通道的表头完全不同，各持一份 {db_field: [别名...]}，
+    # 调用时显式传入：SymbolInfo.map_fields(SymbolInfo.cols_map_fields_em / _gm)
+    # ⚠️ 两份都刻意没有 market / board：它们是 symbol 推导列、不对应任何外部表头，
+    #    加映射反而会让含「市场」/「板块」表头的 Excel 直接覆盖推导值。
+
+    # (1) 代码信息文件夹内的 Excel：东财导出 + 手动添加
+    cols_map_fields_em = {
         "symbol": ["代码"],
         "name": ["名称"],
         "industry": ["所属行业"],
         "online_date": ["上市日期"],
-        "offline_date": ["退市日期"],
-        "price": ["最新", "最新价"],
-        "rate": ["涨幅%"],
+        "delisted_date": ["退市日期"],   # 仅「手动添加」表有该列（东财导出无）
         "pe_lyr": ["市盈率(静)"],
         "pe_ttm": ["市盈率(TTM)"],
         "pb": ["市净率"],
@@ -78,11 +100,20 @@ class SymbolInfo(Base, BaseModel):
         "dar": ["资产负债比率%"],
         "latest_rpt_date": ["最新报告期(含快报)"],
     }
+    # (2) gm get_instruments 的列名 -> 本表字段
+    # sec_name / listed_date 是【回填】进已有的 name / online_date（只补空、不覆盖）
+    cols_map_fields_gm = {
+        "symbol": ["symbol"],
+        "name": ["sec_name"],
+        "online_date": ["listed_date"],
+        "sec_abbr": ["sec_abbr"],
+        "delisted_date": ["delisted_date"],
+    }
     # 唯一键字段列表
     unique_keys = ["symbol"]
-    # 需要 '—' 替换的字段列表
+    # 需要 '—' 替换的字段列表（按本表字段名；实际替换前须先取与 df 的列交集）
     fields_replace = [
-        "online_date", "price", "rate", "pe_lyr", "pe_ttm", "pb", "dy_ttm",
+        "online_date", "delisted_date", "pe_lyr", "pe_ttm", "pb", "dy_ttm",
         "roe", "yoy_in", "yoy_np", "gpm", "dar", "latest_rpt_date",
     ]
 
