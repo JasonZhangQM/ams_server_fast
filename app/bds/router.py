@@ -260,7 +260,13 @@ def list_symbol_infos(
     board: Optional[str] = Query(None, description="板块精确匹配：主板/创业板/科创板/北交所"),
     keyword: Optional[str] = Query(None, description="代码或名称任一模糊匹配（OR，用于远程搜索）"),
     exclude_synced_today: bool = Query(
-        False, description="为 True 时排除 sync_at 等于当日（服务器本地日）的标的，用于批量同步断点续跑"
+        False,
+        description="为 True 时排除 sync_at 等于当日（服务器本地日）的标的，用于批量同步断点续跑（列表页已改用 sync_status）",
+    ),
+    sync_status: Optional[str] = Query(
+        None,
+        description="当日同步状态筛选：synced=仅今日已同步；unsynced=仅今日未同步（含从未同步）；不传=全部",
+        pattern="^(synced|unsynced)$",
     ),
     trading_status: Optional[str] = Query(
         None,
@@ -279,6 +285,7 @@ def list_symbol_infos(
     - market / board  → == 精确匹配（取值域固定，前端用常量下拉）
     - keyword         → symbol/name 任一包含即命中（OR，远程搜索保留模糊）
     - exclude_synced_today → 剔除当日已批量同步完成的标的（sync_at 为空或不为当日者保留）
+    - sync_status     → 当日同步状态：synced=仅今日已同步，unsynced=仅今日未同步，不传=全部（见下）
     - trading_status  → 退市状态筛选：trading=仅在市，delisted=仅已退市，不传=全部（见下）
     """
     query = db.query(SymbolInfo)
@@ -317,6 +324,14 @@ def list_symbol_infos(
                 SymbolInfo.sec_abbr.contains(keyword),
             )
         )
+    # 当日同步状态筛选（三态，与 trading_status 同一风格）
+    # - synced   = 仅今日已批量同步（sync_at == 今日）
+    # - unsynced = 仅今日未同步（sync_at 为 NULL 或早于今日）
+    # - 不传     = 全部，不过滤
+    if sync_status == 'synced':
+        query = query.filter(SymbolInfo.sync_at == today)
+    elif sync_status == 'unsynced':
+        query = query.filter(or_(SymbolInfo.sync_at.is_(None), SymbolInfo.sync_at != today))
     if exclude_synced_today:
         # 只保留「从未标记」或「标记日期早于今日」的标的
         query = query.filter(
