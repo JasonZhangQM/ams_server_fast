@@ -4,13 +4,14 @@
 从 run2-批量同步.ipynb Cell 3 原样抽取，单行逻辑未改。
 """
 
+import random
 import time
 
-from .config import API_BASE, REQUEST_TIMEOUT, MAX_RETRY, RETRY_BACKOFF, SESSION
+from .config import API_BASE, REQUEST_TIMEOUT, MAX_ATTEMPTS, RETRY_BACKOFF, SESSION
 
 
 # gm 终端连接断开 / 终端不可用 的致命错误关键词
-# 命中任何一个就立即终止整个批量同步，不走 MAX_RETRY 重试
+# 命中则本笔不重试直接返回 fatal，是否中止整批由 executor 的熔断计数决定（连续 N 笔才算断连）
 _FATAL_ERROR_HINTS = (
     'gm 终端', 'gm终端', '终端服务',
     'TimeoutError', 'ConnectionError', 'ConnectError',
@@ -31,11 +32,11 @@ def sync_one(symbol, table):
     '''调用单只同步接口，返回 {status, message}。
 
     status: success | no_data | error | fatal
-    fatal 表示 gm 终端连接断开等致命错误——调用方应立即中止整体同步。
+    fatal 表示 gm 终端连接断开等致命错误——本笔不重试；是否中止整批由 executor 判定。
     '''
     url = f'{API_BASE}/bds/sync/{table}'
     last_err = ''
-    for attempt in range(1, MAX_RETRY + 1):
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             r = SESSION.post(url, params={'symbol': symbol}, timeout=REQUEST_TIMEOUT)
             if r.status_code == 200:
@@ -63,8 +64,9 @@ def sync_one(symbol, table):
         if _is_fatal_gm_error(last_err):
             return {'status': 'fatal', 'message': last_err}
 
-        if attempt < MAX_RETRY:
-            time.sleep(RETRY_BACKOFF * attempt)
+        # 指数退避 + 抖动：5s → 10s（抖动避免多笔同时撞回同一时刻）
+        if attempt < MAX_ATTEMPTS:
+            time.sleep(RETRY_BACKOFF * 2 ** (attempt - 1) + random.uniform(0, 1))
     return {'status': 'error', 'message': last_err}
 
 

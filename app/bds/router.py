@@ -273,6 +273,10 @@ def list_symbol_infos(
         description="退市状态筛选：trading=仅在市（含已公告未退市）；delisted=仅已实际退市；不传=全部",
         pattern="^(trading|delisted)$",
     ),
+    only_stock: bool = Query(
+        False,
+        description="为 True 时只返回 A 股个股（market 非空），剔除指数（4 沪指 + 创业板指）与美股/黄金",
+    ),
     limit: int = Query(86, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -287,10 +291,15 @@ def list_symbol_infos(
     - exclude_synced_today → 剔除当日已批量同步完成的标的（sync_at 为空或不为当日者保留）
     - sync_status     → 当日同步状态：synced=仅今日已同步，unsynced=仅今日未同步，不传=全部（见下）
     - trading_status  → 退市状态筛选：trading=仅在市，delisted=仅已退市，不传=全部（见下）
+    - only_stock      → 仅 A 股个股（market 非空）；指数/美股/黄金的 market 恒为 NULL，用于批量同步剔除指数
     """
     query = db.query(SymbolInfo)
     if symbol:
         query = query.filter(SymbolInfo.symbol == symbol)
+    # 仅 A 股个股：market 由 symbol 前缀推导（services/symbol_info/market_board.py），
+    # 指数（4 沪指 + SZSE.399006）与 SPX/NDX/NDX100/GC00Y 恒为 NULL ⇒ 非空即 A 股个股。
+    if only_stock:
+        query = query.filter(SymbolInfo.market.isnot(None))
     # 市场 / 板块 / 行业：精确匹配，传 '__EMPTY__' 时筛选 NULL 或空串
     if market == '__EMPTY__':
         query = query.filter(or_(SymbolInfo.market.is_(None), SymbolInfo.market == ''))
@@ -1396,12 +1405,18 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
         )
 
         # 5. 收集失败明细（error + fatal 都收）
+        #    终态只看 fatal_escalated：零星 fatal 属「疑似断连但未熔断」，归入 done + errors，
+        #    对应动作是「只补失败项」；只有连续 N 笔触发的熔断才是 failed（修终端整体重跑）。
         fatal_hit = False
         for r in results:
             if r["status"] == "fatal":
-                fatal_hit = True
-                errors.append({"symbol": r["symbol"], "table": r["table"],
-                               "message": f"[致命] gm 终端不可用：{r.get('message', '')}"})
+                if r.get("fatal_escalated"):
+                    fatal_hit = True
+                    errors.append({"symbol": r["symbol"], "table": r["table"],
+                                   "message": f"[致命] gm 终端不可用，已熔断中止：{r.get('message', '')}"})
+                else:
+                    errors.append({"symbol": r["symbol"], "table": r["table"],
+                                   "message": f"[gm 异常] 疑似终端断连，未达熔断阈值：{r.get('message', '')}"})
             elif r["status"] == "error":
                 errors.append({"symbol": r["symbol"], "table": r["table"], "message": r.get("message", "")})
 

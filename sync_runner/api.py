@@ -38,16 +38,17 @@ def _filter_market(symbols):
     return out
 
 
-def _allowed_symbols(trading_status, exclude_synced_today):
-    '''返回「允许同步」的 symbol 集合；两个条件都不生效时返回 None（调用方跳过求交）。
+def _allowed_symbols(trading_status, exclude_synced_today, only_stock=True):
+    '''返回「允许同步」的 symbol 集合；条件都不生效时返回 None（调用方跳过求交）。
 
     仅 index 这类「symbol 不来自 bds_symbol_info」的 scope 才需要：
     成分股接口既不返回 delisted_date 也不返回 sync_at，只能取全表集合做交集。
-    退市条件与当日去重在一次分页里拉完（约 6 次请求），避免各拉一轮。
+    退市条件、当日去重、仅个股（剔指数）在一次分页里拉完（约 6 次请求），避免各拉一轮。
     '''
-    if trading_status == 'all' and not exclude_synced_today:
+    if trading_status == 'all' and not exclude_synced_today and not only_stock:
         return None
-    params = {'exclude_synced_today': 1 if exclude_synced_today else 0}
+    params = {'exclude_synced_today': 1 if exclude_synced_today else 0,
+              'only_stock': 1 if only_stock else 0}
     if trading_status != 'all':
         # 端点 pattern 仅收 trading|delisted；'all' = 不加条件 = 不传该参数
         params['trading_status'] = trading_status
@@ -66,7 +67,10 @@ def resolve_symbols(scope, explicit=None, industry='', index_code='', max_symbol
         - all / industry → 条件直接透传给列表端点分页查询
         - index          → 成分接口无该字段，取全表集合求交
         - explicit       → **不参与过滤**（手写清单 = 用户显式意图，系统不二次过滤）
+    仅 A 股个股：除 explicit 外一律只取 market 非空的标的，剔除 5 只指数
+      （SHSE.000001/000300/000852/000905、SZSE.399006）与美股/黄金（market 恒 NULL）。
     '''
+
     if trading_status not in ('trading', 'delisted', 'all'):
         raise ValueError(f'非法 trading_status: {trading_status}（应为 trading/delisted/all）')
 
@@ -74,31 +78,32 @@ def resolve_symbols(scope, explicit=None, industry='', index_code='', max_symbol
     _only_today = 1 if exclude_synced_today else 0
     # 'all' = 不加条件 ⇒ 不传该参数（端点 pattern 仅收 trading|delisted，传 all 会 422）
     _ts = {} if trading_status == 'all' else {'trading_status': trading_status}
+    _os = {'only_stock': 1}   # 仅 A 股个股：财务/行情批量同步不带指数
     raw_total = None
 
     if scope == 'explicit':
-        # 手写清单 = 用户显式意图：不做退市过滤，也不做当日去重（保持既有行为不变）
+        # 手写清单 = 用户显式意图：不做退市过滤、不做当日去重、也不剔指数（保持既有行为不变）
         raw = list(explicit or [])
         note = '手写清单（不做退市过滤）'
 
     elif scope == 'all':
         raw = [it['symbol'] for it in
-               _fetch_paged('/bds/symbol-infos', exclude_synced_today=_only_today, **_ts)]
-        note = f'全市场（bds_symbol_info）| 退市口径={trading_status}'
+               _fetch_paged('/bds/symbol-infos', exclude_synced_today=_only_today, **_ts, **_os)]
+        note = f'全市场（bds_symbol_info，仅 A 股个股）| 退市口径={trading_status}'
         if _only_today:
-            # ⚠️ 必须带同一退市条件，否则 raw_total 含退市股、drop 恒为「退市股数」而非实际跳过数
-            raw_total = _api_get('/bds/symbol-infos', limit=1, offset=0, **_ts).get('total', 0)
+            # ⚠️ 必须带同一退市/个股条件，否则 raw_total 含退市股与指数、drop 恒为「退市股+指数数」而非实际跳过数
+            raw_total = _api_get('/bds/symbol-infos', limit=1, offset=0, **_ts, **_os).get('total', 0)
 
     elif scope == 'industry':
         if not industry:
             raise ValueError('scope=industry 需填 industry 参数')
         raw = [it['symbol'] for it in
                _fetch_paged('/bds/symbol-infos', industry=industry,
-                            exclude_synced_today=_only_today, **_ts)]
-        note = f'行业={industry} | 退市口径={trading_status}'
+                            exclude_synced_today=_only_today, **_ts, **_os)]
+        note = f'行业={industry}（仅 A 股个股）| 退市口径={trading_status}'
         if _only_today:
             raw_total = _api_get('/bds/symbol-infos', industry=industry,
-                                 limit=1, offset=0, **_ts).get('total', 0)
+                                 limit=1, offset=0, **_ts, **_os).get('total', 0)
 
     elif scope == 'index':
         if not index_code:
@@ -112,8 +117,8 @@ def resolve_symbols(scope, explicit=None, industry='', index_code='', max_symbol
             rows = _fetch_paged('/bds/index-constituents', index_code=index_code, trade_date=td)
             raw = [it['symbol'] for it in rows]
             note = f'指数={index_code} @ {td} | 退市口径={trading_status}'
-        # 成分股接口不返回 delisted_date / sync_at ⇒ 取全表集合求交（退市 + 当日去重一次拉完）
-        allowed = _allowed_symbols(trading_status, exclude_synced_today)
+        # 成分股接口不返回 delisted_date / sync_at ⇒ 取全表集合求交（退市 + 当日去重 + 仅个股一次拉完）
+        allowed = _allowed_symbols(trading_status, exclude_synced_today, only_stock=True)
         if allowed is not None:
             raw_total = len(raw)
             raw = [s for s in raw if s in allowed]

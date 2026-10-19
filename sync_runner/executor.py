@@ -9,7 +9,8 @@ import random
 
 import pandas as pd
 
-from .config import SLEEP_MIN, SLEEP_MAX, FAIL_STREAK_LIMIT, FAIL_STREAK_SLEEP
+from .config import (SLEEP_MIN, SLEEP_MAX, FAIL_STREAK_LIMIT, FAIL_STREAK_SLEEP,
+                     FATAL_STREAK_LIMIT, FATAL_STREAK_SLEEP)
 from .sync import sync_one, mark_synced
 
 
@@ -19,7 +20,11 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
     on_progress: 可选回调，签名 fn(symbol, table, status, done_count, total_count)
     stop_event: 可选 threading.Event，set 后提前中止（最后一次 sync_one 返回后跳出）
 
-    返回结果里若含 status='fatal' 表示 gm 终端断连，调用方应将任务标记为 failed。
+    结果契约（fatal 语义，2026-10-18 起）：
+      - status='fatal'：单笔疑似 gm 断连，未达熔断阈值，**不代表整批失败**；
+      - 该条记录额外带 fatal_escalated=True：连续 FATAL_STREAK_LIMIT 笔 fatal 已触发熔断，
+        整批中止，调用方应将任务标记为 failed。
+    调用方判定任务终态请用 any(r.get('fatal_escalated'))，不要再用「存在 status=='fatal'」。
     '''
     results = []
     total = len(tasks)
@@ -34,6 +39,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
 
     t0 = time.time()
     fail_streak = 0
+    fatal_streak = 0   # 连续疑似 gm 断连笔数，任一 success/no_data 清零
     i = 0
     marked = 0
     stopped = False
@@ -54,14 +60,31 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
                     # 回调异常不影响主流程（DB 挂了也要继续同步）
                     print(f'  [警告] on_progress 回调异常: {exc}')
 
-            # gm 终端断连 → 立即中止，不等用户 stop_event
+            # gm 终端断连：单笔只算「疑似」，连续 N 笔才熔断整批
+            # （单笔 fatal 判据是启发式的，一次连接抖动也会命中；见 docs/批量同步重试与gm断连熔断方案_2026-10-17.md §五.方案A）
             if res['status'] == 'fatal':
-                gm_down = True
-                print(f'[{i}/{total}] [致命] gm 终端不可用: {sym} {table} → {res["message"][:80]}')
-                break
+                fatal_streak += 1
+                if fatal_streak >= FATAL_STREAK_LIMIT:
+                    gm_down = True
+                    results[-1]['fatal_escalated'] = True
+                    print(f'[{i}/{total}] [熔断] 连续 {fatal_streak} 笔 gm 不可用: '
+                          f'{sym} {table} → {res["message"][:80]}')
+                    break
+                print(f'[{i}/{total}] [疑似致命 {fatal_streak}/{FATAL_STREAK_LIMIT}] '
+                      f'{sym} {table} → {res["message"][:80]}')
+                # 冷却期同时用作停止信号等待窗口（stop_event.wait 返回 True 表示已 set）
+                if stop_event is not None:
+                    if stop_event.wait(FATAL_STREAK_SLEEP):
+                        stopped = True
+                        print(f'[{i}/{total}] 收到停止信号，中止后续任务')
+                        break
+                else:
+                    time.sleep(FATAL_STREAK_SLEEP)
+                continue
 
             if res['status'] in ('success', 'no_data'):
                 fail_streak = 0
+                fatal_streak = 0
             else:
                 fail_streak += 1
 
