@@ -622,7 +622,9 @@ class BdsSyncTask(Base, BaseModel):
     scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols} 或 {index_codes/start_date}")
     tables: Mapped[list] = mapped_column(JSON, nullable=False, comment="要同步的表列表")
     mark_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", comment="全部成功后是否写 sync_at: 1=是 0=否")
-    exclude_synced_today: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="是否跳过当日已同步标的: 1=是 0=否")
+    # 跳过已同步的「起始日期」语义：剔除 sync_at >= 该日期 的标的（NULL=不跳过）
+    # 取代旧列 exclude_synced_today（只能按「服务器当天」判定，跨夜续跑失效，2026-10-19 删除）
+    exclude_synced_since: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="剔除 sync_at >= 该日期 的标的；NULL=不跳过")
     # 退市口径（三态，与 /bds/symbol-infos 的 trading_status 同枚举；不传该端点时=全部）
     # ⚠️ 列宽 String(8) 刚好容纳 delisted（8 字符）
     # ⚠️ 仅作用于 all / industry / index；explicit 手写清单=用户显式意图，不做退市过滤

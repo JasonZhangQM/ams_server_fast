@@ -33,7 +33,7 @@ from typing import List, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel as PydanticModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, select, text
@@ -254,14 +254,16 @@ def list_trade_dates(
 
 @router.get("/symbol-infos", response_model=PageResponse[SymbolInfoOut])
 def list_symbol_infos(
+    request: Request,  # 仅用于护栏：拦截已删除的旧参数 exclude_synced_today
     symbol: Optional[str] = Query(None, description="代码精确匹配（对应 UK 最左前缀）"),
     industry: Optional[str] = Query(None, description="行业精确匹配（list_filter）"),
     market: Optional[str] = Query(None, description="市场精确匹配：上交所/深交所/北交所"),
     board: Optional[str] = Query(None, description="板块精确匹配：主板/创业板/科创板/北交所"),
     keyword: Optional[str] = Query(None, description="代码或名称任一模糊匹配（OR，用于远程搜索）"),
-    exclude_synced_today: bool = Query(
-        False,
-        description="为 True 时排除 sync_at 等于当日（服务器本地日）的标的，用于批量同步断点续跑（列表页已改用 sync_status）",
+    exclude_synced_since: Optional[date] = Query(
+        None,
+        description="剔除 sync_at >= 该日期（服务器本地日）的标的，用于批量同步断点续跑；"
+                    "不传=不跳过。例：2026-10-18 表示跳过 18 日起已同步的代码",
     ),
     sync_status: Optional[str] = Query(
         None,
@@ -288,11 +290,20 @@ def list_symbol_infos(
     - industry        → == 精确匹配
     - market / board  → == 精确匹配（取值域固定，前端用常量下拉）
     - keyword         → symbol/name 任一包含即命中（OR，远程搜索保留模糊）
-    - exclude_synced_today → 剔除当日已批量同步完成的标的（sync_at 为空或不为当日者保留）
+    - exclude_synced_since → 剔除 sync_at >= 该日期 的标的（sync_at 为空或早于该日期者保留）
     - sync_status     → 当日同步状态：synced=仅今日已同步，unsynced=仅今日未同步，不传=全部（见下）
     - trading_status  → 退市状态筛选：trading=仅在市，delisted=仅已退市，不传=全部（见下）
     - only_stock      → 仅 A 股个股（market 非空）；指数/美股/黄金的 market 恒为 NULL，用于批量同步剔除指数
     """
+    # 护栏：旧参数 exclude_synced_today 已于 2026-10-19 删除。
+    # FastAPI 对未声明的 query 参数是静默忽略 ⇒ 不拦的话旧调用会悄悄退化成「不跳过」，
+    # 把已同步的标的整轮重跑（每只 6 张表空转）。因此显式拒绝并提示改名。
+    if "exclude_synced_today" in request.query_params:
+        raise HTTPException(
+            status_code=400,
+            detail="参数 exclude_synced_today 已删除，请改用 exclude_synced_since=YYYY-MM-DD",
+        )
+
     query = db.query(SymbolInfo)
     if symbol:
         query = query.filter(SymbolInfo.symbol == symbol)
@@ -341,10 +352,10 @@ def list_symbol_infos(
         query = query.filter(SymbolInfo.sync_at == today)
     elif sync_status == 'unsynced':
         query = query.filter(or_(SymbolInfo.sync_at.is_(None), SymbolInfo.sync_at != today))
-    if exclude_synced_today:
-        # 只保留「从未标记」或「标记日期早于今日」的标的
+    if exclude_synced_since:
+        # 只保留「从未标记」或「标记日期早于所选日期」的标的；sync_at 为未来值也按已同步剔除
         query = query.filter(
-            or_(SymbolInfo.sync_at.is_(None), SymbolInfo.sync_at != date.today())
+            or_(SymbolInfo.sync_at.is_(None), SymbolInfo.sync_at < exclude_synced_since)
         )
     total = query.count()  # 应用所有过滤条件后的总记录数
     items = query.offset(offset).limit(limit).all()
@@ -1362,7 +1373,7 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
             industry=req.industry,
             index_code=req.index_code,
             max_symbols=req.max_symbols,
-            exclude_synced_today=req.exclude_synced_today,
+            exclude_synced_since=req.exclude_synced_since,
             trading_status=req.trading_status,
         )
 
@@ -1591,7 +1602,7 @@ def run_batch_sync(req: BatchSyncRequest):
             scope_params=scope_params,
             tables=req.tables or TABLES,
             mark_synced=1 if req.mark_synced else 0,
-            exclude_synced_today=1 if req.exclude_synced_today else 0,
+            exclude_synced_since=req.exclude_synced_since,
             trading_status=req.trading_status,
             max_symbols=req.max_symbols,
             status="pending",

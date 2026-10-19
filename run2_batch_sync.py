@@ -19,8 +19,11 @@
 ========================================================================
 
 --- 全市场 ---
-  # 每天跑一次，跳过当日已同步的标的（靠 bds_symbol_info.sync_at 去重）
-  python run2_batch_sync.py all --exclude-synced-today
+  # 每天跑一次，跳过今天已同步的标的（靠 bds_symbol_info.sync_at 去重）
+  python run2_batch_sync.py all --exclude-synced-since 2026-10-19
+
+  # 跨夜续跑：上一轮跑到一半就断了，选「昨天」把昨天跑完的一并剔除，只补更早的
+  python run2_batch_sync.py all --exclude-synced-since 2026-10-18
 
   # 全市场试跑前 10 只（验证接口通不通，不写 sync_at 避免被标记）
   python run2_batch_sync.py all --max 10 --no-mark-synced
@@ -30,7 +33,7 @@
   ⚠️ explicit 手写清单**不受此参数约束**（填什么跑什么，见下）。
 
   # 默认：不扫退市股（推荐，与网页端「退市状态=仅在市」一致）
-  python run2_batch_sync.py all --exclude-synced-today
+  python run2_batch_sync.py all --exclude-synced-since 2026-10-19
 
   # 全部：含 338 只已退市股（慎用，会比默认多 2,000+ 个任务）
   python run2_batch_sync.py all --trading-status all
@@ -44,7 +47,7 @@
 
 --- 指数成分股 ---
   # 沪深 300 全部成分 + 跳过当日已同步
-  python run2_batch_sync.py index --code SHSE.000300 --exclude-synced-today
+  python run2_batch_sync.py index --code SHSE.000300 --exclude-synced-since 2026-10-19
 
   # 科创 50 前 5 只试跑
   python run2_batch_sync.py index --code SHSE.000688 --max 5
@@ -67,11 +70,12 @@
   python run2_batch_sync.py explicit --symbols SHSE.600519 --no-mark-synced
 
 --- 失败后怎么重跑 ---
-  直接原命令重跑 + 加 --exclude-synced-today：
+  直接原命令重跑 + 加 --exclude-synced-since <当天日期>：
   成功的 symbol 已被 sync_at 标记，会被自动跳过；
   error 的 symbol 没写 sync_at，下次自然被 resolve_symbols 挑出来重跑。
+  若任务跨了夜（昨晚跑的），把日期选成昨天，才能把昨晚跑完的也跳过。
 
-  python run2_batch_sync.py all --exclude-synced-today
+  python run2_batch_sync.py all --exclude-synced-since 2026-10-19
 
 ========================================================================
 子命令与 scope 对照
@@ -107,12 +111,13 @@ error    → 调用失败（HTTP 异常 / gm 锁接口 / 服务端抛异常）
   - 一个 symbol 的全部目标表都返回 success / no_data 才算"当日已同步"
   - 标记写 bds_symbol_info.sync_at = 服务器本地当日
   - error 不标记（防止 gm 未启动时误标）
-  - 下次用 --exclude-synced-today 跳过
+  - 下次用 --exclude-synced-since 2026-10-19 跳过
 ========================================================================
 """
 
 import argparse
 import sys
+from datetime import date
 
 # sync_runner 是批量同步公共包，config / api / sync / executor 四个模块
 # 全部通过 __init__.py re-export，这里按需引入需要直接调用的符号
@@ -140,8 +145,9 @@ def build_parser():
                              '仅作用于 all/industry/index；explicit 手写清单不受此参数约束')
         sp.add_argument('--max', type=int, default=0,
                         help='只取前 N 只 symbol（0=不限）。试跑用，避免一次性打太多 gm 请求')
-        sp.add_argument('--exclude-synced-today', action='store_true',
-                        help='剔除当日已跑过的标的（依据 bds_symbol_info.sync_at == 服务器本地当日）')
+        sp.add_argument('--exclude-synced-since', default=None, metavar='YYYY-MM-DD',
+                        help='剔除 sync_at >= 该日期 的标的（含该日）；不传=不跳过。'
+                             '选今天=只跑今日未同步，选昨天=接着昨天进度续跑（跨夜续跑）')
         sp.add_argument('--no-mark-synced', action='store_true',
                         help='一个 symbol 全部表跑完后不写 sync_at 标记（调试用，防止误标导致下次被跳过）')
 
@@ -172,13 +178,22 @@ def main():
     """
     args = build_parser().parse_args()
 
+    # 日期参数校验：argparse 的 type= 报错信息不够明确，这里手写提示
+    since = None
+    if args.exclude_synced_since:
+        try:
+            since = date.fromisoformat(args.exclude_synced_since)
+        except ValueError:
+            print(f'ERROR: --exclude-synced-since 格式应为 YYYY-MM-DD，收到: {args.exclude_synced_since}')
+            sys.exit(2)
+
     syms = resolve_symbols(
         args.scope,
         explicit=getattr(args, 'symbols', None),
         industry=getattr(args, 'name', ''),
         index_code=getattr(args, 'code', ''),
         max_symbols=args.max,
-        exclude_synced_today=args.exclude_synced_today,
+        exclude_synced_since=since,
         trading_status=args.trading_status,
     )
 

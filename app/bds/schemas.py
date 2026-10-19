@@ -406,13 +406,22 @@ class DailyIndicatorOut(BaseModel):
 class BatchSyncRequest(BaseModel):
     """批量同步任务请求体（POST /bds/run/batch-sync）。"""
 
+    # 拒绝未声明字段：旧参数 exclude_synced_today 已删除，前端/脚本若仍传它，
+    # 默认的 extra='ignore' 会静默丢弃 ⇒ 任务按「不跳过」全量跑（最坏 2.7 万笔空转），
+    # 必须报错而不是无感降级。
+    model_config = ConfigDict(extra='forbid')
+
     scope: str = Field(description="同步范围: all/index/industry/explicit")
     index_code: Optional[str] = Field(default=None, description="scope=index 时填指数代码，如 SHSE.000300")
     industry: Optional[str] = Field(default=None, description="scope=industry 时填行业名，如 银行")
     symbols: Optional[list[str]] = Field(default=None, description="scope=explicit 时填手写清单")
     tables: Optional[list[str]] = Field(default=None, description="要同步的表列表，默认 6 张全跑")
     mark_synced: bool = Field(default=True, description="全部成功后是否写 sync_at 标记")
-    exclude_synced_today: bool = Field(default=False, description="是否跳过当日已同步标的")
+    exclude_synced_since: Optional[date] = Field(
+        default=None,
+        description="剔除 sync_at >= 该日期的标的（YYYY-MM-DD）；None=不跳过。"
+                    "选今天=只跑今日未同步，选昨天=接着昨天进度续跑",
+    )
     trading_status: str = Field(
         default='trading',
         description="退市口径: trading=仅在市（默认，含已公告未退市）/delisted=仅已退市/all=全部；"
@@ -445,7 +454,7 @@ class BdsSyncTaskOut(BaseModel):
     scope_params: Optional[dict] = Field(default=None, description="范围参数")
     tables: list = Field(description="要同步的表列表")
     mark_synced: int = Field(description="是否写 sync_at: 1=是 0=否")
-    exclude_synced_today: int = Field(description="是否跳过当日已同步: 1=是 0=否")
+    exclude_synced_since: Optional[date] = Field(default=None, description="剔除 sync_at >= 该日期 的标的；null=不跳过")
     trading_status: str = Field(description="退市口径: trading=仅在市/delisted=仅退市/all=全部")
     max_symbols: int = Field(description="最多处理几只 symbol: 0=不限")
     status: str = Field(description="状态: pending/running/done/failed")
