@@ -95,9 +95,10 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
                 break
 
             # 按状态分档限速：no_data 是后端预判跳过（纯 DB 查询，未调外部 API），
-            # 无需 1~3s 限速，仅短暂让出 CPU 即可；success / error 保留完整限速。
+            # 无需 1~3s 限速；time.sleep(0) 让出 CPU 时间片给 FastAPI 主线程处理停止请求，
+            # 但不引入硬等，全量跳过场景可大幅提速。
             if res['status'] == 'no_data':
-                time.sleep(0.1)
+                time.sleep(0)
             else:
                 pause = random.uniform(SLEEP_MIN, SLEEP_MAX)
                 if fail_streak >= FAIL_STREAK_LIMIT:

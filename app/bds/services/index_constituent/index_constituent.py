@@ -9,7 +9,7 @@
   **名单发生变化**的交易日留存快照，期间权重漂移不另存；查询某日成分 = 取
   `trade_date <= D` 的最大快照。
 - **起点优先级**：`start_date`（调用方指定）> 库内 `MAX(trade_date)+1`（增量）>
-  `max(listed_date, FLOOR_DATE)`（首次全量）。
+  `listed_date`（首次全量，INDEX_CODE 必须配置）。
 - **入库**走 `upsert_df_to_db`（`ON DUPLICATE KEY UPDATE weight`），天然幂等。
 """
 import bisect
@@ -32,9 +32,6 @@ from server_fast.app.bds.config import Config as dbsCfg
 from server_fast.app.bds.models import IndexConstituent, TradeDate
 
 logger = logging.getLogger("uvicorn.error")
-
-# 回填全局下限：沪深300 发布年，A 股成分股数据较完整的起点
-FLOOR_DATE = date(2005, 1, 1)
 
 # gm 限速：仅在实际调过 gm 后 sleep（实测 gm 单次响应约 120ms，故无需更长的固定间隔）
 SLEEP_MIN, SLEEP_MAX = 0.2, 0.35
@@ -148,9 +145,11 @@ def _incremental_start(session: Session, index_code: str) -> Optional[date]:
 
 
 def _listed_start(info: dict) -> date:
-    """首次全量起点 = max(listed_date, FLOOR_DATE)；未配置 listed_date 则取 FLOOR_DATE。"""
+    """首次全量起点 = 指数自身 listed_date；未配置则报错（INDEX_CODE 必须填上市日）。"""
     listed = _to_date(info.get("listed_date"))
-    return max(listed, FLOOR_DATE) if listed else FLOOR_DATE
+    if listed is None:
+        raise ValueError(f"指数 {info.get('sec_name', info)} 未配置 listed_date，请在 Config.INDEX_CODE 中补齐")
+    return listed
 
 
 def _build_plan(session: Session, targets: list, start_date: Optional[date],
@@ -241,7 +240,7 @@ def upsert_index_constituent_sql(index_codes, start_date: Optional[date] = None,
 
     :param index_codes: 必填，指数代码清单（页面勾选），如 ['SHSE.000300', 'SZSE.399006']
     :param start_date: 回填起点；不传则各指数各自从库内最新 trade_date+1 增量
-        （库中无该指数数据则从 max(listed_date, 2005-01-01) 起）
+        （库中无该指数数据则从 listed_date 起，INDEX_CODE 必须配置）
     :param on_progress: 进度回调 on_progress(index_code, trade_date, done, total)——
         done/total 为**跨指数累计**，供写 bds_sync_task 用
     :param stop_event: threading.Event，置位后跳出循环（当次 gm 调用不可中断）
