@@ -237,9 +237,14 @@ class FundBalance(Base, BaseModel):
     ttl_eqy_pcom: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="归母股东权益合计")
     ttl_eqy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="股东权益合计")
 
-    # 联合唯一约束：按 symbol + rpt_date 去重
+    # 联合唯一约束 + 列表页排序索引（见 docs/财务四表列表页卡顿改进方案_2026-10-19.md）
+    # k_*_rpt：支撑 ORDER BY rpt_date DESC, pub_date DESC, id DESC 的索引前缀；InnoDB 二级索引末尾
+    #   隐含主键 ⇒ 物理序即 (rpt_date, pub_date, id)，配合「先取 id 再回表」可全程走索引，避免 34 万行 filesort
+    # k_*_type_rpt：rpt_type 等值筛选 + 同序排序
     __table_args__ = (
         UniqueConstraint("symbol", "rpt_date", name="uk_bds_fund_balance"),
+        Index("k_bds_fund_balance_rpt", "rpt_date", "pub_date"),
+        Index("k_bds_fund_balance_type_rpt", "rpt_type", "rpt_date", "pub_date"),
     )
 
     # 供 upsert 使用的唯一键
@@ -288,9 +293,11 @@ class FundIncome(Base, BaseModel):
     exp_noper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业外支出")
     ttl_comp_inc: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="综合收益总额")
 
-    # 联合唯一约束：按 symbol + rpt_date 去重
+    # 联合唯一约束 + 列表页排序索引（同 FundBalance）
     __table_args__ = (
         UniqueConstraint("symbol", "rpt_date", name="uk_bds_fund_income"),
+        Index("k_bds_fund_income_rpt", "rpt_date", "pub_date"),
+        Index("k_bds_fund_income_type_rpt", "rpt_type", "rpt_date", "pub_date"),
     )
 
     # 供 upsert 使用的唯一键
@@ -337,9 +344,11 @@ class FundCashflow(Base, BaseModel):
     cash_cash_eq_bgn: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="期初现金及现金等价物余额")
     cash_cash_eq_end: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="期末现金及现金等价物余额")
 
-    # 联合唯一约束：按 symbol + rpt_date 去重
+    # 联合唯一约束 + 列表页排序索引（同 FundBalance）
     __table_args__ = (
         UniqueConstraint("symbol", "rpt_date", name="uk_bds_fund_cashflow"),
+        Index("k_bds_fund_cashflow_rpt", "rpt_date", "pub_date"),
+        Index("k_bds_fund_cashflow_type_rpt", "rpt_type", "rpt_date", "pub_date"),
     )
 
     # 供 upsert 使用的唯一键
@@ -387,9 +396,11 @@ class FinanceDeriv(Base, BaseModel):
     net_prof_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="净利润同比增长率")
     ttl_asset_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="总资产同比增长率")
 
-    # 联合唯一约束：按 symbol + rpt_date 去重
+    # 联合唯一约束 + 列表页排序索引（同 FundBalance）
     __table_args__ = (
         UniqueConstraint("symbol", "rpt_date", name="uk_bds_finance_deriv"),
+        Index("k_bds_finance_deriv_rpt", "rpt_date", "pub_date"),
+        Index("k_bds_finance_deriv_type_rpt", "rpt_type", "rpt_date", "pub_date"),
     )
 
     # 供 upsert 使用的唯一键
