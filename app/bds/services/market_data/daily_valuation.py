@@ -26,8 +26,8 @@ logger = logging.getLogger("uvicorn.error")
 # 估值指标字段列表（gm API fields 参数，20个，不超过限制）
 DAILY_VALUATION_FIELDS = "pe_ttm,pe_lyr,pe_mrq,pe_ttm_cut,pe_lyr_cut,pe_mrq_cut,pb_lyr,pb_mrq,pcf_ttm_oper,pcf_ttm_ncf,pcf_lyr_oper,pcf_lyr_ncf,ps_ttm,ps_lyr,ps_mrq,peg_lyr,peg_1q,peg_3q,dy_ttm,dy_lfy"
 
-# 收盘时刻（A 股）：与 app/irs/service/option_monitor.py 的 15:00 口径保持一致
-MARKET_CLOSE = time(15, 0)
+# 收盘时刻（A 股盘后数据通常 17:00 左右出齐）
+MARKET_CLOSE = time(17, 0)
 
 
 def resolve_daily_end_date(now: datetime | None = None) -> date:
