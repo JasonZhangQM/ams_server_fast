@@ -34,15 +34,18 @@ class Config:
     }
     
     INDEX_CODE = { #指数代码映射
+        # constituent_count：**成分股只数上限**，供成分同步做伪快照拦截（见 index_constituent._judge_change）。
+        # 宽基指数成分数恒定，超过它必然是新旧名单并存；缺 2 只以上必然是 gm 返回缺股。
+        # 不填（None）⇒ 该项不做只数校验（上证指数取全部沪市股票，无固定只数）。
         'SHSE.000001':{'sec_name':'上证指数','market_code':'SHSE','listed_date':'1991-07-15'},
-        'SHSE.000300':{'sec_name':'沪深300','market_code':'SHSE','listed_date':'2005-04-08'},
+        'SHSE.000300':{'sec_name':'沪深300','market_code':'SHSE','listed_date':'2005-04-08','constituent_count':300},
         # 'SHSE.000510':{'sec_name':'中证A500','market_code':'SHSE','listed_date':'2024-09-23'},
-        'SHSE.000905':{'sec_name':'中证500','market_code':'SHSE','listed_date':'2007-01-15'},
-        'SHSE.000852':{'sec_name':'中证1000','market_code':'SHSE','listed_date':'2014-10-17'},
-        'SHSE.000688':{'sec_name':'科创50','market_code':'SHSE','listed_date':'2020-07-23'},
-        'SZSE.399006':{'sec_name':'创业板指','market_code':'SZSE','listed_date':'2010-06-01'},
+        'SHSE.000905':{'sec_name':'中证500','market_code':'SHSE','listed_date':'2007-01-15','constituent_count':500},
+        'SZSE.399006':{'sec_name':'创业板指','market_code':'SZSE','listed_date':'2010-06-01','constituent_count':100},
+        'SHSE.000852':{'sec_name':'中证1000','market_code':'SHSE','listed_date':'2014-10-17','constituent_count':1000},
+        'SHSE.000688':{'sec_name':'科创50','market_code':'SHSE','listed_date':'2020-07-23','constituent_count':50},
         # 美股指数：gm 不支持，通过 yfinance 拉取
-        'SP500':{'sec_name':'S&P 500','market_code':'US','listed_date':'1957-01-01','data_source':'yfinance','yf_ticker':'^GSPC'},
+        # 'SP500':{'sec_name':'S&P 500','market_code':'US','listed_date':'1957-01-01','data_source':'yfinance','yf_ticker':'^GSPC'},
     }
 
     # 收益率指标已拆分至 DAILY_INDICATORS 字典，通过 FRED API 同步到 bds_daily_indicator 表

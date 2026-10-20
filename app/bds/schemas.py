@@ -441,7 +441,56 @@ class IndexConstituentSyncRequest(BaseModel):
         description="本次要处理的指数代码清单（页面勾选），如 ['SHSE.000300', 'SZSE.399006']")
     start_date: Optional[date] = Field(
         default=None,
-        description="回填起点 YYYY-MM-DD；不传=各指数从库内最新 trade_date+1 增量（库空则从 listed_date 起）")
+        description="回填起点 YYYY-MM-DD；不传=各指数从核查水位 checked_to+1 增量"
+                    "（水位未初始化退回库内最新 trade_date+1，库空则从 listed_date 起）")
+
+
+class IndexValuationSyncRequest(BaseModel):
+    """指数估值重算请求体（POST /bds/sync/index-valuation、/bds/run/index-valuation-backfill）。
+
+    两个入口共用：`days` 用于日常增量（重算最近 N 个交易日），`start_date` 用于小窗口重算。
+    ⚠️ 全历史重建（2005 年起，6~11 分钟）请用命令行脚本，HTTP 同步接口会超时。
+    """
+
+    index_codes: Optional[list[str]] = Field(
+        default=None, description="指数代码清单；不传=默认 5 个宽基（不含上证指数）")
+    days: int = Field(default=5, ge=1, le=60, description="增量重算最近 N 个交易日")
+    start_date: Optional[date] = Field(
+        default=None, description="重算起点；传了则覆盖 days（建议只做小窗口）")
+    with_median: bool = Field(
+        default=True, description="是否同时算横截面中位数 pe_median（额外一条窗口函数 SQL，约慢一倍）")
+
+
+class IndexValuationRow(BaseModel):
+    """指数估值原始数据行（对应 bds.IndexValuation 模型，供 /index-valuations/paged 用）。
+
+    与 `/index-valuations`（pivot：`trade_dates[]` + `series{}`，给图表）的区别：
+    本结构是**行式**的，一条记录 = 一个指数的一天，可分页、可按指数/日期筛选、可核对中间量。
+
+    ⚠️ `calc_at` 必须暴露：本表是「可重算的派生表」，补成分快照/财报追溯调整会改写历史行，
+    不标计算时间就没法判断看到的数是哪版算出来的。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int  # 主键
+    index_code: str  # 指数代码
+    sec_name: Optional[str] = None  # 指数名称（不入库，从 Config.INDEX_CODE 查找）
+    trade_date: date  # 交易日期
+    close: Optional[Decimal] = None  # 指数收盘价（来自 bds_index_history）
+    pe_ttm: Optional[Decimal] = None  # 整体法 PE_TTM（亏损计入，主口径）
+    pe_median: Optional[Decimal] = None  # 成分 PE 横截面中位数（仅 PE>0 样本）
+    pb_mrq: Optional[Decimal] = None  # 整体法 PB_MRQ
+    dy_ttm: Optional[Decimal] = None  # 市值加权股息率 TTM(%)
+    mv_total: Optional[Decimal] = None  # 成分总市值合计（元）
+    profit_total: Optional[Decimal] = None  # 成分净利润合计（元，含负值）
+    n_total: Optional[int] = None  # 成分股数（有估值数据）
+    n_valid: Optional[int] = None  # 有效样本数（PE 参与计算）
+    n_loss: Optional[int] = None  # 亏损/无 PE 数
+    snapshot_date: Optional[date] = None  # 所用成分快照日期（可追溯）
+    calc_at: Optional[datetime] = None  # 本行计算时间（重算会刷新）
+    create_time: datetime  # 创建时间
+    update_time: datetime  # 更新时间
 
 
 class BdsSyncTaskOut(BaseModel):
@@ -463,6 +512,9 @@ class BdsSyncTaskOut(BaseModel):
     success_count: int = Field(description="success 数")
     no_data_count: int = Field(description="no_data 数")
     error_count: int = Field(description="error 数")
+    skipped_count: int = Field(default=0, description="skipped 数（名单未变/已存跳过，index_backfill 专用）")
+    dirty_count: int = Field(default=0, description="被拒存日数（疑 gm 伪快照，index_backfill 专用）")
+    aborted_count: int = Field(default=0, description="提前中止的指数个数（index_backfill 专用）")
     progress: Decimal = Field(description="进度% (0-100)")
     errors: Optional[list] = Field(default=None, description="失败明细")
     start_time: Optional[datetime] = Field(default=None, description="实际开始时间")

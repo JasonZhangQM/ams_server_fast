@@ -50,6 +50,7 @@ from server_fast.app.bds.models import (
     FundIncome, 
     GoldReserve, 
     IndexConstituent, 
+    IndexConstituentSync,
     IndexHistory, 
     SymbolInfo, 
     TradeDate,
@@ -69,6 +70,8 @@ from server_fast.app.bds.schemas import (
     IndexConstituentOut,
     IndexConstituentSyncRequest,
     IndexHistoryOut,
+    IndexValuationRow,
+    IndexValuationSyncRequest,
     SymbolInfoOut,
     TradeDateOut,
 )
@@ -95,6 +98,7 @@ from server_fast.app.bds.services import (
     plan_index_constituent_backfill,
 )
 from server_fast.app.bds.config import Config
+from server_fast.app.bds.services import index_valuation
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
@@ -617,8 +621,10 @@ def sync_index_constituent(req: IndexConstituentSyncRequest):
     请求体（JSON）：
     - index_codes: 必填，本次要处理的指数代码清单（前端页面勾选）。后端硬校验：
       空清单 / 未知代码 / `data_source='yfinance'`（如 SP500）→ 400，不静默跳过。
-    - start_date: 可选，回填起点 YYYY-MM-DD。不传则各指数从库内最新 trade_date+1 增量，
-      库中无该指数数据则从 max(listed_date, 2005-01-01) 起；传了则从该日回填到今天。
+    - start_date: 可选，回填起点 YYYY-MM-DD。不传则各指数从**核查水位 `checked_to`+1**
+      增量（水位未初始化退回库内最新 trade_date+1，库中无该指数数据则从 listed_date 起）；
+      传了则从该日回填到今天——传早于当前水位的日期属「历史补录」，水位不回退，
+      若补出新的名单变化会在任务 errors 里提示「需重算该区间指数估值」。
 
     口径：变更键为成分股名单（symbol 集合），只在"名单变化"的交易日留存快照，不存每日权重；
     已存交易日自动跳过（断点续跑安全）。
@@ -1514,12 +1520,19 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
 
         # 进度回调：每次开独立 session，避免长事务；每轮 commit 刷新 update_time，
         # 防止 5 分钟僵尸清理把仍在跑的长任务误标为 failed
-        def on_progress(index_code, trade_date, done_count, total):
+        def on_progress(index_code, trade_date, done_count, total, counts):
             s = SessionLocal()
             try:
                 t = s.query(BdsSyncTask).get(task_id)
                 t.done_count = done_count
                 t.progress = round(done_count / total * 100, 2) if total else 100
+                # 计数必须逐日实时落库：全量回填要跑一两个小时，若只在结束时写，
+                # 前端看到的会是「已完成 N 天」而 saved/skipped/失败 全是 0，像卡死。
+                t.success_count = counts.get("saved", 0)
+                t.skipped_count = counts.get("skipped", 0)
+                t.dirty_count = counts.get("dirty", 0)
+                t.no_data_count = counts.get("no_data", 0)
+                t.error_count = counts.get("failed", 0)
                 s.commit()
             finally:
                 s.close()
@@ -1532,10 +1545,14 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
             stop_event=stop_event,
         )
 
-        # 计数映射：saved=留存快照数（success）、no_data=gm 空返回、failed=失败
+        # 计数映射：saved=留存快照数（success）、skipped=名单未变/已存跳过、
+        # dirty=被拒存的伪快照日、no_data=gm 空返回、failed=失败、aborted=提前中止的指数个数
         task.success_count = sum(c.get("saved", 0) for c in counters.values())
+        task.skipped_count = sum(c.get("skipped", 0) for c in counters.values())
+        task.dirty_count = sum(c.get("dirty", 0) for c in counters.values())
         task.no_data_count = sum(c.get("no_data", 0) for c in counters.values())
         task.error_count = sum(c.get("failed", 0) for c in counters.values())
+        task.aborted_count = sum(1 for c in counters.values() if c.get("aborted"))
         gm_fatal_hit = False
         for code, c in counters.items():
             if c.get("gm_fatal"):
@@ -1551,6 +1568,14 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
                     "table": "index-constituent",
                     "message": "提前中止（被停止，或连续调用失败超限）",
                 })
+            # 历史补录改动了成分 ⇒ 该区间的指数估值必须重算，必须显式提示（不能靠记性）
+            if c.get("reval_from"):
+                errors.append({
+                    "symbol": code,
+                    "table": "index-valuation",
+                    "message": (f"历史成分已变更（{c['reval_from']} ~ {c['reval_to']}，"
+                                f"新增 {c.get('saved', 0)} 个快照），需重算该区间的指数估值"),
+                })
 
         # 终态：gm 断连 > 用户停止 > 全部 error 无 success > 正常完成
         if gm_fatal_hit:
@@ -1565,7 +1590,9 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
         task.end_time = datetime.now()
         db.commit()
         print(f'[index-constituent #{task_id}] {task.status}：saved={task.success_count}, '
-              f'no_data={task.no_data_count}, failed={task.error_count}')
+              f'skipped={task.skipped_count}, dirty={task.dirty_count}, '
+              f'no_data={task.no_data_count}, failed={task.error_count}, '
+              f'aborted={task.aborted_count}')
 
     except Exception as e:
         # 兜底：线程异常也要把 task 状态置为 failed
@@ -1721,3 +1748,141 @@ def stop_batch_sync(task_id: int = Query(..., description="要停止的任务 ID
     ev.set()
     print(f'[batch-sync] 已发送停止信号 task #{task_id}')
     return {"status": "stopping", "message": f"任务 #{task_id} 停止信号已发出，正在等待当前请求返回..."}
+
+# ============================================================================
+# 指数分位（P0-1）与成分核查水位（P0-0）
+# 方案：docs/指数分位方案_2026-10-20.md
+# ============================================================================
+
+@router.get("/index-valuations")
+def list_index_valuations(
+    start_date: Optional[str] = Query(default=None, description="起始日期 YYYY-MM-DD，默认近 10 年"),
+    end_date: Optional[str] = Query(default=None, description="结束日期 YYYY-MM-DD，默认今天"),
+    metric: str = Query(default="pe_ttm", description="指标: pe_ttm / pb_mrq / dy_ttm / pe_median"),
+    index_codes: Optional[List[str]] = Query(default=None, description="指数代码（可多值），不传=默认 5 个宽基"),
+):
+    """指数加权估值日序列（画图用）。
+
+    结构对齐 `/index-cum-returns`：`trade_dates` + `series`，前端可复用图表逻辑。
+    返回里另带 `last_change_dates`（成分名单末次变化日）——它和 `trade_dates` 无关，
+    是「用的成分是哪天确定的」，页面标注新鲜度用。
+    """
+    try:
+        s = date.fromisoformat(start_date) if start_date else None
+        e = date.fromisoformat(end_date) if end_date else None
+        return index_valuation.get_series(index_codes, s, e, metric)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@router.get("/index-valuations/paged", response_model=PageResponse[IndexValuationRow])
+def list_index_valuations_paged(
+    index_codes: Optional[List[str]] = Query(
+        default=None, description="指数代码（可多值，如 ?index_codes=A&index_codes=B），不传=默认 5 个宽基"),
+    start_date: Optional[date] = Query(default=None, description="起始日期 YYYY-MM-DD"),
+    end_date: Optional[date] = Query(default=None, description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """指数估值原始数据（行式分页），供 `/bds/index-valuation` 表格页使用。
+
+    与 `/index-valuations` 的区别：那个是 pivot（`trade_dates[]` + `series{}`）给图表画线，
+    中间量全被压掉；这里**一行 = 一个指数的一天**，保留 `n_total`/`n_valid`/`n_loss`/
+    `snapshot_date`/`calc_at`，可以核对「这个 PE 是怎么算出来的、用的是哪天确认的成分」。
+
+    排序 `trade_date DESC, index_code ASC`：首页固定是「最新交易日 × 5 个指数」，
+    与 `/index-valuation-percentiles` 的当前值对得上。
+    """
+    _guard_list_offset(offset)
+    try:
+        return index_valuation.list_paged(
+            index_codes, start_date, end_date, limit=limit, offset=offset)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@router.get("/index-valuation-percentiles")
+def list_index_valuation_percentiles(
+    index_codes: Optional[List[str]] = Query(default=None, description="指数代码（可多值），不传=默认 5 个宽基"),
+    metric: str = Query(default="pe_ttm", description="指标: pe_ttm / pb_mrq / dy_ttm / pe_median"),
+):
+    """指数分位汇总（卡片/表格用）。
+
+    **分位不落库，实时算**：窗口每天滑动、当前值每天新增，存下来当天有效次日即过期。
+    窗口口径唯一：自然日回溯（3/5/10 年 = 1095/1825/3650 天），不是「最近 N 个交易日」。
+
+    另带 `constituent_stale`：成分核查水位是否落后于估值序列末日（落后则分位可信度打折）。
+    """
+    try:
+        return index_valuation.get_percentiles(index_codes, metric)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@router.post("/sync/index-valuation")
+def sync_index_valuation(req: IndexValuationSyncRequest):
+    """重算最近 N 个交易日的指数估值（幂等，同步执行，通常 2~5 秒）。
+
+    ⚠️ 顺序：应先跑 `/sync/index-constituent` 增量，再跑本接口，否则会用旧成分算新日期。
+    """
+    start = req.start_date or (date.today() - timedelta(days=req.days * 2))
+    try:
+        res = index_valuation.backfill_index_valuation(
+            req.index_codes, start, with_median=req.with_median)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+    return {"start_date": start.isoformat(), "result": res}
+
+
+@router.post("/run/index-valuation-backfill")
+def run_index_valuation_backfill(req: IndexValuationSyncRequest):
+    """小窗口重建指数估值（幂等，同步执行）。
+
+    ⚠️ **全历史重建（2005 年起，6~11 分钟）请用命令行脚本**，本接口是同步的、会超时：
+        python C:/quant_man/scripts/backfill_index_valuation.py
+    """
+    start = req.start_date
+    if start is None:
+        raise HTTPException(status_code=400,
+                            detail="必须传 start_date（小窗口重建）；全历史重建请用命令行脚本")
+    try:
+        res = index_valuation.backfill_index_valuation(
+            req.index_codes, start, with_median=req.with_median)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+    return {"start_date": start.isoformat(), "result": res}
+
+
+@router.get("/index-constituent-sync-status")
+def get_index_constituent_sync_status(db: Session = Depends(get_db)):
+    """各指数成分核查水位（只读，实时聚合）。
+
+    用途：① 批量同步页「成分」卡片顶部摘要；② 估值页成分新鲜度标注；
+    ③ 脏数据体检——`current_rows` 为 0 但 `checked_to` 有值，说明成分行被手工删过
+    （如 SHSE.000001），此时水位行也应当一起删。
+    """
+    counts = dict(
+        db.query(IndexConstituent.index_code, func.count(IndexConstituent.id))
+        .group_by(IndexConstituent.index_code)
+        .all()
+    )
+    rows = db.query(IndexConstituentSync).order_by(IndexConstituentSync.index_code).all()
+
+    items = []
+    for r in rows:
+        info = Config.INDEX_CODE.get(r.index_code, {})
+        items.append({
+            "index_code": r.index_code,
+            "sec_name": info.get("sec_name"),
+            "checked_to": r.checked_to.isoformat() if r.checked_to else None,
+            "last_change_date": r.last_change_date.isoformat() if r.last_change_date else None,
+            "constituent_count": r.constituent_count,
+            "gap_days": r.gap_days,
+            "first_gap": r.first_gap.isoformat() if r.first_gap else None,
+            "no_data_days": r.no_data_days,
+            "dirty_days": r.dirty_days,
+            "first_dirty": r.first_dirty.isoformat() if r.first_dirty else None,
+            "last_check_at": r.last_check_at.strftime("%Y-%m-%d %H:%M:%S") if r.last_check_at else None,
+            "current_rows": counts.get(r.index_code, 0),
+        })
+    return {"items": items, "total": len(items)}

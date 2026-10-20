@@ -199,6 +199,112 @@ class IndexConstituent(Base, BaseModel):
         return f"{self.index_code}-{self.symbol}-{self.trade_date}"
 
 
+class IndexConstituentSync(Base, BaseModel):
+    """指数成分核查水位（对应表 bds_index_constituent_sync，P0-0）。
+
+    ⚠️ **为什么必须单独一张表**：`bds_index_constituent` 按「名单变化」落行（压缩存储），
+    名单没变的交易日**没有行可挂**，于是「已核查到哪天」这个事实无处存放。后果是
+    同步静默失败（gm 超时、进程被杀）与「名单确实未变」的表现完全一致，没人能发现。
+
+    ⚠️ **三个维度必须分开读**：
+    - `checked_to`：已**处理**到哪天（含失败日与拒存日）→ 增量起点 = `checked_to + 1`
+    - `gap_days` / `first_gap`：其中哪些日 gm 调用失败、结果不确定 → 补核查入口
+    - `dirty_days` / `first_dirty`：其中哪些日 gm 返回了名单但被只数校验拒存
+      （疑伪快照：新旧并存 / 缺股 / 回退，见 `index_constituent._judge_change`）
+      → 这些日**没有**成分快照，该日成分回退到上一个干净名单
+
+    ⚠️ **新鲜度只看 `checked_to`**，不能用 `MAX(bds_index_constituent.trade_date)` 代替
+    ——那个值表达的是「末次名单变化日」，不是「核查进度」。
+
+    不变量：`checked_to >= last_change_date`；`gap_days = 0 ⟺ first_gap IS NULL`；
+    `dirty_days = 0 ⟺ first_dirty IS NULL`；
+    `last_change_date = MAX(bds_index_constituent.trade_date)`（成分行被手工删过的指数除外）。
+    """
+
+    __tablename__ = "bds_index_constituent_sync"
+
+    index_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="指数代码")
+    checked_to: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="已处理到的交易日（含未确认日，见 gap_days）")
+    last_change_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="最近一次名单变化（留存快照）的交易日")
+    constituent_count: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="末次确认的成分股数量")
+    gap_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", comment="已处理但结果不确定（失败）的交易日数")
+    first_gap: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="最早一个未确认交易日（补核查入口）")
+    no_data_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0", comment="累计 gm 空返回日数")
+    dirty_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0",
+        comment="被拒存（只数校验不通过、疑伪快照）的交易日数")
+    first_dirty: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="最早一个被拒存的交易日（脏点定位入口）")
+    last_check_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, comment="末次核查时间")
+
+    __table_args__ = (
+        UniqueConstraint("index_code", name="uk_bds_index_constituent_sync_index_code"),
+    )
+
+    unique_keys = ["index_code"]
+
+    def __str__(self) -> str:
+        return f"{self.index_code}-checked_to={self.checked_to}"
+
+
+class IndexValuation(Base, BaseModel):
+    """指数加权估值日序列（对应表 bds_index_valuation，P0-1）。
+
+    口径见 `docs/指数分位方案_2026-10-20.md` §2：PE/PB 用**整体法**
+    `ΣMV / Σ(MV/指标)`（等价于市值加权调和平均，亏损股计入），不是市值加权平均 PE
+    （后者在 000300 上会把 13 倍算成 28 倍）。
+
+    ⚠️ **这是「可重算的派生表」，不是不可变事实表**：补成分快照、个股估值源数据覆盖、
+    财报追溯调整都会改变历史行的值。凡引用历史值必须同时标注 `calc_at`。
+    """
+
+    __tablename__ = "bds_index_valuation"
+
+    index_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="指数代码")
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
+    close: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="指数收盘价（来自 bds_index_history）")
+    pe_ttm: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="整体法 PE_TTM（亏损计入，主口径）")
+    pe_median: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="成分 PE 横截面中位数（仅 PE>0 样本）")
+    pb_mrq: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="整体法 PB_MRQ")
+    dy_ttm: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="市值加权股息率 TTM(%)")
+    mv_total: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 2), nullable=True, comment="成分总市值合计（元）")
+    profit_total: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 2), nullable=True, comment="成分净利润合计（元，含负值）")
+    n_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="成分股数（有估值数据）")
+    n_valid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="有效样本数（PE 参与计算）")
+    n_loss: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="亏损/无 PE 数")
+    snapshot_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="所用成分快照日期（可追溯）")
+    calc_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, comment="本行计算时间（重算会刷新）")
+
+    __table_args__ = (
+        UniqueConstraint("index_code", "trade_date", name="uk_bds_index_valuation_idx_date"),
+        Index("k_bds_index_valuation_trade_date", "trade_date"),
+        # 覆盖索引：序列/分位查询只读这几列，避免 18k 行逐行走主键随机读（128MB buffer pool 下曾 0.9s）
+        Index("k_bds_index_valuation_cover", "index_code", "trade_date",
+              "pe_ttm", "pb_mrq", "dy_ttm", "pe_median"),
+    )
+
+    unique_keys = ["index_code", "trade_date"]
+
+    def __str__(self) -> str:
+        return f"{self.index_code}-{self.trade_date}"
+
+
 class FundBalance(Base, BaseModel):
     """资产负债表模型（对应表 bds_fund_balance）。"""
 
@@ -649,6 +755,16 @@ class BdsSyncTask(Base, BaseModel):
     success_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="success 数")
     no_data_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="no_data 数")
     error_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", comment="error 数")
+    # 仅 index_backfill（成分股）产生下表三列；其余 scope 恒为 0
+    skipped_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0",
+        comment="skipped 数（名单未变或已存跳过，index_backfill 专用）")
+    dirty_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0",
+        comment="被拒存（只数校验不通过、疑 gm 伪快照）的交易日数，index_backfill 专用")
+    aborted_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0",
+        comment="提前中止的指数个数（被停止/连续失败超限，index_backfill 专用）")
     progress: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, server_default="0", comment="进度% (0-100)")
     errors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="失败明细: [{symbol, table, message}]")
 
