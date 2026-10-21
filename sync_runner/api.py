@@ -64,6 +64,8 @@ def resolve_symbols(scope, explicit=None, industry='', index_code='', max_symbol
     已同步判定由后端 /bds/symbol-infos?exclude_synced_since=YYYY-MM-DD 完成，
     依据是 bds_symbol_info.sync_at >= 该日期（sync_at 为空或早于该日期者保留）。
     scope: explicit | all | industry | index
+    index_code: scope=index 时用。str=单指数；list=多指数**取成分合集**（各取自己最新快照求并集）。
+      多个指数下 max_symbols 作用于合集（并集内按指数顺序截断）。
     exclude_synced_since: datetime.date 或 None。None=不跳过；
       今天=只跑今日未同步；昨天=连昨天跑完的一并剔除（跨日续跑）
     trading_status: trading=仅在市（默认，含已公告未退市）| delisted=仅已退市 | all=全部
@@ -110,21 +112,34 @@ def resolve_symbols(scope, explicit=None, industry='', index_code='', max_symbol
                                  limit=1, offset=0, **_ts, **_os).get('total', 0)
 
     elif scope == 'index':
-        if not index_code:
-            raise ValueError('scope=index 需填 index_code 参数')
-        head = _api_get('/bds/index-constituents', index_code=index_code, limit=1, offset=0)
-        items = head.get('items', [])
-        if not items:
-            raw, note = [], f'指数={index_code}（无成分数据）'
-        else:
+        # index_code 兼容单值字符串与列表：列表时各指数取「各自最新快照」的成分，求并集（去重保序）。
+        # 注意各指数最新 trade_date 可能不同（同步进度不齐），不能共用一个日期取成分。
+        codes = [index_code] if isinstance(index_code, str) else list(index_code or [])
+        codes = [c for c in codes if c]
+        if not codes:
+            raise ValueError('scope=index 需填 index_code / index_codes 参数')
+        raw, _seen, used, missing = [], set(), [], []
+        for code in codes:
+            head = _api_get('/bds/index-constituents', index_code=code, limit=1, offset=0)
+            items = head.get('items', [])
+            if not items:
+                missing.append(code)
+                continue
             td = items[0]['trade_date']
-            rows = _fetch_paged('/bds/index-constituents', index_code=index_code, trade_date=td)
-            raw = [it['symbol'] for it in rows]
-            note = f'指数={index_code} @ {td} | 退市口径={trading_status}'
+            rows = _fetch_paged('/bds/index-constituents', index_code=code, trade_date=td)
+            used.append(f'{code}@{td}({len(rows)})')
+            for it in rows:
+                s = it['symbol']
+                if s not in _seen:
+                    _seen.add(s)
+                    raw.append(s)
+        note = f'指数 {len(codes)} 个: {"、".join(used) if used else "无成分数据"} | 退市口径={trading_status}'
+        if missing:
+            note += f' | 无成分数据: {",".join(missing)}'
         # 成分股接口不返回 delisted_date / sync_at ⇒ 取全表集合求交（退市 + 已同步日期 + 仅个股一次拉完）
         allowed = _allowed_symbols(trading_status, exclude_synced_since, only_stock=True)
         if allowed is not None:
-            raw_total = len(raw)
+            raw_total = len(raw)  # 求并集后的合集大小（drop 含退市 + 已同步两类，无法细分）
             raw = [s for s in raw if s in allowed]
 
     else:

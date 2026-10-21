@@ -81,7 +81,7 @@ class IndexConstituentOut(BaseModel):
 
     index_code: str  # 指数代码
     symbol: str  # 成分股代码
-    weight: Optional[Decimal] = None  # 权重
+    weight: Optional[Decimal] = None  # 已弃用（2026-10-21）：仅历史快照残留数值，勿用于计算
     trade_date: date  # 交易日期
     sec_name: Optional[str] = None  # 指数名称（不入库，从 Config.INDEX_CODE 查找）
 
@@ -412,7 +412,15 @@ class BatchSyncRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     scope: str = Field(description="同步范围: all/index/industry/explicit")
-    index_code: Optional[str] = Field(default=None, description="scope=index 时填指数代码，如 SHSE.000300")
+    index_codes: Optional[list[str]] = Field(
+        default=None,
+        description="scope=index 时的指数代码清单（多选，取各指数最新快照成分股的**合集**再同步），"
+                    "如 ['SHSE.000300', 'SZSE.399006']",
+    )
+    index_code: Optional[str] = Field(
+        default=None,
+        description="[兼容保留] scope=index 的单指数写法，等价于 index_codes=[index_code]；新调用请用 index_codes",
+    )
     industry: Optional[str] = Field(default=None, description="scope=industry 时填行业名，如 银行")
     symbols: Optional[list[str]] = Field(default=None, description="scope=explicit 时填手写清单")
     tables: Optional[list[str]] = Field(default=None, description="要同步的表列表，默认 6 张全跑")
@@ -481,10 +489,11 @@ class IndexValuationRow(BaseModel):
     pe_ttm: Optional[Decimal] = None  # 整体法 PE_TTM（亏损计入，主口径）
     pe_median: Optional[Decimal] = None  # 成分 PE 横截面中位数（仅 PE>0 样本）
     pb_mrq: Optional[Decimal] = None  # 整体法 PB_MRQ
-    dy_ttm: Optional[Decimal] = None  # 市值加权股息率 TTM(%)
+    dy_ttm: Optional[Decimal] = None  # 市值加权股息率 TTM(%)，分母含全部成分市值
     mv_total: Optional[Decimal] = None  # 成分总市值合计（元）
     profit_total: Optional[Decimal] = None  # 成分净利润合计（元，含负值）
     n_total: Optional[int] = None  # 成分股数（有估值数据）
+    expected_total: Optional[int] = None  # 该快照应有成分数（覆盖率分母）
     n_valid: Optional[int] = None  # 有效样本数（PE 参与计算）
     n_loss: Optional[int] = None  # 亏损/无 PE 数
     snapshot_date: Optional[date] = None  # 所用成分快照日期（可追溯）

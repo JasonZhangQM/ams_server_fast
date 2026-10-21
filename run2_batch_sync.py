@@ -84,7 +84,8 @@
 子命令        | scope       | symbol 来源                                | 受 --trading-status 约束
 ------------ | ----------- | ------------------------------------------ | ----------------------
 all          | all         | bds_symbol_info 全市场股票                  | 是
-index        | index       | bds_index_constituents 成分股               | 是
+index        | index       | bds_index_constituents 成分股（--code 可多个 | 是
+             |             | 传，多指数取成分**合集**）                   |
 industry     | industry    | bds_symbol_info 按 industry 过滤            | 是
 explicit     | explicit    | CLI 参数 --symbols 手写清单                 | **否**
 
@@ -154,8 +155,10 @@ def build_parser():
     pa = sub.add_parser('all', help='全市场 bds_symbol_info 股票')
     _common(pa)
 
-    pi = sub.add_parser('index', help='指数成分股')
-    pi.add_argument('--code', required=True, help='指数代码，如 SHSE.000300')
+    pi = sub.add_parser('index', help='指数成分股（多个 --code 取成分合集）')
+    pi.add_argument('--code', nargs='+', required=True,
+                    help='指数代码，可多个（空格分隔）。例：--code SHSE.000300 SZSE.399006 '
+                         '⇒ 各取自己最新快照的成分股求合集再同步')
     _common(pi)
 
     pind = sub.add_parser('industry', help='指定行业')

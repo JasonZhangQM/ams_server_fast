@@ -5,7 +5,7 @@
 
 - **指数清单由调用方显式传入**（页面勾选），不再自动遍历 `Config.INDEX_CODE`；
   未知代码 / `data_source='yfinance'` 的指数一律抛 `ValueError`（router 转 400），不静默跳过。
-- **变更键 = 纯 symbol 集合**（weight 只写不比对）。本表按"调仓事件"存储，仅在成分股
+- **变更键 = 纯 symbol 集合**。本表按"调仓事件"存储，仅在成分股
   **名单发生变化**的交易日留存快照，期间权重漂移不另存；查询某日成分 = 取
   `trade_date <= D` 的最大快照。
 - **起点优先级**：`start_date`（调用方指定）> **核查水位 `checked_to+1`**（增量）>
@@ -20,7 +20,11 @@
   抖动（新旧并存 / 缺股 / 回退）的直接证据。超量或缺 2 只以上一律拒存并计入 `dirty_days`；
   缺 1 只放行（拒存会退回更旧的名单，错误反而放大）。基准取「最近一个满编快照」而非上一个
   快照——抖动区内相邻比对会连锁误判。
-- **入库**走 `upsert_df_to_db`（`ON DUPLICATE KEY UPDATE weight`），天然幂等。
+- **入库**走 `upsert_df_to_db`（`INSERT IGNORE`：已存在行不更新任何列），天然幂等。
+- **weight 已弃用**（2026-10-21）：gm 对 300/905/852 恒定返回 0/NaN、399006 仅 3/62 个快照
+  有值，旧逻辑又曾把 NaN 归一化成 0.0 ⇒「没返回」与「权重 0」不可区分，该列没有分析价值。
+  现新增快照一律写 NULL、且不覆盖既有行的 weight。加权分析一律用
+  `bds_daily_mktvalue.tot_mv` 现算（5 指数最新快照命中率 100%）。
 """
 import bisect
 import logging
@@ -324,13 +328,6 @@ def _judge_change(current: set, expect: Optional[int], base: Optional[set]) -> t
 # gm 调用 / 入库
 # ---------------------------------------------------------------------------
 
-def _normalize_weight(weight) -> float:
-    """权重归一化：NaN/None 统一转 0.0，其余保留 4 位小数。"""
-    if weight is None or pd.isna(weight):
-        return 0.0
-    return round(float(weight), 4)
-
-
 def _call_gm(index_code: str, trade_date: date):
     """带超时保护地取指定交易日的成分股（gm 终端未启动时会阻塞，必须有超时）。"""
     return call_with_timeout(stk_get_index_constituents, timeout=GM_TIMEOUT)(
@@ -340,23 +337,28 @@ def _call_gm(index_code: str, trade_date: date):
 
 
 def _save_snapshot(engine, df: pd.DataFrame, trade_date: date) -> int:
-    """把该日全量成分股写入（含当日 weight，即便为 0），走 UK 幂等 upsert。
+    """把该日全量成分股写入，走 UK 幂等 upsert。
+
+    weight 列**已弃用**（2026-10-21）：gm 对 300/905/852 恒定返回 0/NaN、399006 仅少数
+    快照有值，旧逻辑又曾把 NaN 归一化成 0.0（"没返回"与"权重 0"不可区分）⇒ 该列没有分析
+    价值。现在新行一律写 NULL，并用 `update_columns=[]`（INSERT IGNORE）让**已存在的行不被
+    改动**，不再拿 gm 的抖动值覆盖历史。需要权重时用 `bds_daily_mktvalue.tot_mv` 现算。
 
     ⚠️ `trade_date` 必须由调用方传入**循环变量 td**，禁止用 `df` 自带的同名列：
     gm 该列返回的是「成分版本生效日」而非请求日（实测请求 2026-10-20、该列给的是 10-19），
     直接落库会把快照钉到错误日期——轻则产生与前一快照完全重复的冗余行，
     重则让 point-in-time 估值用到不该用的名单。
     """
-    out = df[["index", "symbol", "weight"]].copy()
+    out = df[["index", "symbol"]].copy()
     out = out.rename(columns={"index": "index_code"})
     out["trade_date"] = trade_date
-    out["weight"] = out["weight"].apply(_normalize_weight)
+    out["weight"] = None
     return upsert_df_to_db(
         out,
         IndexConstituent.__table__.name,
         engine,
         unique_keys=["index_code", "symbol", "trade_date"],
-        update_columns=["weight"],
+        update_columns=[],
     )
 
 

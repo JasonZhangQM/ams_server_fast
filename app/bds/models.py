@@ -183,7 +183,11 @@ class IndexConstituent(Base, BaseModel):
 
     index_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="指数代码")
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="成分股代码")
-    weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True, comment="权重")
+    weight: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(10, 4),
+        nullable=True,
+        comment="权重（2026-10-21 弃用：gm 未稳定返回，加权一律用 bds_daily_mktvalue.tot_mv 现算）",
+    )
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
 
     # 联合唯一约束 + trade_date 单列索引
@@ -263,6 +267,12 @@ class IndexValuation(Base, BaseModel):
 
     ⚠️ **这是「可重算的派生表」，不是不可变事实表**：补成分快照、个股估值源数据覆盖、
     财报追溯调整都会改变历史行的值。凡引用历史值必须同时标注 `calc_at`。
+
+    **股息率**分母是全部成分市值（`dy_ttm` 为 NULL 的成分按 0 计入分母）—— 只需把
+    「有分红」的成分放进分母会系统性高估（科创50 +74.7%）。
+
+    **覆盖率门禁**：`n_total / expected_total < 0.98` 的交易日，`pe_ttm`/`pb_mrq`/`dy_ttm`/
+    `pe_median` 一律写 NULL（分位查询自动跳过），避免源端缺股时静默产出偏离值。
     """
 
     __tablename__ = "bds_index_valuation"
@@ -278,12 +288,16 @@ class IndexValuation(Base, BaseModel):
     pb_mrq: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 4), nullable=True, comment="整体法 PB_MRQ")
     dy_ttm: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, comment="市值加权股息率 TTM(%)")
+        Numeric(12, 4), nullable=True,
+        comment="市值加权股息率 TTM(%)=Σ(dy×MV)/ΣMV，分母含全部成分市值（无分红记 0）")
     mv_total: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(20, 2), nullable=True, comment="成分总市值合计（元）")
     profit_total: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(20, 2), nullable=True, comment="成分净利润合计（元，含负值）")
     n_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="成分股数（有估值数据）")
+    expected_total: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        comment="该快照应有成分数（覆盖率分母）；n_total/expected_total < 0.98 时指标留空")
     n_valid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="有效样本数（PE 参与计算）")
     n_loss: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="亏损/无 PE 数")
     snapshot_date: Mapped[Optional[date]] = mapped_column(

@@ -1403,7 +1403,7 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
             req.scope,
             explicit=req.symbols,
             industry=req.industry,
-            index_code=req.index_code,
+            index_code=req.index_codes,  # 多选清单；resolve_symbols 兼容 str / list，list 时取成分合集
             max_symbols=req.max_symbols,
             exclude_synced_since=req.exclude_synced_since,
             trading_status=req.trading_status,
@@ -1628,8 +1628,20 @@ def run_batch_sync(req: BatchSyncRequest):
         # scope 参数校验
         if req.scope not in ("all", "index", "industry", "explicit"):
             raise HTTPException(status_code=400, detail=f"非法 scope: {req.scope}")
-        if req.scope == "index" and not req.index_code:
-            raise HTTPException(status_code=400, detail="scope=index 时 index_code 必填")
+        if req.scope == "index":
+            # 指数多选：index_codes 为准，index_code 单值写法兼容折成列表；
+            # 归一化后写回 req.index_codes ⇒ 后台线程只认这一个字段（不再读 index_code）
+            codes = [c.strip() for c in (req.index_codes or []) if c and c.strip()]
+            if not codes and req.index_code and req.index_code.strip():
+                codes = [req.index_code.strip()]
+            seen, uniq = set(), []
+            for c in codes:
+                if c not in seen:
+                    seen.add(c)
+                    uniq.append(c)
+            if not uniq:
+                raise HTTPException(status_code=400, detail="scope=index 时 index_codes 必填（至少选一个指数）")
+            req.index_codes = uniq
         if req.scope == "industry" and not req.industry:
             raise HTTPException(status_code=400, detail="scope=industry 时 industry 必填")
         if req.scope == "explicit" and not req.symbols:
@@ -1644,7 +1656,8 @@ def run_batch_sync(req: BatchSyncRequest):
         # 组装 scope_params
         scope_params = {}
         if req.scope == "index":
-            scope_params["index_code"] = req.index_code
+            # 多选：存清单而不是单值（前端「运行中回填」按 index_codes 还原勾选）
+            scope_params["index_codes"] = req.index_codes
         elif req.scope == "industry":
             scope_params["industry_name"] = req.industry
         elif req.scope == "explicit":
@@ -1809,8 +1822,11 @@ def list_index_valuation_percentiles(
     """指数分位汇总（卡片/表格用）。
 
     **分位不落库，实时算**：窗口每天滑动、当前值每天新增，存下来当天有效次日即过期。
-    窗口口径唯一：自然日回溯（3/5/10 年 = 1095/1825/3650 天），不是「最近 N 个交易日」。
+    窗口口径唯一：自然日回溯（3/5/10 年 = 1095/1825/3650 天），锚点是各指数最后一个有值的交易日。
 
+    陈旧度：每项带 `as_of`（当前值所属交易日）、`is_stale`、`stale_days`，与顶层
+    `latest_trade_date`（个股估值源末日）比较 —— 估值序列没跟上时必须让页面知道
+    "这是 T-N 的值"，不能当最新值展示。
     另带 `constituent_stale`：成分核查水位是否落后于估值序列末日（落后则分位可信度打折）。
     """
     try:
