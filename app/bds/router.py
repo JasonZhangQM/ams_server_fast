@@ -72,6 +72,7 @@ from server_fast.app.bds.schemas import (
     IndexHistoryOut,
     IndexValuationRow,
     IndexValuationSyncRequest,
+    MacroSyncRequest,
     SymbolInfoOut,
     TradeDateOut,
 )
@@ -93,7 +94,10 @@ from server_fast.app.bds.services import (
     upsert_gold_reserve_sql,
     upsert_index_constituent_sql,
     upsert_index_history_sql,
+    sync_one_index,
     sync_symbol_info_all,
+    upsert_symbol_info_excel_sql,
+    upsert_symbol_info_gm_sql,
     upsert_daily_indicator_sql,
     plan_index_constituent_backfill,
 )
@@ -103,9 +107,12 @@ from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
 # 批量同步后台线程需要的依赖
+import logging
 import re
 import threading
 from server_fast.sync_runner import TABLES, resolve_symbols, run_tasks
+
+logger = logging.getLogger("uvicorn.error")
 
 # 模块级停止信号字典：{task_id: threading.Event}，供 POST /bds/stop/batch-sync 触发
 _stop_events: dict[int, threading.Event] = {}
@@ -1367,7 +1374,7 @@ def sync_daily_indicator(indicator_code: str = Query(..., description="指标代
 def sync_daily_indicators_all():
     """全量同步所有美债收益率指标数据。
 
-    遍历 Config.DAILY_INDICATORS 中 4 个指标代码，逐个调用同步函数。
+    遍历 Config.DAILY_INDICATORS 全部指标（当前 6 个，含 2 个信用利差），逐个调用同步函数。
     单指标失败不中断，返回 steps 包含每个指标的结果。
 
     返回值说明：
@@ -1380,6 +1387,264 @@ def sync_daily_indicators_all():
         return {"status": "success", "message": "美债收益率指标全量同步完成", "steps": steps}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# 一键同步（基础数据 + 宏观数据）：六段固定顺序执行，复用 bds_sync_task 轮询进度
+# 方案：docs/基础数据并入同步卡片方案_2026-10-22.md
+#       docs/宏观同步合并一键顺序执行方案_2026-10-21.md（初版，仅宏观三段）
+#
+# 与各单段端点（/sync/trade-date、/sync/symbol-info、/sync/index-history、
+# /sync/economic-indicator-wscn、/sync/daily-indicators-all、/sync/gold-reserves-all）
+# 的关系：那些端点**原样保留**（各自列表页仍在用），这里只是把它们内部的
+# **单项函数**按固定顺序再串一遍，并逐项写进度。
+#
+# ⚠️ scope 字符串仍是 "macro_sync"（名字已不准，但不能改）：历史任务 #144/#145/#148
+#    都靠它被前端卡片接管，改了历史任务就再也刷不出来。
+# ============================================================================
+
+# 固定执行顺序：基础在前（下游依赖）+ 快 → 慢
+# 实测耗时（2026-10-22 盘前）：trade_date 0.17s / symbol_info 8.5s / index_history 0.22s
+#                             wscn 约 15s / daily 约 13s / gold 20 国约 5.5min（每国 16.4s）
+SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "index_history", "wscn", "daily", "gold"]
+SYNC_STAGE_NAMES = {
+    "trade_date": "交易日历",
+    "symbol_info": "证券信息",
+    "index_history": "指数行情",
+    "wscn": "经济指标（华尔街见闻）",
+    "daily": "美债收益率（FRED）",
+    "gold": "黄金储备（IMF）",
+}
+
+# 前端勾选分组用：基础数据（证券/行情/日历） vs 宏观数据
+SYNC_STAGE_GROUPS = {
+    "trade_date": "basic",
+    "symbol_info": "basic",
+    "index_history": "basic",
+    "wscn": "macro",
+    "daily": "macro",
+    "gold": "macro",
+}
+
+
+def _sync_stage_items(stage: str) -> list:
+    """该段的可计数条目 [(key, 显示名)]。
+
+    - trade_date：原子操作（一年只在跨年时真写库），整体 1 项
+    - symbol_info：东财 Excel / gm 两条通道各 1 项（与 sync_symbol_info_all 的步骤划分一致）
+    - index_history：按 Config.INDEX_CODE 逐指数
+    - wscn：service 内部按自然月分批（首次全量 141 批起）**不可切分** ⇒ 整体 1 项
+    - daily / gold：按配置逐项，与前端 store 列出的条目同源
+    """
+    if stage == "trade_date":
+        return [("trade_date", "交易日历")]
+    if stage == "symbol_info":
+        return [("excel", "东财Excel"), ("gm", "gm证券信息")]
+    if stage == "index_history":
+        return [(code, info.get("sec_name") or code) for code, info in Config.INDEX_CODE.items()]
+    if stage == "wscn":
+        return [("wscn", "全部指标")]
+    if stage == "daily":
+        return [(code, info.get("short_name") or code) for code, info in Config.DAILY_INDICATORS.items()]
+    if stage == "gold":
+        return [(code, info.get("country_name") or code) for code, info in Config.GOLD_RESERVE_COUNTRIES.items()]
+    raise ValueError(f"未知同步段: {stage}")
+
+
+def _run_sync_item(stage: str, key: str) -> int:
+    """执行单项，返回条数（-1=失败）。
+
+    各 service 单项函数内部已 try/except（宏观三个返回 -1，index_history 的
+    sync_one_index 同样返回 -1）；这里再兜一层：任何意外异常都只算该项失败，
+    不得中断整段或整个任务。
+
+    ⚠️ symbol_info 刻意**不走** sync_symbol_info_all()：它的语义是「任一通道失败即抛」，
+    放进一键任务会把东财已写入的五千余条一起算失败。这里两条通道各自计项、各自兜异常。
+    """
+    try:
+        if stage == "trade_date":
+            return insert_trade_date_em_sql()
+        if stage == "symbol_info":
+            if key == "excel":
+                return upsert_symbol_info_excel_sql()
+            return upsert_symbol_info_gm_sql()
+        if stage == "index_history":
+            info = Config.INDEX_CODE.get(key)
+            if not info:
+                return -1
+            return sync_one_index(key, info)
+        if stage == "wscn":
+            return upsert_economic_indicator_from_wscn_sql()
+        if stage == "daily":
+            return upsert_daily_indicator_sql(key)
+        if stage == "gold":
+            return upsert_gold_reserve_sql(key)
+        return -1
+    except Exception as e:
+        print(f"[sync] {stage}/{key} 异常: {type(e).__name__}: {e}")
+        return -1
+
+
+def _run_sync_thread(task_id: int, stages: list):
+    """后台线程：按 stages 固定顺序逐项执行，每完成一项写一次进度。
+
+    与 HTTP 请求完全隔离（自建 SessionLocal）；进度更新另开短 session 并每项 commit，
+    既避免长事务，也刷新 update_time 防止 5 分钟僵尸清理把长任务误标 failed。
+    """
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).get(task_id)
+    errors = []
+    try:
+        task.status = "running"
+        task.start_time = datetime.now()
+        db.commit()
+
+        stop_event = _stop_events.get(task_id)
+        plan = [(s, _sync_stage_items(s)) for s in stages]
+        total = sum(len(items) for _, items in plan)
+
+        # 每段的统计包：result.stages 直接给前端渲染段摘要表
+        stats = {}
+        for s, items in plan:
+            stats[s] = {"key": s, "name": SYNC_STAGE_NAMES[s], "group": SYNC_STAGE_GROUPS[s],
+                        "total": len(items), "done": 0, "ok": 0, "no_data": 0, "error": 0, "rows": 0}
+
+        done = ok = no_data = err = 0
+
+        def flush(current_stage):
+            s = SessionLocal()
+            try:
+                t = s.query(BdsSyncTask).get(task_id)
+                t.done_count = done
+                t.success_count = ok
+                t.no_data_count = no_data
+                t.error_count = err
+                t.progress = round(done / total * 100, 2) if total else 100
+                t.result = {"stages": [stats[k] for k in stages], "stage": current_stage}
+                s.commit()
+            finally:
+                s.close()
+
+        flush(stages[0])
+
+        for stage, items in plan:
+            if stop_event and stop_event.is_set():
+                break
+            for key, _name in items:
+                if stop_event and stop_event.is_set():
+                    break
+                count = _run_sync_item(stage, key)
+                done += 1
+                st = stats[stage]
+                st["done"] += 1
+                if count > 0:
+                    ok += 1
+                    st["ok"] += 1
+                    st["rows"] += count
+                elif count == 0:
+                    no_data += 1
+                    st["no_data"] += 1
+                else:
+                    err += 1
+                    st["error"] += 1
+                    errors.append({
+                        "symbol": key,
+                        "table": SYNC_STAGE_NAMES[stage],
+                        "message": "取数失败（count=-1，详见后端日志）",
+                    })
+                print(f"[sync #{task_id}] {stage}/{key} -> {count} ({done}/{total})")
+                flush(stage)
+
+        stopped = bool(stop_event and stop_event.is_set())
+        task.status = "stopped" if stopped else ("failed" if err else "done")
+        task.done_count = done
+        task.success_count = ok
+        task.no_data_count = no_data
+        task.error_count = err
+        task.progress = round(done / total * 100, 2) if total else 100
+        task.errors = errors or None
+        task.result = {"stages": [stats[k] for k in stages], "stage": None, "stopped": stopped}
+        task.end_time = datetime.now()
+        db.commit()
+        print(f"[sync #{task_id}] {task.status}: {done}/{total} 成功={ok} 无数据={no_data} 失败={err}")
+    except Exception as e:
+        errors.append({"symbol": "", "table": "", "message": f"线程异常: {type(e).__name__}: {e}"})
+        task.status = "failed"
+        task.errors = errors
+        task.end_time = datetime.now()
+        db.commit()
+        print(f"[sync #{task_id}] 失败: {e}")
+    finally:
+        _stop_events.pop(task_id, None)
+        db.close()
+
+
+@router.post("/sync/macro", response_model=BdsSyncTaskOut)
+def sync_macro(req: MacroSyncRequest):
+    """一键同步（后台线程异步执行，返回 task 供轮询进度）。
+
+    请求体：`{"stages": ["symbol_info", "index_history", "wscn", "daily"]}`，只跑传入的段。
+    **执行顺序固定 trade_date → symbol_info → index_history → wscn → daily → gold**，
+    不按入参数组顺序（基础数据是下游依赖，且整体快 → 慢，中途停止的代价最小）。
+
+    进度：`total_count` = 各段条目数之和（trade_date 1 + symbol_info 2 + index_history 每指数 1
+    + wscn 1 + daily 每指标 1 + gold 每国 1），每完成一项 `done_count` +1。
+    `result.stages` 存各段 total/done/ok/no_data/error/rows（含 group 供前端分组），
+    `result.stage` 存当前段 —— wscn 首轮全量时进度条会停在该段，靠它显示"正在跑哪一段"。
+
+    计数口径：`count>0`→success / `count==0`→no_data / `count==-1`→error（同时写 errors 明细）。
+
+    停止：`POST /bds/stop/batch-sync?task_id=<id>`，项间生效（当前项是 HTTP 请求，最坏再等一国约 16s）。
+    ⚠️ 与 /run/batch-sync、/sync/index-constituent 共用 bds_sync_task ⇒ **全局互斥**（有 running 则 409）。
+    """
+    db = next(get_db())
+    try:
+        picked = set(req.stages or [])
+        unknown = picked - set(SYNC_STAGE_ORDER)
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"非法 stages: {sorted(unknown)}（应为 {SYNC_STAGE_ORDER} 的子集）",
+            )
+        # 固定顺序，忽略入参数组顺序
+        stages = [s for s in SYNC_STAGE_ORDER if s in picked]
+        if not stages:
+            raise HTTPException(status_code=400, detail="stages 不能为空（至少选一段）")
+
+        # 清理僵尸任务 + 互斥检查（与批量同步/成分股同步同一口径）
+        _cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        total = sum(len(_sync_stage_items(s)) for s in stages)
+        task = BdsSyncTask(
+            scope="macro_sync",
+            scope_params={"stages": stages},
+            tables=stages,
+            mark_synced=0,
+            trading_status="trading",
+            max_symbols=0,
+            status="pending",
+            total_count=total,
+            done_count=0,
+            success_count=0,
+            no_data_count=0,
+            error_count=0,
+            progress=0,
+            errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        # 注册停止信号（复用 /stop/batch-sync）
+        _stop_events[task.id] = threading.Event()
+        threading.Thread(target=_run_sync_thread, args=(task.id, stages), daemon=True).start()
+        return task
+    finally:
+        db.close()
+
 
 
 # ============================================================================
@@ -1574,7 +1839,8 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
                     "symbol": code,
                     "table": "index-valuation",
                     "message": (f"历史成分已变更（{c['reval_from']} ~ {c['reval_to']}，"
-                                f"新增 {c.get('saved', 0)} 个快照），需重算该区间的指数估值"),
+                                f"新增 {c.get('saved', 0)} 个快照），需重算该区间的指数估值"
+                                f"（批量同步页 →「指数估值重算」卡片，起止日期填该区间）"),
                 })
 
         # 终态：gm 断连 > 用户停止 > 全部 error 无 success > 正常完成
@@ -1606,6 +1872,140 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
     finally:
         _stop_events.pop(task_id, None)
         db.close()
+
+
+def _run_valuation_thread(task_id: int, plan: dict, start_date=None,
+                          end_date=None, with_median: bool = True):
+    """后台线程：逐指数重算指数估值，实时写进度，结束时把审计结果写进 task.result。
+
+    与 `_run_constituent_thread` 同构：自建 SessionLocal、复用 `_stop_events`、
+    每轮 commit 刷新 `update_time`（防 5 分钟僵尸清理把长任务误判为 failed）。
+
+    **为什么逐指数调用而不是一次传全部 codes**：每个指数要用自己的增量起点
+    （`plan["per_index"][code]["start_date"]`）—— 否则落后的指数补不上中间的洞
+    （见 `index_valuation.resolve_incremental_start`）。
+
+    计数口径：`done_count` = 已完成快照区间数；`success_count` = 已算交易日数
+    （= upsert 行数，**含覆盖旧行**，不等于"新增行数"）。
+    覆盖率被门禁拦下**不算失败**，写进 `result.gated` 由前端标黄。
+    """
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).get(task_id)
+    errors = []
+    per_index, gated, aborted_codes = {}, {}, []
+    acc = {"done": 0, "rows": 0}
+    total_ranges = int(plan.get("total_ranges") or 0)
+
+    try:
+        task.status = "running"
+        task.start_time = datetime.now()
+        db.commit()
+
+        def on_stats(code, snap, rows_this, done_this, total_this):
+            """每个快照区间算完调一次；跨指数累加靠 acc（已完结指数的基数）。"""
+            s = SessionLocal()
+            try:
+                t = s.query(BdsSyncTask).get(task_id)
+                d = acc["done"] + done_this
+                t.done_count = d
+                t.success_count = acc["rows"] + rows_this
+                t.progress = round(d / total_ranges * 100, 2) if total_ranges else 100
+                s.commit()
+            finally:
+                s.close()
+
+        stop_event = _stop_events.get(task_id)
+
+        for item in plan["per_index"]:
+            code = item["code"]
+            if stop_event is not None and stop_event.is_set():
+                # 停止后剩余指数**从未开始**：标 skipped 而不是 aborted。
+                # 否则「中止指数 5」会让人以为 5 个都跑了一半（实际只有 1 个被打断）。
+                per_index[code] = {"rows": 0, "ranges": 0, "aborted": False, "skipped": True,
+                                   "gated": [], "start_date": item.get("start_date")}
+                continue
+
+            # 起点一律取 plan 的结果（它已按「两端都空/只传起点/只传终点/都传」分好流），
+            # 这里再判一次 start_date 会与 plan 分叉
+            this_start = (date.fromisoformat(item["start_date"])
+                          if item.get("start_date") else None)
+            try:
+                res = index_valuation.backfill_index_valuation(
+                    [code], start_date=this_start, end_date=end_date,
+                    with_median=with_median, stop_event=stop_event, on_stats=on_stats)
+                r = res.get(code) or {}
+            except Exception as ex:      # 单指数失败不拖垮其余指数
+                logger.exception("指数估值重算失败 %s", code)
+                errors.append({"symbol": code, "table": "index-valuation",
+                               "message": f"{type(ex).__name__}: {ex}"})
+                per_index[code] = {"rows": 0, "ranges": 0, "aborted": False, "gated": [],
+                                   "start_date": item.get("start_date"), "error": str(ex)}
+                continue
+
+            if r.get("gated"):
+                gated[code] = r["gated"]
+            if r.get("aborted"):
+                aborted_codes.append(code)
+                errors.append({"symbol": code, "table": "index-valuation",
+                               "message": "提前中止（被停止）"})
+            per_index[code] = {
+                "rows": r.get("rows", 0),
+                "ranges": r.get("ranges", 0),
+                "aborted": bool(r.get("aborted")),
+                "gated": r.get("gated") or [],
+                "start_date": this_start.isoformat() if this_start else None,
+                "audit": r.get("audit"),
+            }
+            acc["done"] += r.get("ranges", 0)
+            acc["rows"] += r.get("rows", 0)
+
+        # 终态：用户停止 > 全无产出且有失败 > 正常完成
+        stopped = stop_event is not None and stop_event.is_set()
+        if stopped:
+            task.status = "stopped"
+        elif errors and acc["rows"] == 0:
+            task.status = "failed"
+        else:
+            task.status = "done"
+
+        task.done_count = acc["done"]
+        task.success_count = acc["rows"]
+        task.progress = round(acc["done"] / total_ranges * 100, 2) if total_ranges else 100
+        task.aborted_count = len(aborted_codes)
+        task.error_count = len(errors)
+        gated_total = sum(len(v) for v in gated.values())
+        task.no_data_count = gated_total       # 复用该列：覆盖率不足而未出数的交易日数
+        task.errors = errors or None
+        # 结构化结果：审计（每指数 compared/changed/max_pct/samples）、门禁明细、落后指数
+        task.result = {
+            "per_index": per_index,
+            "gated": gated,
+            "gated_total": gated_total,
+            "lagging": plan.get("lagging") or {},
+            "start_date": start_date.isoformat() if start_date else None,
+            "end_date": end_date.isoformat() if end_date else None,
+            "latest_trade_date": plan.get("latest_trade_date"),
+            "used_calendar": plan.get("used_calendar"),
+            "total_ranges": total_ranges,
+            "rows_total": acc["rows"],
+        }
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[index-valuation #{task_id}] {task.status}：区间 {acc["done"]}/{total_ranges}, '
+              f'已算 {acc["rows"]} 天, 门禁 {gated_total}, 中止 {len(aborted_codes)}, '
+              f'失败 {len(errors)}')
+
+    except Exception as e:
+        # 兜底：线程异常也要把 task 状态置为 failed
+        errors.append({"symbol": "", "table": "index-valuation",
+                       "message": f"线程异常: {type(e).__name__}: {e}"})
+        task.status = "failed"
+        task.errors = errors
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[index-valuation #{task_id}] 失败: {e}')
+    finally:
+        _stop_events.pop(task_id, None)
         db.close()
 
 
@@ -1771,7 +2171,8 @@ def stop_batch_sync(task_id: int = Query(..., description="要停止的任务 ID
 def list_index_valuations(
     start_date: Optional[str] = Query(default=None, description="起始日期 YYYY-MM-DD，默认近 10 年"),
     end_date: Optional[str] = Query(default=None, description="结束日期 YYYY-MM-DD，默认今天"),
-    metric: str = Query(default="pe_ttm", description="指标: pe_ttm / pb_mrq / dy_ttm / pe_median"),
+    metric: str = Query(default="pe_ttm",
+                        description="指标: pe_ttm / pb_mrq / dy_ttm / pe_median / ps_ttm / pcf_ttm_oper"),
     index_codes: Optional[List[str]] = Query(default=None, description="指数代码（可多值），不传=默认 5 个宽基"),
 ):
     """指数加权估值日序列（画图用）。
@@ -1817,7 +2218,8 @@ def list_index_valuations_paged(
 @router.get("/index-valuation-percentiles")
 def list_index_valuation_percentiles(
     index_codes: Optional[List[str]] = Query(default=None, description="指数代码（可多值），不传=默认 5 个宽基"),
-    metric: str = Query(default="pe_ttm", description="指标: pe_ttm / pb_mrq / dy_ttm / pe_median"),
+    metric: str = Query(default="pe_ttm",
+                        description="指标: pe_ttm / pb_mrq / dy_ttm / pe_median / ps_ttm / pcf_ttm_oper"),
 ):
     """指数分位汇总（卡片/表格用）。
 
@@ -1835,38 +2237,94 @@ def list_index_valuation_percentiles(
         raise HTTPException(status_code=400, detail=str(ex))
 
 
-@router.post("/sync/index-valuation")
+@router.post("/sync/index-valuation", response_model=BdsSyncTaskOut)
 def sync_index_valuation(req: IndexValuationSyncRequest):
-    """重算最近 N 个交易日的指数估值（幂等，同步执行，通常 2~5 秒）。
+    """启动指数估值重算（后台任务），立即返回 task，进度用 GET /sync-tasks/{id} 轮询。
 
-    ⚠️ 顺序：应先跑 `/sync/index-constituent` 增量，再跑本接口，否则会用旧成分算新日期。
+    **入口唯一**：原 `/run/index-valuation-backfill` 已删除 —— 它和本接口只差
+    「强制传 start_date」3 行代码，任务化后这个保护没有意义（增量用 `days`、
+    区间重建用 `start_date`，同一次调用里按传参分流）。
+    全历史重建（36 分钟）仍走命令行 `scripts/backfill_index_valuation.py`，HTTP 必超时。
+
+    区间语义见 `IndexValuationSyncRequest`（four 种组合）；`start_date` / `end_date`
+    都是**闭区间**，`end_date` 当天必算（内部 `+1 天` 转成 SQL 的左闭右开）。
+
+    停止：POST /bds/stop/batch-sync?task_id=<id>（在当前快照区间结束后生效）。
+
+    ⚠️ 顺序：应先跑 `/sync/index-constituent` 增量，否则会用旧成分算新日期。
+    ⚠️ 与批量同步、成分同步共用 bds_sync_task 与停止信号 ⇒ 全局互斥（有 running 则 409）。
+    这是要的：估值读 `bds_daily_valuation`，批量同步正在写它时必须不能并发。
     """
-    start = req.start_date or (date.today() - timedelta(days=req.days * 2))
+    db = next(get_db())
     try:
-        res = index_valuation.backfill_index_valuation(
-            req.index_codes, start, with_median=req.with_median)
-    except ValueError as ex:
-        raise HTTPException(status_code=400, detail=str(ex))
-    return {"start_date": start.isoformat(), "result": res}
+        # 1. 参数校验（先于建任务，避免非法入参在任务表里留下垃圾记录）
+        today = date.today()
+        if req.start_date and req.start_date < date(2005, 1, 1):
+            raise HTTPException(status_code=400,
+                                detail="start_date 不能早于 2005-01-01（该表最早数据起点）")
+        if req.end_date is not None:
+            if req.end_date > today:
+                raise HTTPException(status_code=400,
+                                    detail=f"end_date 不能晚于今天（{today}）：未来日期无数据，跑了只会空转")
+            if req.start_date and req.end_date < req.start_date:
+                raise HTTPException(status_code=400, detail="end_date 不能早于 start_date")
+        try:
+            plan = index_valuation.plan_index_valuation_backfill(
+                req.index_codes, req.start_date, req.end_date, req.days)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex))
+        if plan["total_ranges"] == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="该区间内没有可算的交易日（各指数最早成分快照晚于 end_date？）")
 
+        # 2. 僵尸清理 + 互斥检查
+        _cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409,
+                                detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
-@router.post("/run/index-valuation-backfill")
-def run_index_valuation_backfill(req: IndexValuationSyncRequest):
-    """小窗口重建指数估值（幂等，同步执行）。
+        # 3. 建任务（scope=index_valuation，与 index_backfill 区分开）
+        task = BdsSyncTask(
+            scope="index_valuation",
+            scope_params={
+                "index_codes": [p["code"] for p in plan["per_index"]],
+                "start_date": req.start_date.isoformat() if req.start_date else None,
+                "end_date": req.end_date.isoformat() if req.end_date else None,
+                # days 只在「两端都不传」的纯增量模式下参与计算（指定任一端点时
+                # 起点由 start_date 或最早快照决定）。此处写 null 而非原值，
+                # 否则审计时会把 days=5 误读成「本次重算了 5 个交易日」
+                # —— 实际只传 end_date 时会从最早快照算起（如 #140 实算 110 行）。
+                "days": req.days if (req.start_date is None and req.end_date is None) else None,
+                "with_median": req.with_median,
+            },
+            tables=["index-valuation"],
+            status="running",
+            total_count=plan["total_ranges"],
+            done_count=0,
+            success_count=0,
+            no_data_count=0,
+            error_count=0,
+            progress=0,
+            errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
 
-    ⚠️ **全历史重建（2005 年起，6~11 分钟）请用命令行脚本**，本接口是同步的、会超时：
-        python C:/quant_man/scripts/backfill_index_valuation.py
-    """
-    start = req.start_date
-    if start is None:
-        raise HTTPException(status_code=400,
-                            detail="必须传 start_date（小窗口重建）；全历史重建请用命令行脚本")
-    try:
-        res = index_valuation.backfill_index_valuation(
-            req.index_codes, start, with_median=req.with_median)
-    except ValueError as ex:
-        raise HTTPException(status_code=400, detail=str(ex))
-    return {"start_date": start.isoformat(), "result": res}
+        # 4. 注册停止信号并启动后台线程
+        _stop_events[task.id] = threading.Event()
+        threading.Thread(
+            target=_run_valuation_thread,
+            args=(task.id, plan, req.start_date, req.end_date, req.with_median),
+            daemon=True,
+        ).start()
+
+        return task
+
+    finally:
+        db.close()
 
 
 @router.get("/index-constituent-sync-status")

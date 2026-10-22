@@ -438,6 +438,25 @@ class BatchSyncRequest(BaseModel):
     max_symbols: int = Field(default=0, ge=0, description="最多处理几只 symbol: 0=不限")
 
 
+class MacroSyncRequest(BaseModel):
+    """一键同步请求体（POST /bds/sync/macro）—— 基础数据 + 宏观数据。
+
+    六段**固定按 trade_date → symbol_info → index_history → wscn → daily → gold 顺序执行**
+    （基础在下游依赖之前，整体快 → 慢），只跑 stages 里勾选的段。
+    执行在后台线程，返回 task 供前端轮询进度（与 /bds/run/batch-sync 同一套任务表）。
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    stages: list[str] = Field(
+        default_factory=lambda: ['symbol_info', 'index_history', 'wscn', 'daily'],
+        description="要同步的段（顺序固定 trade_date→symbol_info→index_history→wscn→daily→gold）："
+                    "trade_date=交易日历 / symbol_info=证券信息 / index_history=指数行情 / "
+                    "wscn=经济指标（华尔街见闻）/ daily=美债收益率（FRED）/ gold=黄金储备（IMF）。"
+                    "不传 ⇔ 前端默认勾选（不含 trade_date 与 gold：前者一年只需跑一次，后者 IMF 接口 502）",
+    )
+
+
 class IndexConstituentSyncRequest(BaseModel):
     """指数成分股同步/回填请求体（POST /bds/sync/index-constituent）。
 
@@ -454,17 +473,33 @@ class IndexConstituentSyncRequest(BaseModel):
 
 
 class IndexValuationSyncRequest(BaseModel):
-    """指数估值重算请求体（POST /bds/sync/index-valuation、/bds/run/index-valuation-backfill）。
+    """指数估值重算请求体（POST /bds/sync/index-valuation，后台任务）。
 
-    两个入口共用：`days` 用于日常增量（重算最近 N 个交易日），`start_date` 用于小窗口重算。
-    ⚠️ 全历史重建（2005 年起，6~11 分钟）请用命令行脚本，HTTP 同步接口会超时。
+    区间语义（四种组合，见 `docs/指数估值任务化改造方案_2026-10-21.md` §4.2.1）：
+
+    | start_date | end_date | 实际计算区间                                    |
+    |------------|----------|-------------------------------------------------|
+    | 都不传     |          | 各指数从**自己的**最新已算日往前重叠 `days` 个交易日 → 最新 |
+    | 只传 start |          | `start_date` → 最新                              |
+    | 都传       |          | `start_date` → `end_date`（**含两端**）           |
+    | 只传 end   |          | 各指数**最早快照** → `end_date`（≈跑几乎全历史，慎用）|
+
+    `days` 只在第一行（纯增量）生效：起点 = 各指数自己的 `MAX(trade_date)` 往前
+    `days-1` 个交易日 ⇒ 共重算 `days` 个交易日（前 `days-1` 天是**重叠纠错**，
+    覆盖财报修订/成分补录导致的历史指标改写）。指定任一端点时 `days` 被忽略，
+    任务的 `scope_params.days` 记为 `null`（不留假值误导事后审计）。
     """
 
     index_codes: Optional[list[str]] = Field(
         default=None, description="指数代码清单；不传=默认 5 个宽基（不含上证指数）")
-    days: int = Field(default=5, ge=1, le=60, description="增量重算最近 N 个交易日")
+    days: int = Field(
+        default=5, ge=1, le=60,
+        description="纯增量模式下重算的**交易日个数**（用 bds_trade_date 精确倒推，不是自然日）；"
+                    "仅当 start_date 与 end_date **都不传**时生效，指定任一端点即失效")
     start_date: Optional[date] = Field(
-        default=None, description="重算起点；传了则覆盖 days（建议只做小窗口）")
+        default=None, description="重算起点（闭区间）；传了则所有指数共用该起点，days 失效")
+    end_date: Optional[date] = Field(
+        default=None, description="重算终点（闭区间，含当天）；不传=算到最新")
     with_median: bool = Field(
         default=True, description="是否同时算横截面中位数 pe_median（额外一条窗口函数 SQL，约慢一倍）")
 
@@ -490,12 +525,15 @@ class IndexValuationRow(BaseModel):
     pe_median: Optional[Decimal] = None  # 成分 PE 横截面中位数（仅 PE>0 样本）
     pb_mrq: Optional[Decimal] = None  # 整体法 PB_MRQ
     dy_ttm: Optional[Decimal] = None  # 市值加权股息率 TTM(%)，分母含全部成分市值
+    ps_ttm: Optional[Decimal] = None  # 整体法市销率 TTM = ΣMV/Σ(MV/ps)
+    pcf_ttm_oper: Optional[Decimal] = None  # 整体法市现率 TTM（仅 pcf>0.5 成分，负现金流剔除）
     mv_total: Optional[Decimal] = None  # 成分总市值合计（元）
     profit_total: Optional[Decimal] = None  # 成分净利润合计（元，含负值）
     n_total: Optional[int] = None  # 成分股数（有估值数据）
     expected_total: Optional[int] = None  # 该快照应有成分数（覆盖率分母）
     n_valid: Optional[int] = None  # 有效样本数（PE 参与计算）
     n_loss: Optional[int] = None  # 亏损/无 PE 数
+    n_cf_neg: Optional[int] = None  # 负/无经营现金流成分数（PCF 剔除样本审计）
     snapshot_date: Optional[date] = None  # 所用成分快照日期（可追溯）
     calc_at: Optional[datetime] = None  # 本行计算时间（重算会刷新）
     create_time: datetime  # 创建时间
@@ -526,6 +564,9 @@ class BdsSyncTaskOut(BaseModel):
     aborted_count: int = Field(default=0, description="提前中止的指数个数（index_backfill 专用）")
     progress: Decimal = Field(description="进度% (0-100)")
     errors: Optional[list] = Field(default=None, description="失败明细")
+    result: Optional[dict] = Field(
+        default=None,
+        description="任务结果摘要（结构化，非失败信息）：index_valuation 存审计/覆盖率告警/落后指数")
     start_time: Optional[datetime] = Field(default=None, description="实际开始时间")
     end_time: Optional[datetime] = Field(default=None, description="实际结束时间")
     create_time: datetime = Field(description="创建时间")

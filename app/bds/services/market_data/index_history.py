@@ -95,82 +95,99 @@ def _fetch_index_history_from_yfinance(symbol, info, start_time, end_time):
         return None
 
 
-def upsert_index_history_sql():
-    """循环获取 INDEX_CODE 中所有指数的历史行情并 upsert 入库。
+def _sync_one_index_detail(symbol: str, info: dict):
+    """单个指数增量同步，返回 (入库条数, 错误信息)。
 
-    增量更新策略：
+    条数：>0 实际入库行数；0 = 无需导入（已是最新 / 当期无数据）；-1 = 失败。
+    错误信息为异常原文前 500 字（成功时 None）。
+
+    增量策略：
     - 数据库已有该 symbol 数据：从最新日期 + 1 天开始获取
     - 数据库无该 symbol 数据：从 listed_date 开始全量获取
-
-    单个 symbol 失败不中断后续步骤，返回 steps 字典记录每个 symbol 的获取条数。
+    - 最新日期已是今日：直接跳过，不调接口
     """
     _engine = settings.DB_ENGINE
     _mdl = IndexHistory
-    _index_code = dbsCfg.INDEX_CODE
+    try:
+        # 查询数据库中该 symbol 的最新 trade_date
+        with SessionLocal() as session:
+            row = (
+                session.query(_mdl.trade_date)
+                .filter(_mdl.symbol == symbol)
+                .order_by(_mdl.trade_date.desc())
+                .first()
+            )
+        max_date = row[0] if row else None
+        # 优化：若最新日期已是今日，说明当日已收盘且数据已入库，跳过接口调用
+        today = date.today()
+        if max_date is not None and max_date >= today:
+            logger.info(f"->{symbol} 最新日期 {max_date} 已是今日，跳过同步")
+            return 0, None
+        # 增量更新起点：有数据则从最新日期 + 1 天，否则从 listed_date 全量获取
+        if max_date is not None:
+            start_time = max_date + timedelta(days=1)
+        else:
+            start_time = info['listed_date']
+        end_time = today
+        # 根据 data_source 选择数据源：yfinance 走新路径，默认走 gm
+        if info.get('data_source') == 'yfinance':
+            df = _fetch_index_history_from_yfinance(symbol, info, start_time, end_time)
+        else:
+            # 调用 gm 接口获取历史行情（带超时保护，防止 gm 终端未启动时阻塞）
+            # fields 包含 amount/volume 用于量价分析；position 为期货专用字段，
+            # gm 对股票指数不返回，同步时该列缺失由 df_init_model 过滤后入库为 null
+            df = call_with_timeout(history, timeout=30)(
+                symbol=symbol,
+                frequency='1d',
+                start_time=start_time,
+                end_time=end_time,
+                fields='eob,symbol,open,high,low,close,amount,volume',
+                adjust=ADJUST_NONE,
+                df=True,
+            )
+        if df is None or df.empty:
+            logger.info(f"->{symbol} 无需导入")
+            return 0, None
+        # eob（datetime）转为 date 并重命名为 trade_date
+        df['eob'] = pd.to_datetime(df['eob']).dt.date
+        df = df.rename(columns={'eob': 'trade_date'})
+        df = df_init_model(df, _mdl)  # 清洗、列名映射、字段过滤、类型转换
+        if df.empty:
+            logger.info(f"->{symbol} 无需导入")
+            return 0, None
+        df = df.replace({np.nan: None})
+        _table = _mdl.__table__.name
+        _unique_keys = _mdl.unique_keys
+        result = upsert_df_to_db(df, _table, _engine, _unique_keys)
+        logger.info(f"->{symbol} 成功：{result}")
+        return len(df), None
+    except Exception as e:
+        raw = str(e)
+        logger.error(f"->{symbol} 失败：{raw}")
+        return -1, raw[:500]
+
+
+def sync_one_index(symbol: str, info: dict) -> int:
+    """单指数同步入口（供「一键同步」任务按指数逐项回报进度）。
+
+    返回同上：>0 条数 / 0 无需导入 / -1 失败。异常已在此吞掉，不向上抛。
+    """
+    count, _err = _sync_one_index_detail(symbol, info)
+    return count
+
+
+def upsert_index_history_sql():
+    """循环获取 INDEX_CODE 中所有指数的历史行情并 upsert 入库。
+
+    逐个调用 `_sync_one_index_detail`，单个 symbol 失败不中断后续步骤，
+    返回 (steps, errors)：steps 记录每个 symbol 的获取条数，errors 记录失败原因。
+    """
     steps = {}  # 记录每个 symbol 的获取条数
     errors = {}
     logger.info("指数历史行情获取并导入")
-    for symbol, info in _index_code.items():
-        try:
-            # 查询数据库中该 symbol 的最新 trade_date
-            with SessionLocal() as session:
-                row = (
-                    session.query(_mdl.trade_date)
-                    .filter(_mdl.symbol == symbol)
-                    .order_by(_mdl.trade_date.desc())
-                    .first()
-                )
-            max_date = row[0] if row else None
-            # 优化：若最新日期已是今日，说明当日已收盘且数据已入库，跳过接口调用
-            today = date.today()
-            if max_date is not None and max_date >= today:
-                logger.info(f"->{symbol} 最新日期 {max_date} 已是今日，跳过同步")
-                steps[symbol] = 0
-                continue
-            # 增量更新起点：有数据则从最新日期 + 1 天，否则从 listed_date 全量获取
-            if max_date is not None:
-                start_time = max_date + timedelta(days=1)
-            else:
-                start_time = info['listed_date']
-            end_time = today
-            # 根据 data_source 选择数据源：yfinance 走新路径，默认走 gm
-            if info.get('data_source') == 'yfinance':
-                df = _fetch_index_history_from_yfinance(symbol, info, start_time, end_time)
-            else:
-                # 调用 gm 接口获取历史行情（带超时保护，防止 gm 终端未启动时阻塞）
-                # fields 包含 amount/volume 用于量价分析；position 为期货专用字段，
-                # gm 对股票指数不返回，同步时该列缺失由 df_init_model 过滤后入库为 null
-                df = call_with_timeout(history, timeout=30)(
-                    symbol=symbol,
-                    frequency='1d',
-                    start_time=start_time,
-                    end_time=end_time,
-                    fields='eob,symbol,open,high,low,close,amount,volume',
-                    adjust=ADJUST_NONE,
-                    df=True,
-                )
-            if df is None or df.empty:
-                logger.info(f"->{symbol} 无需导入")
-                steps[symbol] = 0
-                continue
-            # eob（datetime）转为 date 并重命名为 trade_date
-            df['eob'] = pd.to_datetime(df['eob']).dt.date
-            df = df.rename(columns={'eob': 'trade_date'})
-            df = df_init_model(df, _mdl)  # 清洗、列名映射、字段过滤、类型转换
-            if not df.empty:
-                df = df.replace({np.nan: None})
-                _table = _mdl.__table__.name
-                _unique_keys = _mdl.unique_keys
-                result = upsert_df_to_db(df, _table, _engine, _unique_keys)
-                logger.info(f"->{symbol} 成功：{result}")
-                steps[symbol] = len(df)
-            else:
-                logger.info(f"->{symbol} 无需导入")
-                steps[symbol] = 0
-        except Exception as e:
-            raw = str(e)
-            # 单步失败不中断后续 symbol，记录错误并继续
-            logger.error(f"->{symbol} 失败：{raw}")
-            steps[symbol] = -1
-            errors[symbol] = raw[:500]
+    for symbol, info in dbsCfg.INDEX_CODE.items():
+        count, err = _sync_one_index_detail(symbol, info)
+        steps[symbol] = count
+        if err:
+            errors[symbol] = err
     return steps, errors

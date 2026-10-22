@@ -272,7 +272,13 @@ class IndexValuation(Base, BaseModel):
     「有分红」的成分放进分母会系统性高估（科创50 +74.7%）。
 
     **覆盖率门禁**：`n_total / expected_total < 0.98` 的交易日，`pe_ttm`/`pb_mrq`/`dy_ttm`/
-    `pe_median` 一律写 NULL（分位查询自动跳过），避免源端缺股时静默产出偏离值。
+    `pe_median`/`ps_ttm`/`pcf_ttm_oper` 一律写 NULL（分位查询自动跳过），避免源端缺股时静默产出偏离值。
+
+    **PS/PCF 口径与 PE 同构**（`ΣMV / Σ(MV/指标)`），但 PCF 有一处**故意不同**：
+    只让 `pcf_ttm_oper > 0.5` 的成分参与，**分子分母都用该子集**——负现金流成分剔除。
+    理由：经营现金流总和趋零甚至为负时「市值/现金流」没有经济学解释（含负口径下
+    创业板指 2012 年 PCF = 439.6）；而净利润为负时整体法 PE 仍有意义，故 PE 保留亏损计入。
+    分子若误用 `mv_total`（全部市值）会把 PCF 高估最多 53.6%（科创50），见方案 §3.2.2。
     """
 
     __tablename__ = "bds_index_valuation"
@@ -290,6 +296,13 @@ class IndexValuation(Base, BaseModel):
     dy_ttm: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 4), nullable=True,
         comment="市值加权股息率 TTM(%)=Σ(dy×MV)/ΣMV，分母含全部成分市值（无分红记 0）")
+    ps_ttm: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True,
+        comment="整体法市销率 TTM=ΣMV/Σ(MV/ps)；营收无负值，分母不剔除")
+    pcf_ttm_oper: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True,
+        comment="整体法市现率 TTM（经营现金流）；**仅 pcf>0.5 的成分参与分子与分母**，"
+                "负现金流剔除（与 PE 亏损计入的口径故意不同）")
     mv_total: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(20, 2), nullable=True, comment="成分总市值合计（元）")
     profit_total: Mapped[Optional[Decimal]] = mapped_column(
@@ -300,6 +313,8 @@ class IndexValuation(Base, BaseModel):
         comment="该快照应有成分数（覆盖率分母）；n_total/expected_total < 0.98 时指标留空")
     n_valid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="有效样本数（PE 参与计算）")
     n_loss: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="亏损/无 PE 数")
+    n_cf_neg: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="负/无经营现金流成分数（PCF 剔除样本审计）")
     snapshot_date: Mapped[Optional[date]] = mapped_column(
         Date, nullable=True, comment="所用成分快照日期（可追溯）")
     calc_at: Mapped[Optional[datetime]] = mapped_column(
@@ -748,9 +763,12 @@ class BdsSyncTask(Base, BaseModel):
 
     # ---- 任务参数 ----
     # ⚠️ 列宽 String(16)：新增 scope 取值必须 <= 16 字符，否则 MySQL 会截断/报 1406
-    # index_backfill = 指数成分股同步/回填（POST /bds/sync/index-constituent）
-    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill")
-    scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols} 或 {index_codes/start_date}")
+    # index_backfill  = 指数成分股同步/回填（POST /bds/sync/index-constituent）
+    # index_valuation = 指数估值重算（POST /bds/sync/index-valuation，15 字符）
+    # macro_sync      = 一键同步（POST /bds/sync/macro，10 字符；基础数据+宏观数据六段顺序执行。
+    #                   名字沿用不改——历史任务靠它被前端卡片接管，改了会导致老任务刷不出来）
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill/index_valuation/macro_sync")
+    scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols} 或 {index_codes/start_date} 或 {stages}")
     tables: Mapped[list] = mapped_column(JSON, nullable=False, comment="要同步的表列表")
     mark_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", comment="全部成功后是否写 sync_at: 1=是 0=否")
     # 跳过已同步的「起始日期」语义：剔除 sync_at >= 该日期 的标的（NULL=不跳过）
@@ -781,6 +799,11 @@ class BdsSyncTask(Base, BaseModel):
         comment="提前中止的指数个数（被停止/连续失败超限，index_backfill 专用）")
     progress: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False, server_default="0", comment="进度% (0-100)")
     errors: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, comment="失败明细: [{symbol, table, message}]")
+    # 结构化结果摘要（与 errors 分离：errors 是"出错了"，result 是"做成了什么"）。
+    # 目前仅 index_valuation 使用：{per_index: {code: {rows/ranges/aborted/audit}},
+    #                            gated: {code: [日期]}, lagging: {code: {last, start}}, start_date, end_date}
+    result: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, comment="任务结果摘要（估值审计/覆盖率告警等结构化输出，非失败信息）")
 
     # ---- 时间戳 ----
     start_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, comment="实际开始时间")

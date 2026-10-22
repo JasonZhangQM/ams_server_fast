@@ -25,11 +25,13 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import bindparam, func, text
 from sqlalchemy.orm import Session
 
 from server_fast.app.bds.config import Config as dbsCfg
-from server_fast.app.bds.models import IndexConstituent, IndexConstituentSync
+from server_fast.app.bds.models import (
+    IndexConstituent, IndexConstituentSync, IndexValuation, TradeDate,
+)
 from server_fast.common.db import SessionLocal
 
 logger = logging.getLogger("uvicorn.error")
@@ -39,8 +41,11 @@ DEFAULT_INDEX_CODES = [
     "SHSE.000300", "SHSE.000905", "SHSE.000852", "SHSE.000688", "SZSE.399006",
 ]
 
-# 可查询的指标列
-METRICS = ("pe_ttm", "pb_mrq", "dy_ttm", "pe_median")
+# 可查询的指标列（同时用作序列查询与分位查询的白名单）。
+# 2026-10-22 新增 ps_ttm / pcf_ttm_oper：两者都是「市值 ÷ 可加总量」，与 PE 同构，
+# 故直接并入同一个元组 —— 不像曾计划过的 peg 那样需要拆「序列/分位」两套白名单
+# （PEG 因分母不可加、分位精度虚假，已决定不做，见 docs/指数估值新增指标方案_2026-10-22.md §七）。
+METRICS = ("pe_ttm", "pb_mrq", "dy_ttm", "pe_median", "ps_ttm", "pcf_ttm_oper")
 
 # PE 异常清洗：0 < PE <= 0.5 视为数据异常（等价于盈利 > 2 倍市值，实测全市场仅 2 只）；
 # PE <= 0 是亏损，必须计入分母（整体法口径），不剔除。
@@ -71,7 +76,13 @@ SELECT v.trade_date,
                 THEN mv.tot_mv / v.pe_ttm ELSE 0 END)                         AS profit_total,
        SUM(CASE WHEN v.pe_ttm IS NULL OR v.pe_ttm <= :pe_low THEN 1 ELSE 0 END) AS n_loss,
        SUM(CASE WHEN v.pb_mrq > 0 THEN mv.tot_mv / v.pb_mrq ELSE 0 END)       AS equity_total,
-       SUM(CASE WHEN v.dy_ttm IS NOT NULL THEN v.dy_ttm * mv.tot_mv ELSE 0 END) AS dy_num
+       SUM(CASE WHEN v.dy_ttm IS NOT NULL THEN v.dy_ttm * mv.tot_mv ELSE 0 END) AS dy_num,
+       SUM(CASE WHEN v.ps_ttm > 0 THEN mv.tot_mv / v.ps_ttm ELSE 0 END)        AS sale_total,
+       SUM(CASE WHEN v.pcf_ttm_oper > :pe_low THEN mv.tot_mv END)             AS mv_cf_valid,
+       SUM(CASE WHEN v.pcf_ttm_oper > :pe_low
+                THEN mv.tot_mv / v.pcf_ttm_oper ELSE 0 END)                   AS cf_total,
+       SUM(CASE WHEN v.pcf_ttm_oper IS NULL OR v.pcf_ttm_oper <= :pe_low
+                THEN 1 ELSE 0 END)                                            AS n_cf_neg
   FROM bds_index_constituent c
   JOIN bds_daily_valuation v ON v.symbol = c.symbol
   JOIN bds_daily_mktvalue  mv ON mv.symbol = v.symbol AND mv.trade_date = v.trade_date
@@ -111,17 +122,21 @@ SELECT trade_date, close FROM bds_index_history
 
 SQL_UPSERT = text("""
 INSERT INTO bds_index_valuation
-    (index_code, trade_date, close, pe_ttm, pe_median, pb_mrq, dy_ttm,
-     mv_total, profit_total, n_total, expected_total, n_valid, n_loss, snapshot_date, calc_at)
+    (index_code, trade_date, close, pe_ttm, pe_median, pb_mrq, dy_ttm, ps_ttm, pcf_ttm_oper,
+     mv_total, profit_total, n_total, expected_total, n_valid, n_loss, n_cf_neg,
+     snapshot_date, calc_at)
 VALUES
-    (:index_code, :trade_date, :close, :pe_ttm, :pe_median, :pb_mrq, :dy_ttm,
-     :mv_total, :profit_total, :n_total, :expected_total, :n_valid, :n_loss, :snapshot_date, :calc_at)
+    (:index_code, :trade_date, :close, :pe_ttm, :pe_median, :pb_mrq, :dy_ttm, :ps_ttm, :pcf_ttm_oper,
+     :mv_total, :profit_total, :n_total, :expected_total, :n_valid, :n_loss, :n_cf_neg,
+     :snapshot_date, :calc_at)
 ON DUPLICATE KEY UPDATE
     close = VALUES(close), pe_ttm = VALUES(pe_ttm), pe_median = VALUES(pe_median),
-    pb_mrq = VALUES(pb_mrq), dy_ttm = VALUES(dy_ttm), mv_total = VALUES(mv_total),
+    pb_mrq = VALUES(pb_mrq), dy_ttm = VALUES(dy_ttm), ps_ttm = VALUES(ps_ttm),
+    pcf_ttm_oper = VALUES(pcf_ttm_oper), mv_total = VALUES(mv_total),
     profit_total = VALUES(profit_total), n_total = VALUES(n_total),
     expected_total = VALUES(expected_total), n_valid = VALUES(n_valid),
-    n_loss = VALUES(n_loss), snapshot_date = VALUES(snapshot_date), calc_at = VALUES(calc_at)
+    n_loss = VALUES(n_loss), n_cf_neg = VALUES(n_cf_neg),
+    snapshot_date = VALUES(snapshot_date), calc_at = VALUES(calc_at)
 """)
 
 
@@ -169,19 +184,28 @@ def _to_float(v):
 
 
 def _calc_range(conn, index_code: str, snap: date, next_snap: Optional[date],
-                start_date: date, with_median: bool) -> int:
-    """算一个快照区间的全部交易日并 upsert，返回写入行数。
+                start_date: date, with_median: bool,
+                end_date: Optional[date] = None) -> tuple:
+    """算一个快照区间的全部交易日并 upsert，返回 `(写入行数, 被门禁拦下的日期列表)`。
 
     写库前做覆盖率门禁（`MIN_COVERAGE`）：不达标的日子指标留 NULL，
     避免源端缺股时静默写出偏离的 PE/PB/股息率。
+
+    ⚠️ **`end_date` 是闭区间，而聚合 SQL 是左闭右开 `trade_date < :end`** ——
+    直接下传会漏掉 `end_date` 当天，所以这里必须 `+1 天`（评估时踩过，验收单列一条）。
     """
     end = next_snap or date(2100, 1, 1)
-    params = {"idx": index_code, "snap": snap, "start": max(snap, start_date),
+    if end_date is not None:
+        end = min(end, end_date + timedelta(days=1))
+    start = max(snap, start_date)
+    if start >= end:
+        return 0, []
+    params = {"idx": index_code, "snap": snap, "start": start,
               "end": end, "pe_low": PE_ANOMALY_LOW}
 
     rows = conn.execute(SQL_AGGREGATE, params).mappings().all()
     if not rows:
-        return 0
+        return 0, []
 
     # 该快照「应有」多少只成分：用成分表实际行数，而非 Config 的固定只数
     expected_total = int(conn.execute(text(
@@ -202,6 +226,9 @@ def _calc_range(conn, index_code: str, snap: date, next_snap: Optional[date],
         profit_total = float(r["profit_total"] or 0)
         equity_total = float(r["equity_total"] or 0)
         dy_num = float(r["dy_num"] or 0)
+        sale_total = float(r["sale_total"] or 0)
+        mv_cf_valid = float(r["mv_cf_valid"] or 0)
+        cf_total = float(r["cf_total"] or 0)
         n_total = int(r["n_total"])
         # 覆盖率达标才允许出指标；否则留 NULL，但 n_total / expected_total 照存，方便审计还原现场
         coverage = (n_total / expected_total) if expected_total else 0.0
@@ -219,6 +246,14 @@ def _calc_range(conn, index_code: str, snap: date, next_snap: Optional[date],
             # 旧实现的分母只含「有分红」的成分，算出来是"分红股内部的股息率"，
             # 系统性高估：科创50 +74.7%、中证500 +18.8%、中证1000 +21.1%（详见评估报告 P1-2）。
             "dy_ttm": round(dy_num / mv_total, 4) if ok and mv_total > 0 else None,
+            # 市销率：与 PE 完全同构（营收无负值，成分内实测 0 只 <= 0）。
+            # 分子用 mv_total，NULL 成分的市值计入分子但其营收不贡献分母，会把 PS 略微拉高；
+            # 实测最大偏差 < 0.2%（中证500 仅 1 只 NULL），方向已知，可接受。
+            "ps_ttm": round(mv_total / sale_total, 4) if ok and sale_total > 0 else None,
+            # 市现率：**必须是 mv_cf_valid / cf_total，不能用 mv_total**。
+            # 剔除负现金流后分子也只剩有效子集的市值；若误用 mv_total，
+            # 会高估 5.7%（300）~ 53.6%（科创50：31.78 → 48.83）。见方案 §3.2.2。
+            "pcf_ttm_oper": round(mv_cf_valid / cf_total, 4) if ok and cf_total > 0 else None,
             "close": _to_float(closes.get(r["trade_date"])),
             "mv_total": round(mv_total, 2),
             "profit_total": round(profit_total, 2),
@@ -226,6 +261,7 @@ def _calc_range(conn, index_code: str, snap: date, next_snap: Optional[date],
             "expected_total": expected_total,
             "n_valid": int(r["n_valid"]),
             "n_loss": int(r["n_loss"]),
+            "n_cf_neg": int(r["n_cf_neg"]),
             "snapshot_date": snap,
             "calc_at": now,
         })
@@ -233,24 +269,38 @@ def _calc_range(conn, index_code: str, snap: date, next_snap: Optional[date],
     if low_cov:
         head = "、".join(f"{d}({n}/{expected_total})" for d, n, _ in low_cov[:5])
         logger.warning(
-            "->%s 快照 %s：%d 个交易日覆盖率 < %.0f%%（%s%s）⇒ PE/PB/股息率留空",
+            "->%s 快照 %s：%d 个交易日覆盖率 < %.0f%%（%s%s）⇒ PE/PB/股息率/PS/PCF 留空",
             index_code, snap, len(low_cov), MIN_COVERAGE * 100, head,
             " …" if len(low_cov) > 5 else "")
 
     conn.execute(SQL_UPSERT, payload)
-    return len(payload)
+    return len(payload), [d for d, _, _ in low_cov]
 
 
 # ---------------------------------------------------------------------------
 # 重算审计（方案 §3.4 / 评估 P2-7：承诺过但此前未实现）
 # ---------------------------------------------------------------------------
 
-def _load_values(engine, index_code: str) -> dict:
-    """{trade_date: (pe_ttm, pb_mrq, dy_ttm)}，str 化的 float，供 diff。"""
+def _load_values(engine, index_code: str, start: Optional[date] = None,
+                 end: Optional[date] = None) -> dict:
+    """{trade_date: (pe_ttm, pb_mrq, dy_ttm)}，str 化的 float，供 diff。
+
+    `start`/`end` 是该段重算的闭区间：审计只比对本段，不载入该指数全部历史。
+    否则指定"只算一个月"时，还要拉 5000 行来对比，结果只会显示"其他行无变动"——
+    既浪费也会误导（看起来像全量审计过一遍）。
+    """
+    where = ["index_code = :c"]
+    params = {"c": index_code}
+    if start is not None:
+        where.append("trade_date >= :s")
+        params["s"] = start
+    if end is not None:
+        where.append("trade_date <= :e")
+        params["e"] = end
     with engine.begin() as conn:
         rows = conn.execute(text(
             "SELECT trade_date, pe_ttm, pb_mrq, dy_ttm FROM bds_index_valuation "
-            "WHERE index_code = :c"), {"c": index_code}).all()
+            f"WHERE {' AND '.join(where)}"), params).all()
     return {
         r[0]: (None if r[1] is None else float(r[1]),
                None if r[2] is None else float(r[2]),
@@ -266,14 +316,18 @@ def _rel_change(old: Optional[float], new: Optional[float]) -> Optional[float]:
     return abs(new - old) / abs(old)
 
 
-def _audit_diff(engine, index_code: str, old: dict) -> dict:
+def _audit_diff(engine, index_code: str, old: dict,
+                start: Optional[date] = None, end: Optional[date] = None) -> dict:
     """重算前后对同一 (index_code, trade_date) 的指标做 diff。
 
     只比新旧都存在的行：新增行（首次计算、重建后补回）与整行消失不算"变动"，
     单独计入 `appeared` / `vanished`。超阈（`AUDIT_CHANGE_PCT`）既写日志也进返回值，
     **不静默改数** —— 调用方/脚本据此决定是否要人工复核。
+
+    `start`/`end` 限定比对范围为本段（与 `_load_values` 同口径），
+    这样"只重算一个月"的审计结果不会掺入段外历史行。
     """
-    new = _load_values(engine, index_code)
+    new = _load_values(engine, index_code, start, end)
     compared = changed = appeared = vanished = 0
     max_pct, samples = 0.0, []
 
@@ -331,13 +385,20 @@ def _audit_diff(engine, index_code: str, old: dict) -> dict:
 
 def backfill_index_valuation(index_codes=None, start_date: Optional[date] = None,
                              on_progress: Optional[Callable] = None,
-                             stop_event=None, with_median: bool = True) -> dict:
+                             stop_event=None, with_median: bool = True,
+                             end_date: Optional[date] = None,
+                             on_stats: Optional[Callable] = None) -> dict:
     """全量/区间回填。幂等（upsert），可重复执行。
 
     :param start_date: 不给则从各指数最早快照起；给了则只算 >= start_date 的交易日
+    :param end_date: 不给则算到最新；给了则只算 <= end_date 的交易日（**闭区间**）
     :param on_progress: on_progress(index_code, snap_date, done_ranges, total_ranges)
+    :param on_stats: on_stats(index_code, snap_date, rows_total, done_ranges, total_ranges)
+        比 on_progress 多一个「累计写入行数」——任务化后前端要显示"已算 N 天"。
+        单独开参数而不改 on_progress 签名，是为了不破坏既有调用方（CLI 脚本只传 4 参）。
     :param with_median: 是否同时算横截面中位数（额外一条窗口函数 SQL，约慢一倍）
-    :return: {index_code: {"rows": n, "ranges": n, "aborted": bool, "checked_to": date|None}}
+    :return: {index_code: {"rows", "ranges", "aborted", "checked_to", "gated", "audit"}}
+        `gated` = 被覆盖率门禁拦下（指标留空）的交易日清单
     """
     codes = resolve_index_codes(index_codes)
     from server_fast.config import settings
@@ -346,7 +407,7 @@ def backfill_index_valuation(index_codes=None, start_date: Optional[date] = None
 
     for code in codes:
         if stop_event is not None and stop_event.is_set():
-            out[code] = {"rows": 0, "ranges": 0, "aborted": True}
+            out[code] = {"rows": 0, "ranges": 0, "aborted": True, "gated": []}
             continue
 
         with SessionLocal() as session:
@@ -357,17 +418,22 @@ def backfill_index_valuation(index_codes=None, start_date: Optional[date] = None
 
         if not ranges:
             logger.warning("->%s 无成分快照，跳过估值回填", code)
-            out[code] = {"rows": 0, "ranges": 0, "aborted": False, "checked_to": checked_to}
+            out[code] = {"rows": 0, "ranges": 0, "aborted": False, "checked_to": checked_to,
+                         "gated": []}
             continue
 
-        # 审计基线：重建前的旧值（表为空 / 首次计算时为空 dict）
-        old_values = _load_values(engine, code)
+        # 审计基线：重建前的旧值（表为空 / 首次计算时为空 dict）。只取本段，不做全表 diff
+        old_values = _load_values(engine, code, start_date, end_date)
 
-        # 起点过滤：区间右端 <= start_date 的整段都不需要算
+        # 区间过滤同时受两端约束：
+        #   左：区间右端 <= start_date 的整段都不需要算
+        #   右：快照起点已晚于 end_date ⇒ 整段在范围之外
         if start_date is not None:
             ranges = [r for r in ranges if (r[1] is None or r[1] > start_date)]
+        if end_date is not None:
+            ranges = [r for r in ranges if r[0] <= end_date]
         total_ranges = len(ranges)
-        rows_written, done = 0, 0
+        rows_written, done, gated = 0, 0, []
         aborted = False
 
         for snap, next_snap in ranges:
@@ -375,30 +441,160 @@ def backfill_index_valuation(index_codes=None, start_date: Optional[date] = None
                 aborted = True
                 break
             with engine.begin() as conn:
-                n = _calc_range(conn, code, snap, next_snap,
-                                start_date or snap, with_median)
+                n, gated_days = _calc_range(conn, code, snap, next_snap,
+                                            start_date or snap, with_median, end_date)
             rows_written += n
+            gated.extend(gated_days)
             done += 1
             if on_progress is not None:
                 on_progress(code, snap, done, total_ranges)
+            if on_stats is not None:
+                on_stats(code, snap, rows_written, done, total_ranges)
 
         # 重算审计：超阈变动写日志 + 进返回值，不静默改数（方案 §3.4）
-        audit = _audit_diff(engine, code, old_values)
+        audit = _audit_diff(engine, code, old_values, start_date, end_date)
         logger.info("->%s 估值回填完成：%d 行 / %d 区间", code, rows_written, done)
         out[code] = {"rows": rows_written, "ranges": done, "aborted": aborted,
-                     "checked_to": checked_to, "audit": audit}
+                     "checked_to": checked_to, "gated": [d.isoformat() for d in gated],
+                     "audit": audit}
 
     return out
 
 
-def increment_index_valuation(index_codes=None, days: int = 5) -> dict:
-    """增量：重算最近 `days` 个交易日（覆盖财报修订导致的 PE 跳变），幂等。
+def _load_trade_dates(session: Session) -> list:
+    """读取 <= 今天 的全部交易日（升序）。`bds_trade_date` 含未来日期，必须截断。"""
+    today = date.today()
+    return [
+        r[0] for r in session.query(TradeDate.trade_date)
+        .filter(TradeDate.trade_date <= today)
+        .order_by(TradeDate.trade_date.asc())
+        .all()
+    ]
 
+
+def resolve_incremental_start(index_codes=None, days: int = 5) -> dict:
+    """逐指数解析增量起点：各指数从**自己的**最新已算日往前重叠 `days` 个交易日。
+
+    为什么必须逐指数算（不是一次算个全局起点）：
+    各指数进度不同。若某指数缺了两个月、另一个只缺一天，用全局起点
+    「今天往前 5 个交易日」，落后的那个只会补最近 5 天，中间两个月的洞**永远补不上且不报错**。
+    逐指数起点会从它自己的 `MAX(trade_date)` 起算，一路补到最新。
+
+    :return: {
+        "per_index": {code: date|None},   # None = 该指数从未算过 ⇒ 从最早快照起
+        "lagging": {code: {"last_date","missing_days","start_date"}},
+                                          # 落后超过 days 个交易日 ⇒ 本任务会补算一大段
+        "latest_trade_date": date|None,
+        "used_calendar": bool,            # False = 交易日历为空，已退回自然日口径
+        "fallback_start": date|None,
+    }
+    """
+    codes = resolve_index_codes(index_codes)
+    with SessionLocal() as session:
+        tds = _load_trade_dates(session)
+        lasts = dict(
+            session.query(IndexValuation.index_code, func.max(IndexValuation.trade_date))
+            .filter(IndexValuation.index_code.in_(list(codes)))
+            .group_by(IndexValuation.index_code).all()
+        )
+
+    if not tds:
+        # 交易日历没同步过 ⇒ 退回旧的自然日估算，但必须显式告知（不静默）
+        fallback = date.today() - timedelta(days=days * 2)
+        logger.warning("交易日历 bds_trade_date 为空，增量起点退回自然日口径 %s（×2 倍）", fallback)
+        return {"per_index": {c: fallback for c in codes}, "lagging": {},
+                "latest_trade_date": None, "used_calendar": False,
+                "fallback_start": fallback}
+
+    starts, lagging = {}, {}
+    for c in codes:
+        last = lasts.get(c)
+        if last is None:
+            starts[c] = None      # 从未算过，从最早快照起
+            continue
+        # tds 升序：找最后一个 <= last 的交易日位置
+        i = 0
+        for k, d in enumerate(tds):
+            if d <= last:
+                i = k
+            else:
+                break
+        start_pos = max(0, i - days + 1)
+        starts[c] = tds[start_pos]
+        missing = len(tds) - 1 - i        # 尚未算的交易日数
+        if missing > days:
+            lagging[c] = {
+                "last_date": last.isoformat(),
+                "missing_days": missing,
+                "start_date": tds[start_pos].isoformat(),
+            }
+
+    return {"per_index": starts, "lagging": lagging, "latest_trade_date": tds[-1],
+            "used_calendar": True, "fallback_start": None}
+
+
+def plan_index_valuation_backfill(index_codes=None, start_date: Optional[date] = None,
+                                  end_date: Optional[date] = None, days: int = 5) -> dict:
+    """预演重算计划：只读，不写库。供 router 建任务前预算 `total_count` 与回显生效区间。
+
+    与 `plan_index_constituent_backfill` 对称。区间切分口径与 `backfill_index_valuation`
+    完全一致（同一套过滤），否则计划数与实际进度会错位。
+
+    :return: {"per_index": [{code, sec_name, start_date, ranges}], "total_ranges": int,
+              "lagging": {...}, "latest_trade_date": date|None, "used_calendar": bool}
+    """
+    codes = resolve_index_codes(index_codes)
+    inc = resolve_incremental_start(codes, days)
+    # 「落后」只在纯增量模式下有意义：指定了任一端点都是人为重建，不存在"补不上洞"的问题
+    lagging = {} if (start_date is not None or end_date is not None) else inc["lagging"]
+
+    per_index, total = [], 0
+    with SessionLocal() as session:
+        for code in codes:
+            if start_date is not None:
+                this_start = start_date            # 两端都传 ⇒ 全指数共用起点
+            elif end_date is not None:
+                # ⚠️ 只给终点 ⇒ 从该指数**最早快照**起（None = 不设起点）。
+                # 若这里退回增量起点，end_date 早于它时 total_ranges 会算成 0，
+                # 用户以为"重建到某日"却收到"区间内没有可算的交易日"（已踩过）。
+                this_start = None
+            else:
+                this_start = inc["per_index"].get(code)   # 纯增量：逐指数起点
+            ranges = _snapshot_ranges(session, code)
+            if this_start is not None:
+                ranges = [r for r in ranges if (r[1] is None or r[1] > this_start)]
+            if end_date is not None:
+                ranges = [r for r in ranges if r[0] <= end_date]
+            per_index.append({
+                "code": code,
+                "sec_name": dbsCfg.INDEX_CODE.get(code, {}).get("sec_name", code),
+                "start_date": this_start.isoformat() if this_start else None,
+                "ranges": len(ranges),
+            })
+            total += len(ranges)
+
+    return {
+        "per_index": per_index,
+        "total_ranges": total,
+        "lagging": lagging,
+        "latest_trade_date": (inc["latest_trade_date"].isoformat()
+                              if inc["latest_trade_date"] else None),
+        "used_calendar": inc["used_calendar"],
+    }
+
+
+def increment_index_valuation(index_codes=None, days: int = 5) -> dict:
+    """增量：逐指数重算最近 `days` 个交易日（覆盖财报修订导致的 PE 跳变），幂等。
+
+    ⚠️ 同步阻塞版，仅供脚本/运维用；HTTP 入口已任务化（`/bds/sync/index-valuation`）。
     ⚠️ 前置：应先跑成分增量（水位 `checked_to` 前进），否则可能用旧成分算新日期。
     """
     codes = resolve_index_codes(index_codes)
-    start = date.today() - timedelta(days=days * 2)  # 自然日放宽，交易日由数据决定
-    return backfill_index_valuation(codes, start_date=start)
+    inc = resolve_incremental_start(codes, days)
+    out = {}
+    for code in codes:
+        out.update(backfill_index_valuation([code], start_date=inc["per_index"].get(code)))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +674,8 @@ def list_paged(index_codes=None, start_date: Optional[date] = None,
     with SessionLocal() as session:
         stmt = text(
             "SELECT id, index_code, trade_date, close, pe_ttm, pe_median, pb_mrq, dy_ttm, "
-            "       mv_total, profit_total, n_total, expected_total, n_valid, n_loss, "
+            "       ps_ttm, pcf_ttm_oper, "
+            "       mv_total, profit_total, n_total, expected_total, n_valid, n_loss, n_cf_neg, "
             "       snapshot_date, calc_at, create_time, update_time "
             f"  FROM bds_index_valuation WHERE {cond} "
             " ORDER BY trade_date DESC, index_code ASC LIMIT :limit OFFSET :offset"

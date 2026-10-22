@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """行情数据同步：指数历史行情、指数实时行情、每日估值指标、每日市值指标。"""
 from server_fast.app.bds.services.market_data.index_history import (
+    sync_one_index,
     upsert_index_history_sql,
 )
 from server_fast.app.bds.services.market_data.index_realtime import (
@@ -14,6 +15,7 @@ from server_fast.app.bds.services.market_data.daily_mktvalue import (
 )
 
 __all__ = [
+    'sync_one_index',
     'upsert_index_history_sql',
     'fetch_realtime_index_prices',
     'upsert_daily_valuation_sql',

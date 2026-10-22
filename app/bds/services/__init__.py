@@ -20,6 +20,7 @@ from server_fast.app.bds.services.symbol_info import (
 )
 from server_fast.app.bds.services.market_data import (
     fetch_realtime_index_prices,
+    sync_one_index,
     upsert_index_history_sql,
     upsert_daily_valuation_sql,
     upsert_daily_mktvalue_sql,
@@ -58,6 +59,7 @@ __all__ = [
     'upsert_symbol_info_gm_sql',
     # 行情数据
     'fetch_realtime_index_prices',
+    'sync_one_index',
     'upsert_index_history_sql',
     'upsert_daily_valuation_sql',
     'upsert_daily_mktvalue_sql',
