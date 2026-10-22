@@ -150,7 +150,7 @@ def upsert_group_acc_sql():
     df_acc = df_acc.fillna(0)
     df_acc['cost_total'] = (  # 证券成本剔除现金、理财
         df_acc['cost_total'] - df_acc['cash_acc'] - df_acc['fm_acc'])
-    df_acc['acc_aset'] = df_acc['value_total']  # 账户净值
+    df_acc['acc_aset'] = df_acc['value_total']  # 账户价值（未扣融资负债）
     df_acc['value_total'] = (  # 证券市值剔除现金、理财
         df_acc['value_total'] - df_acc['cash_acc'] - df_acc['fm_acc'])
 

@@ -307,7 +307,7 @@ class GroupAcc(BaseModel, Base):
     fm_acc: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="理财余额")
     cost_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="证券成本")
     value_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="证券市值")
-    acc_aset: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="账户净值")
+    acc_aset: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="账户价值")
     pf_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="浮动盈亏")
     pl_all: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="平仓盈亏")
     pfl_all: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="盈亏合计")

@@ -174,7 +174,7 @@ class GroupAccOut(BaseModel):
     fm_acc: Optional[Decimal] = None  # 理财余额
     cost_total: Optional[Decimal] = None  # 证券成本
     value_total: Optional[Decimal] = None  # 证券市值
-    acc_aset: Optional[Decimal] = None  # 账户净值
+    acc_aset: Optional[Decimal] = None  # 账户价值（未扣融资负债）
     pf_total: Optional[Decimal] = None  # 浮动盈亏
     pl_all: Optional[Decimal] = None  # 平仓盈亏
     pfl_all: Optional[Decimal] = None  # 盈亏合计

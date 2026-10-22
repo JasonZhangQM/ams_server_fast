@@ -226,7 +226,7 @@ def list_group_accs(
 ):
     """返回 GroupAcc 列表。
 
-    account 单值精确匹配，acc_aset_only 为 True 时仅返回账户净值不为 0 的记录。
+    account 单值精确匹配，acc_aset_only 为 True 时仅返回账户价值不为 0 的记录。
     """
     query = db.query(GroupAcc)
     query = _filter_query(
@@ -235,7 +235,7 @@ def list_group_accs(
             (GroupAcc.account, account, "=="),
         ],
     )
-    # 仅保留账户净值不为 0 的记录
+    # 仅保留账户价值不为 0 的记录
     if acc_aset_only:
         query = query.filter(GroupAcc.acc_aset != 0)
     # 过滤后总数（在 offset/limit 之前计算）

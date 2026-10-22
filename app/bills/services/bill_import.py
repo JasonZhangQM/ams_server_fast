@@ -143,9 +143,11 @@ def get_cp(s):
 # 计算期货amount_act,cash字段
 def handle_amount_act_from_file_name(df: pd.DataFrame, file_name: str) -> pd.DataFrame:
     if ('期货' in file_name):
-        cdt = (df['exec_type'] == '入金')
+        # 融资入金/还款出金/付息出金：场外借款打入期货账户的资金流水，
+        # 复用融资融券链路（category=融资融券 → symbol=RZRQ → diff_br/pl_br 自动汇总）
+        cdt = df['exec_type'].isin(['入金', '融资入金'])
         df.loc[cdt, 'amount_act'] = abs(df.loc[cdt, 'amount'])
-        cdt = (df['exec_type'] == '出金')
+        cdt = df['exec_type'].isin(['出金', '还款出金', '付息出金'])
         df.loc[cdt, 'amount_act'] = -abs(df.loc[cdt, 'amount'])
         cdt = (df['exec_type'] == '申报费')
         df.loc[cdt, 'amount_act'] = -abs(df.loc[cdt, 'amount'])
@@ -159,6 +161,12 @@ def handle_amount_act_from_file_name(df: pd.DataFrame, file_name: str) -> pd.Dat
         df.loc[cdt, 'amount_act'] = -(abs(df.loc[cdt, 'amount']) + df.loc[cdt, 'fee_tax'])
         cdt = (df['b_s'].str.contains('卖', na=False) & df['o_c'].str.contains('平', na=False))
         df.loc[cdt, 'amount_act'] = (abs(df.loc[cdt, 'amount']) - df.loc[cdt, 'fee_tax'])
+        # 兜底校验：未识别的流水类型会漏出 NaN，撞 bills_bill.amount_act NOT NULL(1048)，
+        # 且 export_all_data_bill 的 ~str.contains('-') 对 NaN 会静默丢行。此处在落库前显式报错。
+        _miss = df['amount_act'].isna()
+        if _miss.any():
+            raise ValueError(
+                f"未识别的流水类型:{df.loc[_miss, 'exec_type'].unique().tolist()}")
         df['cash'] = df['amount_act']
         cdt = df['name'].str.contains('期权', na=False)  # 处理期权的c_p字段
         df.loc[cdt, 'c_p'] = df.loc[cdt, 'symbol'].apply(get_cp)
