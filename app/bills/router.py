@@ -9,19 +9,30 @@
 - POST 同步路由调用 service 内部函数（service 内部自管理 session）；
 - search_fields 用 contains（模糊），list_filter 用 ==（精确）。
 """
+from datetime import datetime
 from typing import Any, Callable, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server_fast.app.bills.config import Config
-from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol, Profit, ProfitYear
+from server_fast.app.bills.models import (
+    Bill,
+    Group,
+    GroupAcc,
+    GroupSymbol,
+    GroupSymbolNoteLog,
+    Profit,
+    ProfitYear,
+)
 from server_fast.app.bills.schemas import (
     BillOut,
     BillUpdate,
     GroupAccOut,
     GroupOut,
+    GroupSymbolNoteUpdate,
     GroupSymbolOut,
     GroupUpdate,
     ProfitOut,
@@ -250,6 +261,9 @@ def list_group_symbols(
     category: Optional[str] = Query(default=None),
     symbol: Optional[str] = None,
     value_only: Optional[bool] = Query(default=None),
+    pos_state: Optional[str] = Query(default=None, pattern="^(holding|closed)$"),
+    has_note: Optional[bool] = Query(default=None),
+    theme: Optional[str] = Query(default=None),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -258,7 +272,10 @@ def list_group_symbols(
 
     category 单值精确匹配，
     symbol 为 search_fields（模糊）。
-    value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录。
+    value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录（兼容旧参数）。
+    pos_state：holding=持仓中（value_total 非 0）、closed=已平仓（value_total 为 0 或 NULL）。
+    has_note 为 True 时只返回写过笔记（5 个手动字段至少一项非空）的记录。
+    theme 为主题标签精确匹配（不能模糊：否则「黄金」会把「黄金ETF」也带出来）。
     """
     query = db.query(GroupSymbol)
     query = _filter_query(
@@ -266,15 +283,111 @@ def list_group_symbols(
         [
             (GroupSymbol.category, category, "=="),
             (GroupSymbol.symbol, symbol, "contains"),
+            (GroupSymbol.theme, theme, "eq"),
         ],
     )
     # 仅保留当前市值不为 0 的记录
     if value_only:
         query = query.filter(GroupSymbol.value_total != 0)
+    if pos_state == "holding":
+        query = query.filter(GroupSymbol.value_total != 0)
+    elif pos_state == "closed":
+        query = query.filter(or_(
+            GroupSymbol.value_total == 0, GroupSymbol.value_total.is_(None)))
+    if has_note:
+        query = query.filter(or_(*[
+            and_(getattr(GroupSymbol, field).isnot(None), getattr(GroupSymbol, field) != '')
+            for field in _GS_NOTE_FIELDS
+        ]))
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
     items = query.offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+
+
+# 标的笔记可编辑字段：与 GroupSymbolNoteUpdate 保持一致，其余派生字段一律不允许手动改
+_GS_NOTE_FIELDS = ('logic', 'plan', 'invalidate', 'review', 'theme')
+
+
+@router.get("/group-symbols/themes")
+def list_group_symbol_themes(db: Session = Depends(get_db)):
+    """返回已使用过的主题标签（去重，按行数降序），供筛选下拉。
+
+    必须独立成接口：若从列表页数据里提取，一旦按某主题筛选，下拉选项就会塌缩成
+    只剩当前主题，用户没法再切到别的标签。
+
+    ⚠️ 路由必须声明在 `/group-symbols/{id_}` 之类带路径参数的路由之前，
+    否则 "themes" 会被当成 id 解析。
+    """
+    rows = (
+        db.query(GroupSymbol.theme, func.count(GroupSymbol.id).label('cnt'))
+        .filter(GroupSymbol.theme.isnot(None), GroupSymbol.theme != '')
+        .group_by(GroupSymbol.theme)
+        .order_by(func.count(GroupSymbol.id).desc(), GroupSymbol.theme.asc())
+        .all()
+    )
+    return {"items": [{"theme": theme, "count": cnt} for theme, cnt in rows]}
+
+
+@router.patch("/group-symbols/{id_}")
+def update_group_symbol_note(
+    id_: int,
+    payload: GroupSymbolNoteUpdate,
+    db: Session = Depends(get_db),
+):
+    """修改标的笔记（PATCH /bills/group-symbols/{id}）。
+
+    仅允许修改 logic / plan / invalidate / review / theme 五个手动字段。
+    语义按 exclude_unset 区分：未传 = 不修改；传空串 = 清空该字段。
+    每次真正发生变化的字段写一条 bills_group_symbol_note_log，与主表同一事务提交。
+    note_at 只在首次落笔（原为 NULL 且本次写了非空内容）时由后端写，前端不可传。
+    """
+    gs = db.get(GroupSymbol, id_)
+    if gs is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+
+    data = payload.model_dump(exclude_unset=True)
+    # 空串/纯空白统一归一为 None，避免库里出现 '' 与 NULL 两种「空」
+    changes = []
+    for field in _GS_NOTE_FIELDS:
+        if field not in data:
+            continue
+        new_val = data[field]
+        if isinstance(new_val, str):
+            new_val = new_val.strip() or None
+        if field == 'theme' and new_val is not None and len(new_val) > 32:
+            raise HTTPException(status_code=400, detail=f"theme 超过 32 字符：{new_val}")
+        old_val = getattr(gs, field)
+        if (old_val or None) == (new_val or None):
+            continue
+        changes.append((field, old_val, new_val))
+
+    if not changes:
+        return {"status": "success", "message": "内容未变化", "fields": [], "note_at": gs.note_at}
+
+    try:
+        for field, old_val, new_val in changes:
+            setattr(gs, field, new_val)
+            db.add(GroupSymbolNoteLog(
+                category=gs.category,
+                symbol=gs.symbol,
+                field=field,
+                old_value=old_val,
+                new_value=new_val,
+                source='manual',
+            ))
+        if gs.note_at is None:
+            gs.note_at = datetime.now()
+        db.commit()
+        return {
+            "status": "success",
+            "message": f"已更新 {len(changes)} 个字段",
+            "fields": [field for field, _, _ in changes],
+            "note_at": gs.note_at,
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
 
 
 # 年度收益查询

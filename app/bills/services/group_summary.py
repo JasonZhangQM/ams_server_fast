@@ -18,6 +18,14 @@ from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol
 
 logger = logging.getLogger("uvicorn.error")
 
+# bills_group_symbol 的派生列：由 bills_group 聚合算出、每次重算都要覆盖。
+# 手动维护的笔记列（logic/plan/invalidate/review/theme/note_at）不在此列，
+# upsert_df_to_db 用 update_columns 显式限定，从机制上防覆盖。
+_DERIVED_COLS = [
+    'count', 'p_total', 'cost_total', 'price', 'multiplier', 'value_total',
+    'pf_total', 'pl_all', 'pfl_all', 'diff_br', 'diff_dw', 'diff_dwt',
+]
+
 
 ## 汇总账单
 # 更新账单中的代码
@@ -201,6 +209,9 @@ def upsert_group_symbol_sql():
         df_in = df_init_model(df_symbol, _mdl_symbol)
         _table = _mdl_symbol.__table__.name
         _unique_keys = _mdl_symbol.unique_keys
+        # 显式白名单：只更新派生列，绝不碰 logic/plan/invalidate/review/theme/note_at
+        # （这五个字段是手动维护的笔记，默认「更新除唯一键外所有列」的写法一旦
+        #  df 里多带一列，就会把它们静默冲成 NULL）
         result = upsert_df_to_db(
-            df_in, _table, _engine, _unique_keys)
+            df_in, _table, _engine, _unique_keys, update_columns=_DERIVED_COLS)
     return result

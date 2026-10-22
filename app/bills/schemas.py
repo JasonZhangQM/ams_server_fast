@@ -190,7 +190,7 @@ class GroupAccOut(BaseModel):
 
 
 class GroupSymbolOut(BaseModel):
-    """标的汇总响应（对应 GroupSymbol 模型，共 18 字段）。"""
+    """标的汇总响应（对应 GroupSymbol 模型，共 23 字段）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -209,10 +209,35 @@ class GroupSymbolOut(BaseModel):
     diff_dw: Optional[Decimal] = None  # 出入净额
     diff_dwt: Optional[Decimal] = None  # 划转净额
 
+    # 手动维护的持仓笔记（派生重算不覆盖）
+    logic: Optional[str] = None  # 开仓逻辑
+    plan: Optional[str] = None  # 策略与计划
+    invalidate: Optional[str] = None  # 证伪条件
+    review: Optional[str] = None  # 复盘结论
+    theme: Optional[str] = None  # 主题标签
+    note_at: Optional[datetime] = None  # 笔记首次落笔时间
+
     # 通用字段（BaseModel 提供）
     id: int  # 主键
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间
+
+
+class GroupSymbolNoteUpdate(BaseModel):
+    """标的笔记修改请求（PATCH /bills/group-symbols/{id}）。
+
+    仅允许修改 5 个手动字段；note_at 由后端在首次落笔时写入，前端不可传，
+    其余派生字段（盈亏、市值、价格等）一律由导入/同步流程生成，不允许手动编辑。
+    exclude_unset=True 使用：显式传空串表示「清空该字段」，未传表示「不修改」。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    logic: Optional[str] = None  # 开仓逻辑
+    plan: Optional[str] = None  # 策略与计划
+    invalidate: Optional[str] = None  # 证伪条件
+    review: Optional[str] = None  # 复盘结论
+    theme: Optional[str] = None  # 主题标签
 
 
 class ProfitYearOut(BaseModel):

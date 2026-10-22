@@ -20,7 +20,9 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -348,6 +350,14 @@ class GroupSymbol(Base, BaseModel):
     diff_dw: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="出入净额")
     diff_dwt: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="划转净额")
 
+    # ---- 手动维护的持仓笔记（派生重算时不参与，见 upsert_group_symbol_sql 的 update_columns 白名单）----
+    logic: Mapped[Optional[str]] = mapped_column(Text, comment="开仓逻辑（当时核心假设，原话）")
+    plan: Mapped[Optional[str]] = mapped_column(Text, comment="策略与计划（条件句：触发价/加减仓/移仓）")
+    invalidate: Mapped[Optional[str]] = mapped_column(Text, comment="证伪条件（须可量化，与止损位分开）")
+    review: Mapped[Optional[str]] = mapped_column(Text, comment="复盘结论（平仓或阶段回看时写）")
+    theme: Mapped[Optional[str]] = mapped_column(String(32), comment="主题标签（黄金/IC贴水/红利…）")
+    note_at: Mapped[Optional[datetime]] = mapped_column(DateTime, comment="笔记首次落笔时间（后端填，前端不可改）")
+
     # ---- 保留的自定义类属性 ----
     unique_keys = ['category', 'symbol']
 
@@ -358,6 +368,35 @@ class GroupSymbol(Base, BaseModel):
 
     def __str__(self) -> str:
         return f'标的汇总-{self.category}-{self.symbol}'
+
+
+class GroupSymbolNoteLog(Base):
+    """标的笔记改动留痕（只记录值真变了的字段）。
+
+    不继承 BaseModel：该表只需要「改了什么、什么时候改的」，
+    额外塞 create_time/update_time 只会和 changed_at 重复。
+    """
+
+    __tablename__ = "bills_group_symbol_note_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    category: Mapped[str] = mapped_column(String(16), comment="交易分类")
+    symbol: Mapped[str] = mapped_column(String(32), comment="代码")
+    field: Mapped[str] = mapped_column(String(16), comment="被改字段：logic/plan/invalidate/review/theme")
+    old_value: Mapped[Optional[str]] = mapped_column(Text, comment="改前值")
+    new_value: Mapped[Optional[str]] = mapped_column(Text, comment="改后值")
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="改动时间")
+    source: Mapped[str] = mapped_column(
+        String(16), server_default='manual', comment="来源：manual/import")
+
+    __table_args__ = (
+        Index('idx_gs_note_log', 'category', 'symbol', 'changed_at'),
+        {'comment': '标的笔记改动留痕'},
+    )
+
+    def __str__(self) -> str:
+        return f'标的笔记留痕-{self.category}-{self.symbol}-{self.field}'
 
 
 class ProfitYear(Base, BaseModel):
