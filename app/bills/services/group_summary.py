@@ -21,6 +21,9 @@ logger = logging.getLogger("uvicorn.error")
 # bills_group_symbol 的派生列：由 bills_group 聚合算出、每次重算都要覆盖。
 # 手动维护的笔记列（logic/plan/invalidate/review/theme/note_at）不在此列，
 # upsert_df_to_db 用 update_columns 显式限定，从机制上防覆盖。
+# ⚠️ 重算只更新这些派生列（upsert_df_to_db 的 update_columns 白名单）。
+# **vm_symbol 是人工维护的归属列，永远不要加进这个列表**——一旦加进来，
+# 下一次同步就会把它整体清空，且不报错（v3 方案风险 15 / 验收 17）。
 _DERIVED_COLS = [
     'count', 'p_total', 'cost_total', 'price', 'multiplier', 'value_total',
     'pf_total', 'pl_all', 'pfl_all', 'diff_br', 'diff_dw', 'diff_dwt',
@@ -209,9 +212,10 @@ def upsert_group_symbol_sql():
         df_in = df_init_model(df_symbol, _mdl_symbol)
         _table = _mdl_symbol.__table__.name
         _unique_keys = _mdl_symbol.unique_keys
-        # 显式白名单：只更新派生列，绝不碰 logic/plan/invalidate/review/theme/note_at
-        # （这五个字段是手动维护的笔记，默认「更新除唯一键外所有列」的写法一旦
-        #  df 里多带一列，就会把它们静默冲成 NULL）
+        # 显式白名单：只更新派生列，绝不碰人工列。
+        # ⚠️ 现在的人工列只有 vm_symbol（归属标的）一个——它**必须留在白名单之外**。
+        # 默认写法「更新除唯一键外所有列」在 df 多带一列时会把人工列静默冲成 NULL，
+        # 而 vm_symbol 被清空后不会有任何报错，只会在标的页悄悄少掉几十笔成交。
         result = upsert_df_to_db(
             df_in, _table, _engine, _unique_keys, update_columns=_DERIVED_COLS)
     return result

@@ -116,6 +116,13 @@ class BillOut(BaseModel):
     market: Optional[str] = None  # 市场
     account: str  # 账户
 
+    # ---- v3 派生：归属标的与成交笔记（list_bills 带出，不落 bills_bill 表）----
+    vm_symbol: Optional[str] = None  # 归属标的（来自 bills_group_symbol.vm_symbol；融资融券恒为 None）
+    note_idea: Optional[str] = None  # 「想法」正文
+    note_idea_at: Optional[datetime] = None  # 「想法」落笔时间（晚于成交 = 事后补写）
+    note_review: Optional[str] = None  # 「复盘」正文
+    note_review_at: Optional[datetime] = None  # 「复盘」落笔时间
+
     # 通用字段（BaseModel 提供）
     id: int  # 主键
     create_time: datetime  # 创建时间
@@ -190,7 +197,7 @@ class GroupAccOut(BaseModel):
 
 
 class GroupSymbolOut(BaseModel):
-    """标的汇总响应（对应 GroupSymbol 模型，共 23 字段）。"""
+    """标的汇总响应（对应 GroupSymbol 模型：14 个派生字段 + vm_symbol，笔记列已全部下线）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -209,13 +216,8 @@ class GroupSymbolOut(BaseModel):
     diff_dw: Optional[Decimal] = None  # 出入净额
     diff_dwt: Optional[Decimal] = None  # 划转净额
 
-    # 手动维护的持仓笔记（派生重算不覆盖）
-    logic: Optional[str] = None  # 开仓逻辑
-    plan: Optional[str] = None  # 策略与计划
-    invalidate: Optional[str] = None  # 证伪条件
-    review: Optional[str] = None  # 复盘结论
-    theme: Optional[str] = None  # 主题标签
-    note_at: Optional[datetime] = None  # 笔记首次落笔时间
+    # v3：唯一的可编辑列（不进 _DERIVED_COLS，重算不覆盖）
+    vm_symbol: Optional[str] = None  # 归属标的；融资融券与未归属为 None
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
@@ -223,21 +225,41 @@ class GroupSymbolOut(BaseModel):
     update_time: datetime  # 更新时间
 
 
-class GroupSymbolNoteUpdate(BaseModel):
-    """标的笔记修改请求（PATCH /bills/group-symbols/{id}）。
+class GroupSymbolVmUpdate(BaseModel):
+    """归属标的修改请求（PATCH /bills/group-symbols/{id}/vm）。
 
-    仅允许修改 5 个手动字段；note_at 由后端在首次落笔时写入，前端不可传，
-    其余派生字段（盈亏、市值、价格等）一律由导入/同步流程生成，不允许手动编辑。
-    exclude_unset=True 使用：显式传空串表示「清空该字段」，未传表示「不修改」。
+    v3 起合约表只剩这一个可编辑字段。融资融券行（symbol='RZRQ'）传任何值都会被
+    后端以 400 拒绝——融资只是融资行为，name 不承担归属含义（v3 §4.5.1 规则一）。
+    显式传 null 表示清空归属。
     """
 
     model_config = ConfigDict(from_attributes=True)
 
-    logic: Optional[str] = None  # 开仓逻辑
-    plan: Optional[str] = None  # 策略与计划
-    invalidate: Optional[str] = None  # 证伪条件
-    review: Optional[str] = None  # 复盘结论
-    theme: Optional[str] = None  # 主题标签
+    vm_symbol: Optional[str] = None  # 归属标的（irs_value_monitor.symbol）
+
+
+class BillNoteOut(BaseModel):
+    """成交笔记响应（对应 bills_bill_note）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    bill_id: Optional[int] = None
+    biz_key: str
+    kind: str
+    content: str
+    content_at: datetime
+    create_time: datetime
+    update_time: datetime
+
+
+class BillNoteSave(BaseModel):
+    """成交笔记保存请求（PUT /bills/bills/{id}/note/{kind}）。
+
+    content_at 由后端写，前端不可传——否则"当时写的"可以被伪造，反自欺就失效了。
+    """
+
+    content: str
 
 
 class ProfitYearOut(BaseModel):

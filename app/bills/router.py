@@ -13,31 +13,40 @@ from datetime import datetime
 from typing import Any, Callable, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server_fast.app.bills.config import Config
+from server_fast.app.bills.constants import (
+    RZRQ_CATEGORY,
+    TRADE_CATS,
+    VIRTUAL_SYMBOLS,
+    is_attachable,
+)
 from server_fast.app.bills.models import (
     Bill,
+    BillNote,
     Group,
     GroupAcc,
     GroupSymbol,
-    GroupSymbolNoteLog,
     Profit,
     ProfitYear,
 )
 from server_fast.app.bills.schemas import (
+    BillNoteOut,
+    BillNoteSave,
     BillOut,
     BillUpdate,
     GroupAccOut,
     GroupOut,
-    GroupSymbolNoteUpdate,
     GroupSymbolOut,
+    GroupSymbolVmUpdate,
     GroupUpdate,
     ProfitOut,
     ProfitYearOut,
 )
+from server_fast.app.irs.models import ValueMonitor
 from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
 
@@ -154,14 +163,23 @@ def list_bills(
     account: Optional[str] = Query(default=None),
     category: Optional[str] = Query(default=None),
     symbol: Optional[str] = None,
+    name: Optional[str] = None,
+    vm_symbol: Optional[str] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """返回 Bill 列表。
 
-    account/category 单值精确匹配，
-    symbol 为 search_fields（模糊）。
+    account/category 单值精确匹配，symbol 模糊，name 模糊（标的中文名 / 合约简称）。
+    vm_symbol 按归属标的精确筛选（经 bills_group_symbol 的 (category, symbol) 关联）。
+
+    v3 起每行额外带：`vm_symbol`（经 bills_group_symbol 归属，融资融券恒为 None）
+    与两条笔记摘要（想法 / 复盘）。笔记只做一次 IN 查询补齐，不让账单表承担 JOIN。
+
+    排序：固定 `id DESC`。id 为自增主键、等于入库顺序，倒序即最新一笔在前。
+    必须显式排序——MySQL 对无 ORDER BY 的查询不保证返回顺序，
+    服务端分页（offset/limit）下会出现翻页跳行或重复行。
     """
     query = db.query(Bill)
     query = _filter_query(
@@ -170,12 +188,51 @@ def list_bills(
             (Bill.account, account, "=="),
             (Bill.category, category, "=="),
             (Bill.symbol, symbol, "contains"),
+            (Bill.name, name, "contains"),
         ],
     )
-    # 过滤后总数（在 offset/limit 之前计算）
+    # 归属标的筛选：vm_symbol 不是 bills_bill 的列，来自 bills_group_symbol
+    # （两表以 (category, symbol) 关联，同一组在 group_symbol 里唯一）。
+    # 用 EXISTS 而不是 JOIN：JOIN 在关联逻辑万一不唯一时会放大行数，让 count 与分页全错。
+    if vm_symbol:
+        query = query.filter(
+            db.query(GroupSymbol.id)
+            .filter(
+                GroupSymbol.category == Bill.category,
+                GroupSymbol.symbol == Bill.symbol,
+                GroupSymbol.vm_symbol == vm_symbol,
+            )
+            .exists()
+        )
+    # 过滤后总数（在 offset/limit 之前计算；count 不吃 order_by，先算再排）
     total = query.count()
-    items = query.offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    items = query.order_by(Bill.id.desc()).offset(offset).limit(limit).all()
+    dicts = [item.to_dict() for item in items]
+
+    if dicts:
+        bill_ids = [d["id"] for d in dicts]
+        # 归属：一次 JOIN group_symbol（(category,symbol) 是两表共有键）
+        vm_map = {}
+        keys = {(d["category"], d["symbol"]) for d in dicts}
+        gs_rows = (db.query(GroupSymbol.category, GroupSymbol.symbol, GroupSymbol.vm_symbol)
+                   .filter(GroupSymbol.vm_symbol.isnot(None)).all())
+        for cat, sym, vm in gs_rows:
+            if (cat, sym) in keys:
+                vm_map[(cat, sym)] = vm
+        # 笔记：一次取完，Python 侧分流
+        notes = {}
+        for n in (db.query(BillNote).filter(BillNote.bill_id.in_(bill_ids)).all()):
+            notes.setdefault(n.bill_id, {})[n.kind] = n
+        for d in dicts:
+            d["vm_symbol"] = vm_map.get((d["category"], d["symbol"]))
+            pair = notes.get(d["id"], {})
+            idea = pair.get(BillNote.KIND_IDEA)
+            review = pair.get(BillNote.KIND_REVIEW)
+            d["note_idea"] = idea.content if idea else None
+            d["note_idea_at"] = idea.content_at if idea else None
+            d["note_review"] = review.content if review else None
+            d["note_review_at"] = review.content_at if review else None
+    return {"items": dicts, "total": total, "limit": limit, "offset": offset}
 
 
 # Profit 列表
@@ -262,20 +319,25 @@ def list_group_symbols(
     symbol: Optional[str] = None,
     value_only: Optional[bool] = Query(default=None),
     pos_state: Optional[str] = Query(default=None, pattern="^(holding|closed)$"),
-    has_note: Optional[bool] = Query(default=None),
-    theme: Optional[str] = Query(default=None),
+    mapped: Optional[str] = Query(default=None, pattern="^(yes|no)$",
+                                  description="归属筛选：yes=已归属；no=未归属（不含融资融券）"),
+    vm_symbol: Optional[str] = Query(default=None,
+                                     description="按归属标的精确筛选（如 SHSE.000300）"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """返回 GroupSymbol 列表。
 
-    category 单值精确匹配，
-    symbol 为 search_fields（模糊）。
+    category 单值精确匹配，symbol 为 search_fields（模糊）。
     value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录（兼容旧参数）。
     pos_state：holding=持仓中（value_total 非 0）、closed=已平仓（value_total 为 0 或 NULL）。
-    has_note 为 True 时只返回写过笔记（5 个手动字段至少一项非空）的记录。
-    theme 为主题标签精确匹配（不能模糊：否则「黄金」会把「黄金ETF」也带出来）。
+    mapped：yes=已归属标的；no=未归属（**排除融资融券**——它本来就不归属，不是漏配）。
+    vm_symbol：按具体归属标的精确筛选（下拉值来自 irs_value_monitor.symbol）。
+    与 mapped 是 AND 关系：mapped=no 且 vm_symbol 有值时结果恒为空，前端选了具体标的后会清掉 mapped。
+
+    v3 起本表没有笔记列也没有 theme：主题只在 `/irs/value-monitors` 维护，
+    唯一的人工列是 `vm_symbol`。
     """
     query = db.query(GroupSymbol)
     query = _filter_query(
@@ -283,7 +345,9 @@ def list_group_symbols(
         [
             (GroupSymbol.category, category, "=="),
             (GroupSymbol.symbol, symbol, "contains"),
-            (GroupSymbol.theme, theme, "eq"),
+            # 归属标的是受控代码值，必须精确；_filter_query 只认 'eq'，
+            # 写成 '==' 会落进 else 分支做 contains，把 SHSE.000300 串成前缀匹配
+            (GroupSymbol.vm_symbol, vm_symbol, "eq"),
         ],
     )
     # 仅保留当前市值不为 0 的记录
@@ -294,97 +358,83 @@ def list_group_symbols(
     elif pos_state == "closed":
         query = query.filter(or_(
             GroupSymbol.value_total == 0, GroupSymbol.value_total.is_(None)))
-    if has_note:
-        query = query.filter(or_(*[
-            and_(getattr(GroupSymbol, field).isnot(None), getattr(GroupSymbol, field) != '')
-            for field in _GS_NOTE_FIELDS
-        ]))
+    if mapped == "yes":
+        query = query.filter(GroupSymbol.category.in_(TRADE_CATS),
+                             GroupSymbol.symbol.notin_(sorted(VIRTUAL_SYMBOLS)),
+                             or_(
+                                 GroupSymbol.vm_symbol.isnot(None),
+                                 GroupSymbol.symbol.in_(db.query(ValueMonitor.symbol))))
+    elif mapped == "no":
+        # 与 unmapped-count 同口径（constants.is_attachable）：排除资金流水行与同代码自动命中
+        query = query.filter(GroupSymbol.category.in_(TRADE_CATS),
+                             GroupSymbol.symbol.notin_(sorted(VIRTUAL_SYMBOLS)),
+                             GroupSymbol.vm_symbol.is_(None),
+                             ~GroupSymbol.symbol.in_(db.query(ValueMonitor.symbol)))
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
     items = query.offset(offset).limit(limit).all()
     return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
 
 
-# 标的笔记可编辑字段：与 GroupSymbolNoteUpdate 保持一致，其余派生字段一律不允许手动改
-_GS_NOTE_FIELDS = ('logic', 'plan', 'invalidate', 'review', 'theme')
+@router.get("/group-symbols/unmapped-count")
+def count_unmapped_group_symbols(db: Session = Depends(get_db)):
+    """归属计数：已归属 / 未归属 / 不参与归属（顶部提示用）。
 
+    三态口径，加起来等于 total：
+    - `mapped`   已归属：有 vm_symbol，或 `symbol` 与某标的同代码（自动命中，无需填）；
+    - `unmapped` 真未归属：可归属的交易行里既无 vm_symbol、也不同代码 —— 这才是可操作清单；
+    - `excluded` 不参与归属：资金流水行（`CRJ`/`SYFY`/`cash`/`RZRQ` + 理财逆回购），
+                 给了 vm_symbol 也没意义，故不算漏配。
 
-@router.get("/group-symbols/themes")
-def list_group_symbol_themes(db: Session = Depends(get_db)):
-    """返回已使用过的主题标签（去重，按行数降序），供筛选下拉。
+    口径唯一来源见 `app/bills/constants.py::is_attachable`。
 
-    必须独立成接口：若从列表页数据里提取，一旦按某主题筛选，下拉选项就会塌缩成
-    只剩当前主题，用户没法再切到别的标签。
-
-    ⚠️ 路由必须声明在 `/group-symbols/{id_}` 之类带路径参数的路由之前，
-    否则 "themes" 会被当成 id 解析。
+    ⚠️ 必须声明在 `/group-symbols/{id_}` 之前，否则 "unmapped-count" 会被当成 id。
     """
-    rows = (
-        db.query(GroupSymbol.theme, func.count(GroupSymbol.id).label('cnt'))
-        .filter(GroupSymbol.theme.isnot(None), GroupSymbol.theme != '')
-        .group_by(GroupSymbol.theme)
-        .order_by(func.count(GroupSymbol.id).desc(), GroupSymbol.theme.asc())
-        .all()
-    )
-    return {"items": [{"theme": theme, "count": cnt} for theme, cnt in rows]}
+    vm_symbols = {r[0] for r in db.query(ValueMonitor.symbol).all()}
+    rows = db.query(GroupSymbol.category, GroupSymbol.symbol, GroupSymbol.vm_symbol).all()
+    mapped_n = unmapped_n = excluded_n = 0
+    for cat, sym, vm in rows:
+        if not is_attachable(cat, sym):
+            excluded_n += 1
+        elif vm or sym in vm_symbols:
+            mapped_n += 1
+        else:
+            unmapped_n += 1
+    return {"mapped": mapped_n, "unmapped": unmapped_n, "excluded": excluded_n,
+            "total": len(rows)}
 
 
-@router.patch("/group-symbols/{id_}")
-def update_group_symbol_note(
+@router.patch("/group-symbols/{id_}/vm")
+def update_group_symbol_vm(
     id_: int,
-    payload: GroupSymbolNoteUpdate,
+    payload: GroupSymbolVmUpdate,
     db: Session = Depends(get_db),
 ):
-    """修改标的笔记（PATCH /bills/group-symbols/{id}）。
+    """修改合约行的归属标的（PATCH /bills/group-symbols/{id}/vm）。
 
-    仅允许修改 logic / plan / invalidate / review / theme 五个手动字段。
-    语义按 exclude_unset 区分：未传 = 不修改；传空串 = 清空该字段。
-    每次真正发生变化的字段写一条 bills_group_symbol_note_log，与主表同一事务提交。
-    note_at 只在首次落笔（原为 NULL 且本次写了非空内容）时由后端写，前端不可传。
+    铁律 4.9：**只写 vm_symbol 一列**（`update_columns=['vm_symbol']` 的白名单语义），
+    禁止整行回写——否则派生列会被上一屏的旧值覆盖。
+
+    不可归属行（`constants.is_attachable` 为假：融资融券 / 出入金 CRJ / 收益费用 SYFY /
+    cash / 理财逆回购）传任何非空值 -> 400：这些行的 symbol 只是资金流水占位代码，
+    给它们挂标的不产生任何归属意义。传 null 仍允许（无事发生，便于批量清理）。
     """
     gs = db.get(GroupSymbol, id_)
     if gs is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
-
-    data = payload.model_dump(exclude_unset=True)
-    # 空串/纯空白统一归一为 None，避免库里出现 '' 与 NULL 两种「空」
-    changes = []
-    for field in _GS_NOTE_FIELDS:
-        if field not in data:
-            continue
-        new_val = data[field]
-        if isinstance(new_val, str):
-            new_val = new_val.strip() or None
-        if field == 'theme' and new_val is not None and len(new_val) > 32:
-            raise HTTPException(status_code=400, detail=f"theme 超过 32 字符：{new_val}")
-        old_val = getattr(gs, field)
-        if (old_val or None) == (new_val or None):
-            continue
-        changes.append((field, old_val, new_val))
-
-    if not changes:
-        return {"status": "success", "message": "内容未变化", "fields": [], "note_at": gs.note_at}
-
+    if payload.vm_symbol is not None and not is_attachable(gs.category, gs.symbol):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{gs.category} / {gs.symbol} 是资金流水行，不参与标的归属")
+    if payload.vm_symbol:
+        exists = db.query(ValueMonitor.symbol).filter(ValueMonitor.symbol == payload.vm_symbol).first()
+        if exists is None:
+            raise HTTPException(status_code=400,
+                                detail=f"标的 {payload.vm_symbol} 不在估值监测里，请先新增标的")
     try:
-        for field, old_val, new_val in changes:
-            setattr(gs, field, new_val)
-            db.add(GroupSymbolNoteLog(
-                category=gs.category,
-                symbol=gs.symbol,
-                field=field,
-                old_value=old_val,
-                new_value=new_val,
-                source='manual',
-            ))
-        if gs.note_at is None:
-            gs.note_at = datetime.now()
+        gs.vm_symbol = payload.vm_symbol or None
         db.commit()
-        return {
-            "status": "success",
-            "message": f"已更新 {len(changes)} 个字段",
-            "fields": [field for field, _, _ in changes],
-            "note_at": gs.note_at,
-        }
+        return {"status": "success", "vm_symbol": gs.vm_symbol}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
@@ -405,7 +455,7 @@ def list_profit_years(
 
 
 # =========================================================================
-# PATCH 修改路由（2 个，按 id 更新）
+# 单行写路由（PATCH 改 / DELETE 删，按 id 操作）
 # =========================================================================
 
 
@@ -436,6 +486,70 @@ def update_bill(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
+
+
+@router.delete("/bills/{id_}")
+def delete_bill(
+    id_: int,
+    db: Session = Depends(get_db),
+):
+    """删除一条账单流水，并级联删除对应的账单收益行（DELETE /bills/bills/{id}）。
+
+    硬约束：只允许删除该账户 trade_time 最大的那一笔。
+    原因：导入是逐账户按 trade_time > MAX(trade_time) 增量过滤的，
+    删中间或前面的行不会被下次导入补回，会留下永久缺口；
+    只有从末尾倒着删，再导入才能把删掉的行补回来。
+
+    副作用：
+    - bills_profit 中 bill_id 对应的行一并删除；
+    - 受影响的 bills_group 行 profit_time 置 NULL，标记待重算
+      （end_time 不会因为删行自动变小，不清就不会触发重算）。
+    """
+    bill = db.get(Bill, id_)
+    if bill is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+
+    acc_max = db.query(func.max(Bill.trade_time)).filter(Bill.account == bill.account).scalar()
+    if acc_max is not None and bill.trade_time < acc_max:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"只能删除账户 {bill.account} 的最后一笔。"
+                f"该账户最新交易时间为 {acc_max:%Y-%m-%d %H:%M:%S}，"
+                f"本行为 {bill.trade_time:%Y-%m-%d %H:%M:%S}。"
+                "请先删除该账户更晚的流水，或让账单重新导入补齐。"
+            ),
+        )
+
+    account, category, symbol = bill.account, bill.category, bill.symbol
+    try:
+        # 先删子表再删主表，不依赖数据库层 ON DELETE CASCADE 是否真的建成
+        deleted_profit = (
+            db.query(Profit).filter(Profit.bill_id == id_).delete(synchronize_session=False)
+        )
+        db.delete(bill)
+        # 派生汇总标记过期：不显式清，end_time==profit_time 会让重算条件不成立
+        flagged_groups = (
+            db.query(Group)
+            .filter(
+                Group.account == account,
+                Group.category == category,
+                Group.symbol == symbol,
+                Group.profit_time.isnot(None),
+            )
+            .update({Group.profit_time: None}, synchronize_session=False)
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"删除失败：{e}")
+
+    return {
+        "status": "success",
+        "message": "删除成功",
+        "deleted_profit": int(deleted_profit or 0),
+        "flagged_groups": int(flagged_groups or 0),
+    }
 
 
 @router.patch("/group/{id_}")
@@ -532,3 +646,87 @@ def run_batch_import():
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
         ]
     )
+
+
+# =========================================================================
+# v3：成交笔记 与 无计划成交
+# =========================================================================
+
+@router.get("/unplanned")
+def list_unplanned_bills(
+    account: Optional[str] = Query(default=None),
+    month: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}$",
+                                 description="只统计某月（YYYY-MM）；空=全部"),
+    limit: int = Query(200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    """无计划成交：成交时间早于**该标的任何计划**的建立时间。
+
+    这是"先斩后奏 / 事后补计划"的唯一可算证据——研究报告日期、计划日期、成交日期
+    三者的先后，就是纪律的度量，文本永远算不出来。
+
+    口径：只看有归属标的的成交（融资融券不参与，它本来就没有"计划委托"这一层）。
+    """
+    sql = """
+        SELECT b.id, b.trade_time, b.account, b.category, b.symbol, b.name,
+               b.b_s, b.o_c, b.price, b.vol, g.vm_symbol, p.first_plan_at
+        FROM bills_bill b
+        JOIN bills_group_symbol g
+          ON g.category = b.category AND g.symbol = b.symbol
+        LEFT JOIN (SELECT vm_symbol, MIN(create_time) AS first_plan_at
+                     FROM irs_vm_plan GROUP BY vm_symbol) p
+          ON p.vm_symbol = g.vm_symbol
+        WHERE g.vm_symbol IS NOT NULL
+          AND b.category <> '融资融券'
+          AND (p.first_plan_at IS NULL OR b.trade_time < DATE(p.first_plan_at))
+    """
+    params: dict = {}
+    if account:
+        sql += " AND b.account = :account"
+        params["account"] = account
+    if month:
+        sql += " AND DATE_FORMAT(b.trade_time, '%%Y-%%m') = :month"
+        params["month"] = month
+    sql += " ORDER BY b.trade_time DESC LIMIT :lim"
+    params["lim"] = limit
+    rows = db.execute(text(sql), params).mappings().all()
+    return {"items": [dict(r) for r in rows], "count": len(rows)}
+
+
+@router.get("/{id_}/note", response_model=List[BillNoteOut])
+def list_bill_notes(id_: int, db: Session = Depends(get_db)):
+    """某笔成交的全部笔记（想法/复盘，最多两条）。"""
+    if db.get(Bill, id_) is None:
+        raise HTTPException(status_code=404, detail=f"成交不存在：{id_}")
+    return db.query(BillNote).filter(BillNote.bill_id == id_).order_by(BillNote.kind).all()
+
+
+@router.put("/{id_}/note/{kind}")
+def save_bill_note(
+    id_: int,
+    kind: str,
+    payload: BillNoteSave,
+    db: Session = Depends(get_db),
+):
+    """写一笔成交的笔记（kind = 想法 / 复盘）。
+
+    - 独立端点，不混进 PATCH /bills/{id_} —— 那是 36 字段的宽口子，
+      一旦有人给它加"回写全列"，笔记会被静默冲成 NULL；
+    - content_at 由后端在首次写入时打，前端不可传；
+    - 传空串 = 删除该条（不留空壳）。
+    """
+    bill = db.get(Bill, id_)
+    if bill is None:
+        raise HTTPException(status_code=404, detail=f"成交不存在：{id_}")
+    # 延迟导入：services/__init__ 会拉起多个子模块，顶层导入易与 models 形成环
+    from server_fast.app.bills.services.bill_note import upsert_note
+    try:
+        result = upsert_note(db, bill, kind, payload.content)
+        db.commit()
+        return {"status": "success", **result}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{str(e)}")

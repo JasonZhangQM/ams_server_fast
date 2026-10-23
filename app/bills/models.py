@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """bills 应用的 SQLAlchemy 2.0 模型定义。
 
-共 6 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / ProfitYear。
+共 7 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / BillNote / ProfitYear。
 
 - 继承 (Base, BaseModel)，BaseModel 提供 id/create_time/update_time 及通用方法
 - 外键列名以 _id 结尾
 - unique_together 与同名唯一索引合并为 UniqueConstraint
+- 笔记（logic/plan/invalidate/review/theme）v3 起已从 GroupSymbol 整体迁出：
+  标的层档案 -> irs_vm_*，单笔成交 -> BillNote。GroupSymbol 只留 vm_symbol 一个手动列。
 """
 from datetime import date, datetime
 from decimal import Decimal
@@ -350,13 +352,11 @@ class GroupSymbol(Base, BaseModel):
     diff_dw: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="出入净额")
     diff_dwt: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="划转净额")
 
-    # ---- 手动维护的持仓笔记（派生重算时不参与，见 upsert_group_symbol_sql 的 update_columns 白名单）----
-    logic: Mapped[Optional[str]] = mapped_column(Text, comment="开仓逻辑（当时核心假设，原话）")
-    plan: Mapped[Optional[str]] = mapped_column(Text, comment="策略与计划（条件句：触发价/加减仓/移仓）")
-    invalidate: Mapped[Optional[str]] = mapped_column(Text, comment="证伪条件（须可量化，与止损位分开）")
-    review: Mapped[Optional[str]] = mapped_column(Text, comment="复盘结论（平仓或阶段回看时写）")
-    theme: Mapped[Optional[str]] = mapped_column(String(32), comment="主题标签（黄金/IC贴水/红利…）")
-    note_at: Mapped[Optional[datetime]] = mapped_column(DateTime, comment="笔记首次落笔时间（后端填，前端不可改）")
+    # ---- v3 归属标的（唯一的手动列；不进 _DERIVED_COLS 白名单，重算不会覆盖）----
+    # 融资融券行（symbol='RZRQ'）恒为 NULL：融资只是一个融资行为，name 不承担归属含义
+    vm_symbol: Mapped[Optional[str]] = mapped_column(
+        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        comment="归属标的（irs_value_monitor.symbol）；融资融券与未归属为 NULL")
 
     # ---- 保留的自定义类属性 ----
     unique_keys = ['category', 'symbol']
@@ -370,33 +370,39 @@ class GroupSymbol(Base, BaseModel):
         return f'标的汇总-{self.category}-{self.symbol}'
 
 
-class GroupSymbolNoteLog(Base):
-    """标的笔记改动留痕（只记录值真变了的字段）。
+class BillNote(Base, BaseModel):
+    """成交笔记（1:N，挂 bills_bill.id）。
 
-    不继承 BaseModel：该表只需要「改了什么、什么时候改的」，
-    额外塞 create_time/update_time 只会和 changed_at 重复。
+    - kind 只有「想法 / 复盘」，同 kind 只有一份（UK bill_id+kind）；
+    - ON DELETE SET NULL + biz_key：既有"删账户末笔 -> 重导"会换新 id，
+      CASCADE 会让笔记静默蒸发，SET NULL 留孤儿等 relink 找回；
+    - content_at 一律后端写，前端不可传（否则"当时写的"可以伪造）。
     """
 
-    __tablename__ = "bills_group_symbol_note_log"
+    __tablename__ = "bills_bill_note"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    category: Mapped[str] = mapped_column(String(16), comment="交易分类")
-    symbol: Mapped[str] = mapped_column(String(32), comment="代码")
-    field: Mapped[str] = mapped_column(String(16), comment="被改字段：logic/plan/invalidate/review/theme")
-    old_value: Mapped[Optional[str]] = mapped_column(Text, comment="改前值")
-    new_value: Mapped[Optional[str]] = mapped_column(Text, comment="改后值")
-    changed_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), comment="改动时间")
-    source: Mapped[str] = mapped_column(
-        String(16), server_default='manual', comment="来源：manual/import")
+    KIND_IDEA = "想法"
+    KIND_REVIEW = "复盘"
+
+    bill_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("bills_bill.id", ondelete="SET NULL"),
+        nullable=True, comment="关联 bills_bill.id；成交被删时置 NULL，靠 biz_key 找回")
+    biz_key: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="成交自然键 md5（与 uk_bills_bill 同口径）")
+    kind: Mapped[str] = mapped_column(String(8), nullable=False, comment="类型：想法/复盘")
+    content: Mapped[str] = mapped_column(Text, nullable=False, comment="正文")
+    content_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(),
+        comment="落笔时间（后端填，前端不可传）")
 
     __table_args__ = (
-        Index('idx_gs_note_log', 'category', 'symbol', 'changed_at'),
-        {'comment': '标的笔记改动留痕'},
+        UniqueConstraint('bill_id', 'kind', name='uk_bbn_bill_kind'),
+        Index('k_bbn_biz', 'biz_key'),
+        {'comment': '成交笔记'},
     )
 
     def __str__(self) -> str:
-        return f'标的笔记留痕-{self.category}-{self.symbol}-{self.field}'
+        return f'成交笔记-{self.bill_id}-{self.kind}'
 
 
 class ProfitYear(Base, BaseModel):

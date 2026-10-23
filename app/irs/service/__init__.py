@@ -30,6 +30,7 @@ from server_fast.app.irs.service.discount_monitor import (
 from server_fast.app.irs.service.option_monitor import (
     option_monitor_sync_orm,
 )
+from server_fast.app.irs.service import vm_version, vm_research, vm_plan, vm_map
 
 __all__ = [
     # common
@@ -48,4 +49,9 @@ __all__ = [
     'discount_yield_em_orm',
     # option_monitor
     'option_monitor_sync_orm',
+    # v3：标的层档案
+    'vm_version',
+    'vm_research',
+    'vm_plan',
+    'vm_map',
 ]

@@ -8,9 +8,11 @@
 - POST /irs/sync/{target}               按 target 触发对应 service 函数链（4 种 target）
 """
 from datetime import date
+import re
 from typing import Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -20,6 +22,11 @@ from server_fast.app.irs.models import (
     DiscountMonitor,
     OptionMonitor,
     ValueMonitor,
+    VmInvalidate,
+    VmLogic,
+    VmPlan,
+    VmResearch,
+    VmVersion,
 )
 from server_fast.app.irs.schemas import (
     DiscountMonitorOut,
@@ -27,6 +34,16 @@ from server_fast.app.irs.schemas import (
     ValueMonitorCreate,
     ValueMonitorOut,
     ValueMonitorUpdate,
+    VmInvalidateOut,
+    VmInvalidateSave,
+    VmLogicOut,
+    VmLogicSave,
+    VmPlanOut,
+    VmPlanSave,
+    VmResearchOut,
+    VmResearchSave,
+    VmVersionOut,
+    VmVersionSave,
 )
 from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
@@ -96,20 +113,418 @@ def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:
 # GET 查询路由（5 个，对应原 Admin 注册的模型）
 # =========================================================================
 
+def _enrich_value_monitors(db: Session, items: list) -> list:
+    """给估值监测列表补 v3 派生字段（8 行数据，逐项一次 IN 查询，成本为零）。
+
+    必须在 response_model 里声明这些字段，否则会被 Pydantic 裁掉（铁律 4.10）。
+    """
+    if not items:
+        return items
+    symbols = [it["symbol"] for it in items]
+    today = date.today()
+
+    # 版本聚合：当前生效版日期 / 版本数 / 最早的未来版
+    ver_rows = (db.query(VmVersion.symbol,
+                         func.count(VmVersion.id).label("n"),
+                         func.max(VmVersion.effective_date).label("max_d"))
+                .filter(VmVersion.symbol.in_(symbols), VmVersion.effective_date <= today)
+                .group_by(VmVersion.symbol).all())
+    cur_date = {r.symbol: r.max_d for r in ver_rows}
+    ver_count = {}
+    for sym, n, _ in (db.query(VmVersion.symbol, func.count(VmVersion.id), func.max(VmVersion.effective_date))
+                      .filter(VmVersion.symbol.in_(symbols)).group_by(VmVersion.symbol).all()):
+        ver_count[sym] = n
+    pend = {}
+    for sym, d in (db.query(VmVersion.symbol, func.min(VmVersion.effective_date))
+                   .filter(VmVersion.symbol.in_(symbols), VmVersion.effective_date > today)
+                   .group_by(VmVersion.symbol).all()):
+        pend[sym] = d
+
+    # 最新研究（<=today）
+    research = service.vm_research.latest_map(db, symbols)
+
+    # 计划计数（状态在 Python 侧派生：8 个标的、计划行数很少）
+    plan_pending: Dict[str, int] = {}
+    plan_done: Dict[str, int] = {}
+    for p in db.query(VmPlan).filter(VmPlan.vm_symbol.in_(symbols)).all():
+        if p.bill_id is not None:
+            plan_done[p.vm_symbol] = plan_done.get(p.vm_symbol, 0) + 1
+        elif not p.is_cancelled:
+            plan_pending[p.vm_symbol] = plan_pending.get(p.vm_symbol, 0) + 1
+
+    for it in items:
+        s = it["symbol"]
+        it["pp_effective_date"] = cur_date.get(s)
+        it["pp_version_count"] = ver_count.get(s, 0)
+        it["pp_pending_date"] = pend.get(s)
+        r = research.get(s) or {}
+        it["research_date"] = r.get("research_date")
+        it["research_conclusion"] = r.get("conclusion")
+        it["next_review"] = r.get("next_review")
+        it["plan_pending"] = plan_pending.get(s, 0)
+        it["plan_done"] = plan_done.get(s, 0)
+    return items
+
+
 @router.get("/value-monitors", response_model=PageResponse[ValueMonitorOut])
 def list_value_monitors(
     symbol: Optional[str] = Query(None, description="代码精确匹配"),
+    theme: Optional[List[str]] = Query(None, description="主题多选精确匹配（主题只在标的层维护）"),
+    research_state: Optional[str] = Query(
+        default=None, pattern="^(none|due)$",
+        description="研究状态：none=还没做过研究；due=最新一版研究的复核日已到期"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """估值监测（对应 ValueMonitor 独立表，支持代码精确匹配）。"""
+    """估值监测（对应 ValueMonitor 独立表，支持代码精确/主题多选/研究状态）。
+
+    返回体除主表全字段外，还带 v3 派生：当前生效档位日期、版本数、待生效日期、
+    最新研究结论/复核日、计划待执行/已执行数。
+
+    `theme` 走多值直通（铁律 4.5：`arrayFormat:'repeat'`），不降级成前端过滤。
+    """
     query = db.query(ValueMonitor)
     if symbol:
         query = query.filter(ValueMonitor.symbol == symbol)
+    if theme:
+        query = query.filter(ValueMonitor.theme.in_(theme))
+    if research_state == "none":
+        # 「还没做过研究」比「研究过期」更常见，这是档案空白的可操作清单
+        query = query.filter(~ValueMonitor.symbol.in_(db.query(VmResearch.symbol)))
+    elif research_state == "due":
+        # 每个标的最新一版（<=today）的 next_review 已到期
+        latest = (db.query(VmResearch.symbol.label("symbol"),
+                           func.max(VmResearch.research_date).label("d"))
+                  .filter(VmResearch.research_date <= date.today())
+                  .group_by(VmResearch.symbol).subquery())
+        query = (query.join(latest, latest.c.symbol == ValueMonitor.symbol)
+                 .join(VmResearch,
+                       (VmResearch.symbol == latest.c.symbol)
+                       & (VmResearch.research_date == latest.c.d))
+                 .filter(VmResearch.next_review.isnot(None),
+                         VmResearch.next_review <= date.today()))
     total = query.count()
     items = query.order_by(ValueMonitor.symbol).offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    dicts = _enrich_value_monitors(db, [item.to_dict() for item in items])
+    return {"items": dicts, "total": total, "limit": limit, "offset": offset}
+
+
+@router.get("/value-monitors/coverage")
+def value_monitor_coverage(db: Session = Depends(get_db)):
+    """归属覆盖率：每个标的的合约行数与成交笔数（融资融券不计）。"""
+    rows = service.vm_map.coverage(db)
+    total_bills = sum(r["bill_rows"] or 0 for r in rows)
+    return {"items": rows, "total_bills": total_bills}
+
+
+@router.get("/value-monitors/unmapped")
+def value_monitor_unmapped(
+    limit: int = Query(300, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    """未归属的合约行（排除融资融券——它本来就不归属，不是漏配）。"""
+    return {
+        "items": service.vm_map.unmapped(db, limit),
+        "count": service.vm_map.unmapped_count(db),
+    }
+
+
+@router.get("/value-monitors/{id_}/detail")
+def get_value_monitor_detail(id_: int, db: Session = Depends(get_db)):
+    """详情抽屉首屏：主表 + 当前档位 + 最新研究 + 计划 + 归属合约 + 覆盖数。
+
+    一次给全，避免前端开抽屉连打 5 个请求；各 Tab 的明细仍走各自端点。
+    """
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    sym = vm.symbol
+    plans = service.vm_plan.list_by_symbol(db, sym)
+    cur_ver = service.vm_version.effective_version(db, sym)
+    rows = db.execute(text("""
+        SELECT g.category, g.symbol, g.count, g.pf_total,
+               (SELECT COUNT(*) FROM bills_bill b
+                 WHERE b.category=g.category AND b.symbol=g.symbol) AS bill_rows
+        FROM bills_group_symbol g WHERE g.vm_symbol = :s
+        ORDER BY bill_rows DESC
+    """), {"s": sym}).mappings().all()
+    trades = service.vm_map.trades_of(db, sym, limit=50)
+    return {
+        "vm": vm.to_dict(),
+        "current_version": ({"effective_date": cur_ver.effective_date, "note": cur_ver.note}
+                            if cur_ver else None),
+        "versions": service.vm_version.list_versions(db, sym),
+        "research": service.vm_research.list_by_symbol(db, sym),
+        "plans": plans,
+        "groups": [dict(r) for r in rows],
+        "trades": trades,
+        "logic": [VmLogicOut.model_validate(x).model_dump() for x in
+                  db.query(VmLogic).filter(VmLogic.symbol == sym).order_by(VmLogic.seq).all()],
+        "invalidate": [VmInvalidateOut.model_validate(x).model_dump() for x in
+                       db.query(VmInvalidate).filter(VmInvalidate.symbol == sym).order_by(VmInvalidate.seq).all()],
+    }
+
+
+@router.get("/value-monitors/{id_}/trades")
+def list_value_monitor_trades(
+    id_: int,
+    limit: int = Query(500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    """标的页看全部成交（含两条交易笔记）。融资融券不在其中（规则一）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    return {"items": service.vm_map.trades_of(db, vm.symbol, limit)}
+
+
+# ---------------------------------------------------------------- 档位版本
+@router.get("/value-monitors/{id_}/versions", response_model=List[VmVersionOut])
+def list_value_monitor_versions(id_: int, db: Session = Depends(get_db)):
+    """该标的全部档位版本（日期倒序），每行带现算 pv_* / status / 与上一版差值。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    return service.vm_version.list_versions(db, vm.symbol)
+
+
+@router.post("/value-monitors/{id_}/versions")
+def save_value_monitor_version(
+    id_: int,
+    payload: VmVersionSave,
+    db: Session = Depends(get_db),
+):
+    """保存档位版本：选新日期=新建，选历史日期=改那一版。
+
+    这是档位五档的**唯一写入口**：版本 upsert + 回写主表 pp_*（→ 钩子重算 pv_*）。
+    返回 action=created|updated|unchanged，前端据此提示"将新建 X 日 / 将覆盖 X 日"。
+    """
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        result = service.vm_version.save_version(
+            db, vm.symbol, payload.effective_date or date.today(),
+            {"pp_el": payload.pp_el, "pp_l": payload.pp_l, "pp_m": payload.pp_m,
+             "pp_h": payload.pp_h, "pp_eh": payload.pp_eh},
+            payload.note)
+        db.commit()
+        return {"status": "success", **result}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+
+
+@router.delete("/value-monitors/{id_}/versions/{version_id}")
+def delete_value_monitor_version(id_: int, version_id: int, db: Session = Depends(get_db)):
+    """删除某版。删的是"某一版档位"，不是删标的；删完主表按剩余版本回写。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    ver = db.get(VmVersion, version_id)
+    if ver is None or ver.symbol != vm.symbol:
+        raise HTTPException(status_code=404, detail=f"版本不存在：{version_id}")
+    try:
+        db.delete(ver)
+        db.flush()
+        service.vm_version.refresh_current_pp(db, vm.symbol)
+        db.commit()
+        return {"status": "success", "message": "已删除该版并回写当前档位"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"删除失败：{e}")
+
+
+# ---------------------------------------------------------------- 研究定稿
+@router.get("/value-monitors/{id_}/research", response_model=List[VmResearchOut])
+def list_value_monitor_research(id_: int, db: Session = Depends(get_db)):
+    """该标的全部研究定稿（日期倒序）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    return service.vm_research.list_by_symbol(db, vm.symbol)
+
+
+@router.put("/value-monitors/{id_}/research")
+def save_value_monitor_research(
+    id_: int,
+    payload: VmResearchSave,
+    db: Session = Depends(get_db),
+):
+    """按 (symbol, research_date) upsert 一版研究。
+
+    选新日期=新建一版，选历史日期=改那一版（前端必须二次确认"将改写 X 日的结论"）。
+    """
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        result = service.vm_research.upsert(
+            db, vm.symbol, payload.research_date,
+            payload.model_dump(exclude={"research_date"}, exclude_unset=True))
+        db.commit()
+        return {"status": "success", **result}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+
+
+@router.delete("/value-monitors/{id_}/research")
+def delete_value_monitor_research(
+    id_: int,
+    research_date: date = Query(..., description="要删除的版本日期"),
+    db: Session = Depends(get_db),
+):
+    """删除某一版研究（按日期定位，不是按 id）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    ok = service.vm_research.delete(db, vm.symbol, research_date)
+    db.commit()
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"该日期没有研究版本：{research_date}")
+    return {"status": "success", "message": "已删除"}
+
+
+# ---------------------------------------------------------------- 计划委托
+@router.get("/value-monitors/{id_}/plans", response_model=List[VmPlanOut])
+def list_value_monitor_plans(id_: int, db: Session = Depends(get_db)):
+    """该标的的计划委托（含派生状态与有效触发价）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    return service.vm_plan.list_by_symbol(db, vm.symbol)
+
+
+@router.put("/value-monitors/{id_}/plans")
+def save_value_monitor_plan(
+    id_: int,
+    payload: VmPlanSave,
+    db: Session = Depends(get_db),
+):
+    """按 seq upsert 一条计划（同标的同 seq 覆盖）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        result = service.vm_plan.upsert(db, vm.symbol, payload.model_dump())
+        db.commit()
+        return {"status": "success", **result}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+
+
+@router.delete("/value-monitors/{id_}/plans/{seq}")
+def delete_value_monitor_plan(id_: int, seq: int, db: Session = Depends(get_db)):
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    ok = service.vm_plan.delete(db, vm.symbol, seq)
+    db.commit()
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的计划")
+    return {"status": "success", "message": "已删除"}
+
+
+@router.get("/value-monitors/{id_}/unplanned")
+def list_value_monitor_unplanned(id_: int, db: Session = Depends(get_db)):
+    """无计划成交：成交时间早于该标的任何计划建立时间。
+
+    这是"先斩后奏 / 事后补计划"的唯一可算证据，文本永远算不出来。
+    """
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    rows = db.execute(text(service.vm_plan.unplanned_bills_sql(vm.symbol)),
+                      {"symbol": vm.symbol}).mappings().all()
+    return {"items": [dict(r) for r in rows], "count": len(rows)}
+
+
+# ---------------------------------------------------------------- 逻辑 / 证伪
+@router.get("/value-monitors/{id_}/logic", response_model=List[VmLogicOut])
+def list_value_monitor_logic(id_: int, db: Session = Depends(get_db)):
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    return db.query(VmLogic).filter(VmLogic.symbol == vm.symbol).order_by(VmLogic.seq).all()
+
+
+@router.put("/value-monitors/{id_}/logic")
+def save_value_monitor_logic(id_: int, payload: VmLogicSave, db: Session = Depends(get_db)):
+    """按 seq upsert 一条投资逻辑；state 变化时才写 state_at（"这条逻辑哪天坏的"）。"""
+    from datetime import datetime as _dt
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    row = (db.query(VmLogic).filter(VmLogic.symbol == vm.symbol, VmLogic.seq == payload.seq)
+           .one_or_none())
+    action = "created" if row is None else "updated"
+    try:
+        if row is None:
+            row = VmLogic(symbol=vm.symbol, seq=payload.seq)
+            db.add(row)
+        elif row.state != payload.state:
+            row.state_at = _dt.now()
+        row.content = payload.content
+        row.pricing = payload.pricing
+        row.state = payload.state
+        row.evidence = payload.evidence
+        db.commit()
+        return {"status": "success", "action": action, "id": row.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+
+
+@router.get("/value-monitors/{id_}/invalidate", response_model=List[VmInvalidateOut])
+def list_value_monitor_invalidate(id_: int, db: Session = Depends(get_db)):
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    rows = db.query(VmInvalidate).filter(VmInvalidate.symbol == vm.symbol) \
+        .order_by(VmInvalidate.seq).all()
+    out = []
+    for r in rows:
+        d = VmInvalidateOut.model_validate(r).model_dump()
+        # 判据是否可量化：必须出现"比较符 + 数字"或"数字 + %"，只有数字不算
+        d["quantified"] = bool(re.search(r"[><≥≤=]\s*\d|\d+\s*%", r.signal or ""))
+        out.append(d)
+    return out
+
+
+@router.put("/value-monitors/{id_}/invalidate")
+def save_value_monitor_invalidate(id_: int, payload: VmInvalidateSave,
+                                 db: Session = Depends(get_db)):
+    """按 seq upsert 一条证伪条件（只登记，不自动计算触发）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    row = (db.query(VmInvalidate)
+           .filter(VmInvalidate.symbol == vm.symbol, VmInvalidate.seq == payload.seq)
+           .one_or_none())
+    action = "created" if row is None else "updated"
+    try:
+        if row is None:
+            row = VmInvalidate(symbol=vm.symbol, seq=payload.seq)
+            db.add(row)
+        for f in ("proposition", "signal", "logic_id", "source", "action", "status", "triggered_at"):
+            setattr(row, f, getattr(payload, f))
+        db.commit()
+        return {"status": "success", "action": action, "id": row.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
 
 
 @router.post("/value-monitors")
@@ -119,23 +534,26 @@ def create_value_monitor(
 ):
     """新增估值监测记录。
 
-    接收 7 个必填字段，插入 irs_value_monitor 表。
+    v3 起档位只有一个写入口：先建主表行（pp_* 置 NULL），再 save_version() 建首版，
+    由 save_version 回写主表 pp_* 并触发钩子算 pv_*。
     symbol 重复时返回 HTTP 400。
     """
     try:
         vm = ValueMonitor(
             symbol=payload.symbol,
             name=payload.name,
-            pp_el=payload.pp_el,
-            pp_l=payload.pp_l,
-            pp_m=payload.pp_m,
-            pp_h=payload.pp_h,
-            pp_eh=payload.pp_eh,
+            theme=payload.theme,
         )
         db.add(vm)
+        db.flush()
+        service.vm_version.save_version(
+            db, payload.symbol, payload.effective_date or date.today(),
+            {"pp_el": payload.pp_el, "pp_l": payload.pp_l, "pp_m": payload.pp_m,
+             "pp_h": payload.pp_h, "pp_eh": payload.pp_eh},
+            "新建标的时建立首版")
         db.commit()
         return {"status": "success", "message": "新增成功"}
-    except IntegrityError as e:
+    except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"代码已存在：{payload.symbol}")
     except Exception as e:
@@ -151,21 +569,18 @@ def update_value_monitor(
 ):
     """修改估值监测记录。
 
-    按 id 更新 6 个必填字段（symbol 不可改）；
-    py_close/y_high/y_low/price 为可选行情字段，None 表示不修改（兜底编辑）。
-    id 不存在时返回 HTTP 404。
+    - **五档不直写主表**：任一带了 pp_* 就转发 save_version()（版本表 upsert + 回写主表），
+      版本日期取 payload.effective_date（空=今天）。pp_* 全空表示"不改档位"。
+    - name/theme 直写主表；行情四个字段 None 表示不修改（兜底编辑）。
+    - symbol 不可改。
     """
     vm = db.get(ValueMonitor, id_)
     if vm is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
     try:
         vm.name = payload.name
-        vm.pp_el = payload.pp_el
-        vm.pp_l = payload.pp_l
-        vm.pp_m = payload.pp_m
-        vm.pp_h = payload.pp_h
-        vm.pp_eh = payload.pp_eh
-        # 行情字段：非 None 才更新（None 表示不修改）
+        if payload.theme is not None:
+            vm.theme = payload.theme
         if payload.py_close is not None:
             vm.py_close = payload.py_close
         if payload.y_high is not None:
@@ -174,8 +589,16 @@ def update_value_monitor(
             vm.y_low = payload.y_low
         if payload.price is not None:
             vm.price = payload.price
+        db.flush()
+
+        pp = {"pp_el": payload.pp_el, "pp_l": payload.pp_l, "pp_m": payload.pp_m,
+              "pp_h": payload.pp_h, "pp_eh": payload.pp_eh}
+        ver_result = None
+        if any(v is not None for v in pp.values()):
+            ver_result = service.vm_version.save_version(
+                db, vm.symbol, payload.effective_date or date.today(), pp, None)
         db.commit()
-        return {"status": "success", "message": "修改成功"}
+        return {"status": "success", "message": "修改成功", "version": ver_result}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
@@ -184,19 +607,40 @@ def update_value_monitor(
 @router.delete("/value-monitors/{id_}")
 def delete_value_monitor(
     id_: int,
+    cascade: bool = Query(False, description="true = 连同研究/档位/逻辑/证伪/计划一起删"),
     db: Session = Depends(get_db),
 ):
     """删除估值监测记录。
 
-    按 id 删除记录。id 不存在时返回 HTTP 404。
+    外键是 RESTRICT：有子数据时返回 **409 + 各子表计数**，让"删标的"先看代价；
+    传 ?cascade=true 才按序删子表再删主表（不删成交笔记——它挂 bill_id，与标的无关）。
     """
     vm = db.get(ValueMonitor, id_)
     if vm is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    counts = {
+        "version": db.query(func.count(VmVersion.id)).filter(VmVersion.symbol == vm.symbol).scalar(),
+        "research": db.query(func.count(VmResearch.id)).filter(VmResearch.symbol == vm.symbol).scalar(),
+        "logic": db.query(func.count(VmLogic.id)).filter(VmLogic.symbol == vm.symbol).scalar(),
+        "invalidate": db.query(func.count(VmInvalidate.id)).filter(VmInvalidate.symbol == vm.symbol).scalar(),
+        "plan": db.query(func.count(VmPlan.id)).filter(VmPlan.vm_symbol == vm.symbol).scalar(),
+    }
+    has_child = any(v for v in counts.values())
+    if has_child and not cascade:
+        raise HTTPException(status_code=409, detail={
+            "message": f"标的 {vm.symbol} 还有档案，确认后请带 ?cascade=true",
+            "symbol": vm.symbol, "counts": counts,
+        })
     try:
+        if has_child:
+            for model, key in ((VmPlan, "vm_symbol"), (VmInvalidate, "symbol"),
+                               (VmLogic, "symbol"), (VmResearch, "symbol"),
+                               (VmVersion, "symbol")):
+                db.query(model).filter(getattr(model, key) == vm.symbol).delete(synchronize_session=False)
+            db.flush()
         db.delete(vm)
         db.commit()
-        return {"status": "success", "message": "删除成功"}
+        return {"status": "success", "message": "删除成功", "deleted_children": counts if has_child else {}}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"删除失败：{str(e)}")

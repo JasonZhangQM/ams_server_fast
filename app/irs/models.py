@@ -5,17 +5,20 @@
 - 衍生字段计算逻辑通过 SQLAlchemy before_insert / before_update 事件钩子实现
 - 保留所有自定义类属性（cols_map_fields / unique_keys / fields_request 等）
 """
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
     Boolean,
     Date,
+    DateTime,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     event,
 )
@@ -54,6 +57,9 @@ class ValueMonitor(Base, BaseModel):
 
     symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, comment="代码")
     name: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="名称")
+    # 标的层属性（v3 新增）：主题的**唯一定义处**（合约层 theme 已删）
+    theme: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="主题（黄金/中国宽基/美国宽基/银行/家电…）")
     #估值区间
     pp_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极低")
     pp_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="低")
@@ -207,9 +213,15 @@ class DiscountMonitor(Base, BaseModel):
 def _compute_value_monitor(mapper, connection, target):
     """ValueMonitor 计算逻辑：基于本表 price/py_close/y_high/y_low/pp_* 计算监测指标(%)。
 
-    仅当 price 非空时执行计算，避免除零异常。
+    ⚠️ price 为空时**必须清空** pv_*，不能 return 了事（v3 §5.3）：
+    否则改档位/改上游后 pv_* 会保留上一版算出的旧值，页面上看起来像"按新档位算的"，
+    实际是旧偏离冒充新值。清空至少让"算不出来"显示为 null，而不是一个假的数。
     """
     if not target.price:
+        for f in ("pv_yh", "pv_yl", "pv_yy",
+                  "pv_el", "pv_l", "pv_m", "pv_h", "pv_eh",
+                  "pv_el_y", "pv_l_y", "pv_m_y", "pv_h_y", "pv_eh_y"):
+            setattr(target, f, None)
         return
     # 相对上年末收益率 = (行情价/上年末 - 1) * 100
     target.pv_yh = (target.y_high / target.py_close - Decimal("1")) * Decimal("100")
@@ -292,3 +304,191 @@ def _compute_discount_monitor(mapper, connection, target):
             target.ratio_y = target.ratio * Decimal("365") / target.days_left
         else:
             target.ratio_y = Decimal("0")
+
+
+# =========================================================================
+# v3 新增：标的层档案（档位版本 / 研究定稿 / 逻辑 / 证伪 / 计划委托）
+#
+# 外键一律 ON DELETE RESTRICT：主表历史上被删过约 47 次（AUTO_INCREMENT=56 只有 8 行），
+# 用 CASCADE 会让"随手删一行"变成"静默清空该标的的全部研究与档位档案"。
+# =========================================================================
+
+
+class VmVersion(Base, BaseModel):
+    """档位版本：某日档位 = effective_date <= D 的最大版（生效区间语义，不是每日快照）。"""
+
+    __tablename__ = "irs_vm_version"
+    __table_args__ = (
+        UniqueConstraint("symbol", "effective_date", name="uk_vmv_symbol_date"),
+        Index("k_vmv_date", "effective_date"),
+    )
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        nullable=False, comment="标的代码")
+    effective_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="生效日期（自该日起适用，含当日）")
+    pp_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极低")
+    pp_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="低")
+    pp_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="中")
+    pp_h: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="高")
+    pp_eh: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="极高")
+    note: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="调整理由（一句话）")
+
+    def __str__(self):
+        return f"{self.symbol}@{self.effective_date}"
+
+
+class VmResearch(Base, BaseModel):
+    """标的研究定稿（1:N，按 research_date 留版）。
+
+    选新日期 = 新建，选历史日期 = 修改（与档位版本同构）。
+    research_date 是"我哪天定了这个结论"，不是报告里的数据截止日。
+    """
+
+    __tablename__ = "irs_vm_research"
+    __table_args__ = (
+        UniqueConstraint("symbol", "research_date", name="uk_vmr_symbol_date"),
+        Index("k_vmr_date", "research_date"),
+    )
+
+    CONCLUSION_CHOICES = ["买入", "增持", "持有", "观望", "回避", "不入池"]
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        nullable=False, comment="标的代码")
+    research_date: Mapped[date] = mapped_column(Date, nullable=False, comment="研究定稿日")
+    thesis: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, comment="一句话本质：买它本质上在买什么")
+    conclusion: Mapped[Optional[str]] = mapped_column(String(8), nullable=True, comment="结论")
+    max_risk: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, comment="最大风险：最可能让我亏钱的那件事")
+    expectation_gap: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="预期差：市场已定价什么 / 我认为未定价什么")
+    pre_condition: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, comment="前置条件（组合约束，与标的质地分开写）")
+    next_review: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="下次复核日期")
+    research_note: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, comment="知识库研究报告名（双链名，不含 .md）")
+    research_brief: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="结论摘要（<=800 字，禁止抄报告正文）")
+    research_log: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="研究过程：怎么得出结论 / 换过什么锚 / 推翻过什么")
+
+    unique_keys = ["symbol", "research_date"]
+
+    def __str__(self):
+        return f"{self.symbol}@{self.research_date}({self.conclusion})"
+
+
+class VmLogic(Base, BaseModel):
+    """投资逻辑条目（2-4 条，带 完好/减弱/破坏 状态）。
+
+    单独成表而不是塞进一段 TEXT：state 要被查询——"列出全部 state='破坏' 的逻辑"
+    是复盘第一步，文本做不到，一条 SQL 就行。
+    """
+
+    __tablename__ = "irs_vm_logic"
+    __table_args__ = (
+        UniqueConstraint("symbol", "seq", name="uk_vml_symbol_seq"),
+        Index("k_vml_state", "state"),
+    )
+
+    STATE_CHOICES = ["完好", "减弱", "破坏"]
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        nullable=False, comment="标的代码")
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号 1-4")
+    content: Mapped[str] = mapped_column(
+        String(200), nullable=False, comment="逻辑：逻辑->影响路径->是否已定价")
+    pricing: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, comment="是否已被定价：未定价/部分/已充分")
+    state: Mapped[str] = mapped_column(String(8), nullable=False, default="完好", comment="状态")
+    state_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, comment="状态最后变更时间（state 真变时由 service 写）")
+    evidence: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, comment="证据（报告章节 / 数据代码 / 指标）")
+
+    unique_keys = ["symbol", "seq"]
+
+    def __str__(self):
+        return f"{self.symbol}#{self.seq}({self.state})"
+
+
+class VmInvalidate(Base, BaseModel):
+    """证伪条件登记：只登记判据与触发状态，**不自动计算**。"""
+
+    __tablename__ = "irs_vm_invalidate"
+    __table_args__ = (
+        UniqueConstraint("symbol", "seq", name="uk_vmi_symbol_seq"),
+        Index("k_vmi_status", "status"),
+    )
+
+    STATUS_CHOICES = ["未触发", "已触发", "已失效"]
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        nullable=False, comment="标的代码")
+    logic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="对应逻辑条目")
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号")
+    proposition: Mapped[str] = mapped_column(String(200), nullable=False, comment="被证伪的命题")
+    signal: Mapped[str] = mapped_column(
+        String(200), nullable=False, comment="证伪信号 + 阈值（必须可量化）")
+    source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="数据源")
+    action: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="触发后动作：减仓/清仓/重估/暂停加仓")
+    status: Mapped[str] = mapped_column(String(8), nullable=False, default="未触发", comment="状态")
+    triggered_at: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="触发日")
+
+    unique_keys = ["symbol", "seq"]
+
+    def __str__(self):
+        return f"{self.symbol}#{self.seq}({self.status})"
+
+
+class VmPlan(Base, BaseModel):
+    """计划委托 —— "我打算怎么办"的唯一载体（必须写真实代码和点位）。
+
+    状态**不落库**、派生（存了必然漂移）：cancelled > executed > expired > pending。
+    trigger_price 与 trigger_ref 二选一：后者引用档位（pp_el/pp_l/pp_m/pp_h/pp_eh），
+    改档位后计划自动跟随，不用手改 8 条计划。
+    """
+
+    __tablename__ = "irs_vm_plan"
+    __table_args__ = (
+        UniqueConstraint("vm_symbol", "seq", name="uk_vmp_symbol_seq"),
+        Index("k_vmp_trade", "trade_symbol"),
+        Index("k_vmp_bill", "bill_id"),
+    )
+
+    TRIGGER_REFS = ["pp_el", "pp_l", "pp_m", "pp_h", "pp_eh"]
+
+    vm_symbol: Mapped[str] = mapped_column(
+        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        nullable=False, comment="标的代码")
+    trade_symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="交易代码（真实合约）")
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号")
+    b_s: Mapped[str] = mapped_column(String(4), nullable=False, comment="买/卖")
+    o_c: Mapped[Optional[str]] = mapped_column(String(4), nullable=True, comment="开/平")
+    trigger_op: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="lte", comment="lte(<=)/gte(>=)/range(区间)")
+    trigger_price: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="触发点位（与 trigger_ref 二选一）")
+    trigger_ref: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, comment="触发价引用档位：pp_el/pp_l/pp_m/pp_h/pp_eh")
+    trigger_price2: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="区间上沿（trigger_op=range 时必填）")
+    qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="计划数量（空=到价再定量）")
+    valid_until: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="有效期至")
+    reason: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, comment="为什么这么做（对应哪条逻辑）")
+    bill_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="执行的成交（空=未执行）")
+    is_cancelled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, comment="手动作废")
+
+    unique_keys = ["vm_symbol", "seq"]
+
+    def __str__(self):
+        return f"{self.vm_symbol}#{self.seq}({self.b_s}{self.o_c or ''})"

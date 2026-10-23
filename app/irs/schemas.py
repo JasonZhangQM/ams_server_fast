@@ -52,6 +52,8 @@ class ValueMonitorOut(BaseModel):
 
     symbol: str                                # 代码
     name: Optional[str] = None                 # 名称
+    # 标的层属性（v3 新增）
+    theme: Optional[str] = None                # 主题（唯一定义处）
     # 估值区间
     pp_el: Optional[Decimal] = None            # 极低
     pp_l: Optional[Decimal] = None             # 低
@@ -78,6 +80,15 @@ class ValueMonitorOut(BaseModel):
     pv_m_y: Optional[Decimal] = None           # 中(y%)
     pv_h_y: Optional[Decimal] = None           # 高(y%)
     pv_eh_y: Optional[Decimal] = None          # 极高(y%)
+    # ---- v3 派生字段（列表页用，不落库；不声明会被 response_model 裁掉，铁律 4.10）----
+    pp_effective_date: Optional[date] = None   # 当前生效版日期
+    pp_version_count: Optional[int] = None     # 版本数
+    pp_pending_date: Optional[date] = None     # 最早的未来版日期（"待生效 X-XX"）
+    research_date: Optional[date] = None       # 最新研究定稿日
+    research_conclusion: Optional[str] = None  # 最新研究结论
+    next_review: Optional[date] = None         # 下次复核
+    plan_pending: Optional[int] = None         # 待执行计划数
+    plan_done: Optional[int] = None            # 已执行计划数
     id: int                                    # 主键
     create_time: datetime                      # 创建时间
     update_time: datetime                      # 更新时间
@@ -98,26 +109,30 @@ class ValueMonitorCreate(BaseModel):
     pp_m: Decimal                              # 中
     pp_h: Decimal                              # 高
     pp_eh: Decimal                             # 极高
+    theme: Optional[str] = None                # 主题
+    effective_date: Optional[date] = None      # 首版生效日（空=今天）
 
 
 # =========================================================================
-# 估值监测修改：请求 Schema（6 个必填字段 + 4 个可选行情字段，symbol 不可改）
+# 估值监测修改：请求 Schema（symbol 不可改；pp_* 为空表示不动档位）
 # =========================================================================
 class ValueMonitorUpdate(BaseModel):
     """估值监测修改请求（对应 PUT /irs/value-monitors/{id}）。
 
-    name/pp_* 为必填字段；py_close/y_high/y_low/price 为可选行情字段，
-    None 表示不修改，作为同步接口拉取失败时的兜底编辑入口。
+    v3 起 pp_* 不再直写主表：全部转发 save_version()（版本表 upsert + 回写主表）。
+    pp_* 传 None 表示"不改档位"（只改 name/theme 时不必带五档）。
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     name: str                                  # 名称
-    pp_el: Decimal                             # 极低
-    pp_l: Decimal                              # 低
-    pp_m: Decimal                              # 中
-    pp_h: Decimal                              # 高
-    pp_eh: Decimal                             # 极高
+    pp_el: Optional[Decimal] = None            # 极低
+    pp_l: Optional[Decimal] = None             # 低
+    pp_m: Optional[Decimal] = None             # 中
+    pp_h: Optional[Decimal] = None             # 高
+    pp_eh: Optional[Decimal] = None            # 极高
+    theme: Optional[str] = None                # 主题
+    effective_date: Optional[date] = None      # 档位版本生效日（空=今天）
     # 行情字段（可选，None 表示不修改）
     py_close: Optional[Decimal] = None         # 上年末
     y_high: Optional[Decimal] = None           # 年高
@@ -149,6 +164,195 @@ class OptionMonitorOut(BaseModel):
     ratio_i: Optional[Decimal] = None                # 内在(%)
     ratio_t_y: Optional[Decimal] = None              # 时间(%Y)
     ratio_i_y: Optional[Decimal] = None              # 内在(%Y)
+
+
+# =========================================================================
+# v3：档位版本（irs_vm_version）
+# =========================================================================
+class VmVersionOut(BaseModel):
+    """档位版本响应：五档 + 现算 pv_* + 状态 + 相对上一版差值。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    symbol: str
+    effective_date: date
+    note: Optional[str] = None
+    pp_el: Optional[Decimal] = None
+    pp_l: Optional[Decimal] = None
+    pp_m: Optional[Decimal] = None
+    pp_h: Optional[Decimal] = None
+    pp_eh: Optional[Decimal] = None
+    # 现算（按主表当前 price / py_close，不落库）
+    pv_el: Optional[Decimal] = None
+    pv_l: Optional[Decimal] = None
+    pv_m: Optional[Decimal] = None
+    pv_h: Optional[Decimal] = None
+    pv_eh: Optional[Decimal] = None
+    pv_el_y: Optional[Decimal] = None
+    pv_l_y: Optional[Decimal] = None
+    pv_m_y: Optional[Decimal] = None
+    pv_h_y: Optional[Decimal] = None
+    pv_eh_y: Optional[Decimal] = None
+    # current = 当前生效 / history = 历史 / pending = 未来日（当前视图不生效）
+    status: str
+    pending_next: bool = False
+    diff: dict = Field(default_factory=dict)
+    create_time: datetime
+    update_time: datetime
+
+
+class VmVersionSave(BaseModel):
+    """档位版本保存请求：选新日期=新建，选历史日期=改那一版。"""
+
+    symbol: str
+    effective_date: Optional[date] = None      # 空=今天
+    pp_el: Decimal
+    pp_l: Decimal
+    pp_m: Decimal
+    pp_h: Decimal
+    pp_eh: Decimal
+    note: Optional[str] = None
+
+
+# =========================================================================
+# v3：标的研究（irs_vm_research，按 research_date 留版）
+# =========================================================================
+class VmResearchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    symbol: str
+    research_date: date
+    thesis: Optional[str] = None
+    conclusion: Optional[str] = None
+    max_risk: Optional[str] = None
+    expectation_gap: Optional[str] = None
+    pre_condition: Optional[str] = None
+    next_review: Optional[date] = None
+    research_note: Optional[str] = None
+    research_brief: Optional[str] = None
+    research_log: Optional[str] = None
+    create_time: datetime
+    update_time: datetime
+
+
+class VmResearchSave(BaseModel):
+    """研究保存请求：按 (symbol, research_date) upsert；未传的字段保持不变。"""
+
+    research_date: date
+    thesis: Optional[str] = None
+    conclusion: Optional[str] = None
+    max_risk: Optional[str] = None
+    expectation_gap: Optional[str] = None
+    pre_condition: Optional[str] = None
+    next_review: Optional[date] = None
+    research_note: Optional[str] = None
+    research_brief: Optional[str] = None
+    research_log: Optional[str] = None
+
+
+# =========================================================================
+# v3：计划委托（irs_vm_plan）
+# =========================================================================
+class VmPlanOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    vm_symbol: str
+    trade_symbol: str
+    seq: int
+    b_s: str
+    o_c: Optional[str] = None
+    trigger_op: str
+    trigger_price: Optional[Decimal] = None
+    trigger_ref: Optional[str] = None
+    trigger_price2: Optional[Decimal] = None
+    qty: Optional[int] = None
+    valid_until: Optional[date] = None
+    reason: Optional[str] = None
+    bill_id: Optional[int] = None
+    is_cancelled: bool = False
+    # 派生：已放弃 > 已执行 > 已过期 > 待执行
+    status: str
+    effective_trigger: Optional[float] = None   # trigger_price ?? 当前档位值
+    trigger_ref_value: Optional[float] = None   # 引用档位的当前值
+    create_time: datetime
+    update_time: datetime
+
+
+class VmPlanSave(BaseModel):
+    """计划保存请求：seq 定位（同标的同 seq 覆盖）。"""
+
+    seq: int
+    trade_symbol: str
+    b_s: str
+    o_c: Optional[str] = None
+    trigger_op: str = "lte"
+    trigger_price: Optional[Decimal] = None
+    trigger_ref: Optional[str] = None
+    trigger_price2: Optional[Decimal] = None
+    qty: Optional[int] = None
+    valid_until: Optional[date] = None
+    reason: Optional[str] = None
+    bill_id: Optional[int] = None
+    is_cancelled: bool = False
+
+
+# =========================================================================
+# v3：投资逻辑 / 证伪条件（批次二的功能，接口先通）
+# =========================================================================
+class VmLogicOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    symbol: str
+    seq: int
+    content: str
+    pricing: Optional[str] = None
+    state: str
+    state_at: Optional[datetime] = None
+    evidence: Optional[str] = None
+    create_time: datetime
+    update_time: datetime
+
+
+class VmLogicSave(BaseModel):
+    seq: int
+    content: str
+    pricing: Optional[str] = None
+    state: str = "完好"
+    evidence: Optional[str] = None
+
+
+class VmInvalidateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    symbol: str
+    logic_id: Optional[int] = None
+    seq: int
+    proposition: str
+    signal: str
+    source: Optional[str] = None
+    action: Optional[str] = None
+    status: str
+    triggered_at: Optional[date] = None
+    create_time: datetime
+    update_time: datetime
+    # 派生：signal 里没有数字阈值 -> 前端标红（模板要求"阈值不可量化者视为未填"）
+    quantified: bool = True
+
+
+class VmInvalidateSave(BaseModel):
+    seq: int
+    proposition: str
+    signal: str
+    logic_id: Optional[int] = None
+    source: Optional[str] = None
+    action: Optional[str] = None
+    status: str = "未触发"
+    triggered_at: Optional[date] = None
     id: int                                          # 主键
     create_time: datetime                            # 创建时间
     update_time: datetime                            # 更新时间
