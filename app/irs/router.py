@@ -462,11 +462,17 @@ def list_value_monitor_logic(id_: int, db: Session = Depends(get_db)):
 
 @router.put("/value-monitors/{id_}/logic")
 def save_value_monitor_logic(id_: int, payload: VmLogicSave, db: Session = Depends(get_db)):
-    """按 seq upsert 一条投资逻辑；state 变化时才写 state_at（"这条逻辑哪天坏的"）。"""
+    """按 seq upsert 一条投资逻辑；state 变化时才写 state_at（"这条逻辑哪天坏的"）。
+
+    ⚠️ 本接口是**全字段覆盖**：content/pricing/state/evidence 全部无条件写入。
+    行内只改 state 的调用方必须把该行其余字段一起回填，否则 content 会被写成空串。
+    """
     from datetime import datetime as _dt
     vm = db.get(ValueMonitor, id_)
     if vm is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    if not (payload.content or "").strip():
+        raise HTTPException(status_code=400, detail="逻辑内容不能为空")
     row = (db.query(VmLogic).filter(VmLogic.symbol == vm.symbol, VmLogic.seq == payload.seq)
            .one_or_none())
     action = "created" if row is None else "updated"
@@ -481,10 +487,43 @@ def save_value_monitor_logic(id_: int, payload: VmLogicSave, db: Session = Depen
         row.state = payload.state
         row.evidence = payload.evidence
         db.commit()
-        return {"status": "success", "action": action, "id": row.id}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+    # 纲领要求逻辑 2-4 条，但**不硬拦**：先登记、后精简是正常节奏，拦了就不登记了。
+    # 判据用**条数**而不是 seq：seq 会有空洞（删过第 3 条后新建得 4），拿 seq 判断会误报。
+    warning = None
+    if action == "created":
+        total = (db.query(func.count(VmLogic.id))
+                 .filter(VmLogic.symbol == vm.symbol).scalar() or 0)
+        if total > 4:
+            warning = f"本标的逻辑已有 {total} 条，超过纲领建议的 2-4 条，已保存（不拦截）"
+    return {"status": "success", "action": action, "id": row.id, "warning": warning}
+
+
+@router.delete("/value-monitors/{id_}/logic/{seq}")
+def delete_value_monitor_logic(id_: int, seq: int, db: Session = Depends(get_db)):
+    """删除一条投资逻辑（按 seq）。
+
+    删前必须摘掉证伪对它的引用：`irs_vm_invalidate.logic_id` 是裸 Integer，没有外键约束，
+    直接删逻辑会留下悬空 id（"对应逻辑"指向一条不存在的记录，且没有任何报错）。
+    """
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    row = (db.query(VmLogic).filter(VmLogic.symbol == vm.symbol, VmLogic.seq == seq)
+           .one_or_none())
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的逻辑")
+    try:
+        unlinked = (db.query(VmInvalidate).filter(VmInvalidate.logic_id == row.id)
+                    .update({VmInvalidate.logic_id: None}, synchronize_session=False))
+        db.delete(row)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"删除失败：{e}")
+    return {"status": "success", "message": "已删除", "unlinked_invalidates": unlinked}
 
 
 @router.get("/value-monitors/{id_}/invalidate", response_model=List[VmInvalidateOut])
@@ -521,10 +560,30 @@ def save_value_monitor_invalidate(id_: int, payload: VmInvalidateSave,
         for f in ("proposition", "signal", "logic_id", "source", "action", "status", "triggered_at"):
             setattr(row, f, getattr(payload, f))
         db.commit()
-        return {"status": "success", "action": action, "id": row.id}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+    # 不可量化**不阻断**：先登记、后补数字是正常节奏，硬拦会让人干脆不登记
+    quantified = bool(re.search(r"[><≥≤=]\s*\d|\d+\s*%", payload.signal or ""))
+    return {
+        "status": "success", "action": action, "id": row.id, "quantified": quantified,
+        "warning": None if quantified else "证伪信号里没有数字阈值，已保存但会被标记为「不可量化」",
+    }
+
+
+@router.delete("/value-monitors/{id_}/invalidate/{seq}")
+def delete_value_monitor_invalidate(id_: int, seq: int, db: Session = Depends(get_db)):
+    """删除一条证伪条件（按 seq）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    n = (db.query(VmInvalidate)
+         .filter(VmInvalidate.symbol == vm.symbol, VmInvalidate.seq == seq)
+         .delete(synchronize_session=False))
+    db.commit()
+    if not n:
+        raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的证伪条件")
+    return {"status": "success", "message": "已删除"}
 
 
 @router.post("/value-monitors")

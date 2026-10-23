@@ -345,6 +345,13 @@ class VmInvalidateOut(BaseModel):
 
 
 class VmInvalidateSave(BaseModel):
+    """证伪条件保存入参（按 seq upsert）。
+
+    ⚠️ 这里**只能有入参字段**。曾误从 VmInvalidateOut 复制进来 `id` / `create_time` /
+    `update_time` 三行，`id: int` 无默认值 ⇒ 任何保存都 422，证伪从来没写进去过。
+    出参字段一律放 VmInvalidateOut，不要回抄。
+    """
+
     seq: int
     proposition: str
     signal: str
@@ -353,6 +360,3 @@ class VmInvalidateSave(BaseModel):
     action: Optional[str] = None
     status: str = "未触发"
     triggered_at: Optional[date] = None
-    id: int                                          # 主键
-    create_time: datetime                            # 创建时间
-    update_time: datetime                            # 更新时间
