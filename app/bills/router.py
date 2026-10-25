@@ -206,7 +206,9 @@ def list_bills(
         )
     # 过滤后总数（在 offset/limit 之前计算；count 不吃 order_by，先算再排）
     total = query.count()
-    items = query.order_by(Bill.id.desc()).offset(offset).limit(limit).all()
+    # 按交易日倒序；trade_time 同一天大量重复（日内只到日或分钟精度），
+    # 必须用 id 兜底才确定性，否则服务端分页在同值边界会跳行/重行。
+    items = query.order_by(Bill.trade_time.desc(), Bill.id.desc()).offset(offset).limit(limit).all()
     dicts = [item.to_dict() for item in items]
 
     if dicts:
@@ -269,7 +271,9 @@ def list_profits(
         )
     # COUNT 与数据查询过滤条件一致（JOIN 已包含在内），在 offset/limit 之前计算
     total = query.count()
-    items = query.offset(offset).limit(limit).all()
+    # 必须显式排序：MySQL 对无 ORDER BY 的查询不保证顺序，服务端分页会跳行/重行。
+    # bill_id 在 bills_profit 上是 unique（一对一），单列倒序即确定性排序，无需加 id 兜底。
+    items = query.order_by(Profit.bill_id.desc()).offset(offset).limit(limit).all()
     result = []
     for p in items:
         d = p.to_dict()
