@@ -52,6 +52,8 @@ from server_fast.app.bds.models import (
     IndexConstituent, 
     IndexConstituentSync,
     IndexHistory, 
+    OptionConfig,
+    OptionMarket,
     SymbolInfo, 
     TradeDate,
 )
@@ -73,6 +75,12 @@ from server_fast.app.bds.schemas import (
     IndexValuationRow,
     IndexValuationSyncRequest,
     MacroSyncRequest,
+    OptionConfigCreate,
+    OptionConfigImportResult,
+    OptionConfigOut,
+    OptionConfigUpdate,
+    OptionMarketOut,
+    OptionSyncPlanOut,
     SymbolInfoOut,
     TradeDateOut,
 )
@@ -103,6 +111,8 @@ from server_fast.app.bds.services import (
 )
 from server_fast.app.bds.config import Config
 from server_fast.app.bds.services import index_valuation
+from server_fast.app.bds.services import option_market
+from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
@@ -2360,3 +2370,427 @@ def get_index_constituent_sync_status(db: Session = Depends(get_db)):
             "current_rows": counts.get(r.index_code, 0),
         })
     return {"items": items, "total": len(items)}
+
+
+# ============================================================================
+# 期权行情（bds_option_market）与同步清单（bds_option_config）
+#
+# 需求：① 单独建 bds_option_market 存行情；② bds 增加期权行情查询页；
+#      ③ 搜索区一键同步「配置的全部期权」。
+#
+# 关于「搜索区放同步按钮」与 bds 既有惯例（数据页不放写操作）的张力：
+# 这是**搜索区的批量任务按钮**，不针对某一行、走 bds_sync_task 任务化、有审计（写 result），
+# 性质与 batch-sync 页的卡片一致；行内仍然一个写按钮都没有 ⇒ 不违背铁律 4.8 的本意。
+# ============================================================================
+
+# 品种名 → und_key / 标的（当配置里留空时的兜底来源）
+_OPT_UND_KEY = {
+    "SHSE.000300": "csi300",
+    "SHSE.510500": "csi500etf",
+    "SHFE.au": "au",
+}
+
+
+def _canon_underlying(u: Optional[str]) -> Optional[str]:
+    """标的代码归一到 irs 口径。
+
+    ⚠️ 两套交易所代码并存：账单里是 `SHEX.au`（SHEX=上海期货交易所的券商写法），
+    irs 配置里是 `SHFE.au`（行情口径）。它们的国库号相同、字符串不同，
+    不做归一会导致「按标的找品种名」永远找不到黄金。
+    """
+    if not u:
+        return u
+    head, _, tail = u.partition(".")
+    if head.upper() in ("SHEX", "SHFE"):
+        return f"SHFE.{tail}"
+    return u
+
+
+def _opt_meta_by_name(option_name: str) -> dict:
+    """按品种名取 irs 配置里的元信息（标的/乘数/到期规则）。"""
+    for item in IrsCfg.OPTIONS_MARCH:
+        if item["option_name"] == option_name:
+            return item
+    raise HTTPException(
+        status_code=400,
+        detail=f"未知期权品种「{option_name}」，须是 IrsCfg.OPTIONS_MARCH 里的 option_name"
+               f"（{'、'.join(i['option_name'] for i in IrsCfg.OPTIONS_MARCH)}）")
+
+
+@router.get("/option-market", response_model=PageResponse[OptionMarketOut])
+def list_option_market(
+    und_key: Optional[str] = Query(default=None, description="情景分组键: csi300/csi500etf/au"),
+    option_name: Optional[str] = Query(default=None, description="品种名（经配置表换算成 und_key 集合）"),
+    end_month: Optional[str] = Query(default=None, description="到期年月 YYYYMM（按 delisted_date 所在月筛）"),
+    option_type: Optional[str] = Query(default=None, description="call / put"),
+    symbol: Optional[str] = Query(default=None, description="合约代码，模糊匹配"),
+    trade_date: Optional[date] = Query(default=None, description="行情日期；不传=最新交易日全量"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """分页查询期权行情。
+
+    默认只返回**最新交易日**的行：这张表按日累积，不传日期全量返回会把历史快照也铺出来，
+    用户看盘时反而找不到当天数据。
+
+    ⚠️ 排序必须显式给出：服务端 offset/limit 分页缺少 ORDER BY 时 MySQL 不保证顺序，
+    会出现翻页跳行/重复行（`/bills/bills` 踩过）。
+    """
+    _guard_list_offset(offset)
+    query = db.query(OptionMarket)
+
+    if und_key:
+        query = query.filter(OptionMarket.und_key == und_key)
+    if option_name:
+        # 品种名经配置表映射成 und_key 集合，避免前端硬编码映射
+        und_keys = [
+            _OPT_UND_KEY[m["underlying_symbol"]]
+            for m in IrsCfg.OPTIONS_MARCH
+            if m["option_name"] == option_name and m["underlying_symbol"] in _OPT_UND_KEY
+        ]
+        if not und_keys:
+            raise HTTPException(status_code=400, detail=f"未知品种：{option_name}")
+        query = query.filter(OptionMarket.und_key.in_(und_keys))
+    if option_type:
+        query = query.filter(OptionMarket.option_type == option_type)
+    if symbol:
+        query = query.filter(OptionMarket.symbol.contains(symbol))
+    if end_month:
+        # delisted_date 落在该月 ⇒ 该到期月的合约
+        try:
+            y, m = int(end_month[:4]), int(end_month[4:6])
+        except (ValueError, IndexError):
+            raise HTTPException(status_code=400, detail=f"end_month 格式应为 YYYYMM：{end_month}")
+        start = date(y, m, 1)
+        end = date(y + (m == 12), (m % 12) + 1, 1)
+        query = query.filter(OptionMarket.delisted_date >= start,
+                             OptionMarket.delisted_date < end)
+
+    if trade_date is None:
+        latest = db.query(func.max(OptionMarket.trade_date)).scalar()
+        if latest is not None:
+            query = query.filter(OptionMarket.trade_date == latest)
+
+    total = query.count()
+    items = (
+        query.order_by(OptionMarket.und_key.asc(), OptionMarket.delisted_date.asc(),
+                       OptionMarket.price_strike.asc(), OptionMarket.option_type.asc())
+        .offset(offset).limit(limit).all()
+    )
+    return {
+        "items": [i.to_dict() for i in items],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/option-market/latest-date")
+def get_option_market_latest_date(db: Session = Depends(get_db)):
+    """最新行情日期 + 各品种在该日的行数（页面默认值与新鲜度提示）。"""
+    latest = db.query(func.max(OptionMarket.trade_date)).scalar()
+    if latest is None:
+        return {"latest_trade_date": None, "by_und": {}, "sync_time": None}
+    rows = (
+        db.query(OptionMarket.und_key, func.count(OptionMarket.id),
+                 func.max(OptionMarket.sync_time))
+        .filter(OptionMarket.trade_date == latest)
+        .group_by(OptionMarket.und_key).all()
+    )
+    return {
+        "latest_trade_date": latest.isoformat(),
+        "by_und": {r[0]: r[1] for r in rows},
+        "sync_time": max((r[2] for r in rows if r[2]), default=None),
+    }
+
+
+@router.get("/option-market/filters")
+def get_option_market_filters(db: Session = Depends(get_db)):
+    """下拉选项：品种 / 到期月 / 分组键（来自配置表 + 行情表现有值）。"""
+    cfg_names = [r[0] for r in db.query(OptionConfig.option_name).distinct().all()]
+    if not cfg_names:
+        cfg_names = [m["option_name"] for m in IrsCfg.OPTIONS_MARCH]
+    dms = [r[0] for r in db.query(OptionMarket.delisted_date).distinct().all() if r[0]]
+    end_months = sorted({d.strftime("%Y%m") for d in dms})
+    return {
+        "option_names": sorted(cfg_names),
+        "end_months": end_months,
+        "und_keys": sorted(set(_OPT_UND_KEY.values())),
+    }
+
+
+@router.get("/option-market/config-count", response_model=OptionSyncPlanOut)
+def get_option_market_config_count():
+    """同步前置确认：启用几张合约、几个品种×到期月组合（= 几次接口请求）。"""
+    return option_market.build_sync_plan()
+
+
+@router.post("/option-market/sync", response_model=BdsSyncTaskOut)
+def sync_option_market_now():
+    """一键同步「配置的全部期权」（后台线程 + 任务化 + 全局互斥）。
+
+    - 与批量同步 / 成分同步 / 估值重算**共用** `bds_sync_task` 与 `_stop_events`：
+      同时跑两批会打满 akshare 请求，且 `_cleanup_zombies` 机制可直接复用。
+    - 立即返回 task（status=running），前端轮询 `GET /bds/sync-tasks/{id}`。
+    - `total_count` 写**组数**而不是合约张数：实际耗时在接口请求上，
+      进度条必须能显示「第几组/共几组」，按行数报进度会长时间停在 0%。
+    """
+    db = next(get_db())
+    try:
+        plan = option_market.build_sync_plan()
+        if plan["symbol_count"] == 0:
+            raise HTTPException(status_code=400,
+                                detail="配置清单为空，请先在「期权同步清单」里配置要同步的合约")
+
+        _cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409,
+                                detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        task = BdsSyncTask(
+            scope="option_market",          # 12 字符，列宽 String(16) 之内
+            scope_params={"groups": plan["groups"]},
+            tables=["option-market"],
+            status="running",
+            total_count=plan["group_count"],
+            done_count=0,
+            success_count=0,
+            no_data_count=0,
+            error_count=0,
+            progress=0,
+            errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        _stop_events[task.id] = threading.Event()
+        threading.Thread(target=_run_option_market_thread,
+                         args=(task.id, plan["group_count"]), daemon=True).start()
+        return task
+    finally:
+        db.close()
+
+
+def _run_option_market_thread(task_id: int, group_total: int):
+    """后台线程：执行期权行情同步，逐组回写进度，收尾写 result。"""
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).filter(BdsSyncTask.id == task_id).first()
+    if task is None:
+        db.close()
+        return
+    stop_event = _stop_events.get(task_id)
+
+    def on_progress(done: int, total: int, label: str):
+        """按「组」报进度；顺带检查停止信号，避免停不下来。"""
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError(f"用户停止（已完成 {done}/{total} 组，最后一组：{label}）")
+        task.done_count = done
+        task.progress = round(done / total * 100, 2) if total else 100
+        db.commit()
+
+    try:
+        stats = option_market.sync_option_market(on_progress=on_progress)
+        errors = stats.pop("errors", []) or []
+        stopped = stop_event is not None and stop_event.is_set()
+
+        task.status = "stopped" if stopped else ("failed" if stats["group_ok"] == 0 else "done")
+        task.done_count = group_total
+        task.progress = 100
+        task.success_count = stats["row_insert"] + stats["row_update"]
+        task.error_count = len(errors)
+        task.no_data_count = stats.get("row_skip", 0)   # 复用该列：价格 0/空等被跳过的行数
+        task.errors = errors or None
+        task.result = stats
+        task.end_time = datetime.now()
+        db.commit()
+        print(f"[option-market #{task_id}] {task.status}："
+              f"组 {stats['group_ok']}/{stats['group_total']}，"
+              f"新增 {stats['row_insert']}、更新 {stats['row_update']}、跳过 {stats['row_skip']}")
+    except Exception as e:  # noqa: BLE001
+        task.status = "failed"
+        task.errors = (task.errors or []) + [
+            {"symbol": "", "table": "option-market",
+             "message": f"线程异常: {type(e).__name__}: {e}"}]
+        task.end_time = datetime.now()
+        db.commit()
+        print(f"[option-market #{task_id}] 失败: {e}")
+    finally:
+        _stop_events.pop(task_id, None)
+        db.close()
+
+
+# ---- 同步清单 CRUD ----
+
+@router.get("/option-config", response_model=List[OptionConfigOut])
+def list_option_config(
+    is_enabled: Optional[int] = Query(default=None, description="1=仅启用 0=仅停用"),
+    db: Session = Depends(get_db),
+):
+    """同步清单（按品种+到期月+行权价排序，便于核对）。"""
+    query = db.query(OptionConfig)
+    if is_enabled is not None:
+        query = query.filter(OptionConfig.is_enabled == is_enabled)
+    rows = query.order_by(OptionConfig.option_name.asc(),
+                          OptionConfig.end_month.asc(),
+                          OptionConfig.symbol.asc()).all()
+    return rows
+
+
+@router.post("/option-config", response_model=OptionConfigOut)
+def create_option_config(req: OptionConfigCreate, db: Session = Depends(get_db)):
+    """新增同步配置。
+
+    symbol 会做归一化（去 `CFFEX.`/`SHEX.` 账单前缀、去 ETF 的标的数字前缀），
+    所以粘贴账单代码也能直接存成交易所标准码。
+    """
+    meta = _opt_meta_by_name(req.option_name)
+    underlying = _canon_underlying(req.underlying_symbol) or meta["underlying_symbol"]
+    und_key = req.und_key or _OPT_UND_KEY.get(underlying)
+    if not und_key:
+        raise HTTPException(status_code=400,
+                            detail=f"无法从标的 {underlying} 推出 und_key，请显式指定（csi300/csi500etf/au）")
+    sym = option_market.normalize_symbol(req.symbol)
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol 不能为空")
+
+    is_commodity = meta["option_type"] == "商品期权"
+    end_month = req.end_month or None
+    if is_commodity:
+        end_month = "ALL"          # 接口一次返回全部到期月，填实际月份会造成误解
+    elif not end_month:
+        raise HTTPException(status_code=400,
+                            detail=f"{req.option_name} 必须指定 end_month（接口按到期月拉取）")
+    if end_month and end_month != "ALL" and (len(end_month) != 6 or not end_month.isdigit()):
+        raise HTTPException(status_code=400, detail=f"end_month 格式应为 YYYYMM：{end_month}")
+
+    exists = db.query(OptionConfig).filter(OptionConfig.symbol == sym).first()
+    if exists:
+        raise HTTPException(status_code=400, detail=f"该合约已在清单里：{sym}")
+
+    row = OptionConfig(
+        symbol=sym,
+        broker_symbol=req.broker_symbol,
+        underlying_symbol=underlying,
+        und_key=und_key,
+        option_name=req.option_name,
+        end_month=end_month,
+        is_enabled=req.is_enabled,
+        source="manual",
+        note=req.note,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.put("/option-config/{cfg_id}", response_model=OptionConfigOut)
+def update_option_config(cfg_id: int, req: OptionConfigUpdate, db: Session = Depends(get_db)):
+    """改人工列（启用开关 / 备注）。身份字段（symbol/标的/到期月）不可改。
+
+    ⚠️ 只回填传入的字段：`is_enabled` 与 `note` 相互独立，前端若只改一个
+    必须只发一个（本端点对 None 视为"不改"，不用全字段覆盖）。
+    """
+    row = db.query(OptionConfig).filter(OptionConfig.id == cfg_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"配置不存在：{cfg_id}")
+    if req.is_enabled is not None:
+        row.is_enabled = req.is_enabled
+    if req.note is not None:
+        row.note = req.note
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.delete("/option-config/{cfg_id}")
+def delete_option_config(cfg_id: int, db: Session = Depends(get_db)):
+    """删除配置。**不删行情**——行情是事实数据，删配置只影响后续同步范围。"""
+    row = db.query(OptionConfig).filter(OptionConfig.id == cfg_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"配置不存在：{cfg_id}")
+    db.delete(row)
+    db.commit()
+    return {"status": "ok", "message": f"已删除配置 {row.symbol}（行情历史保留）"}
+
+
+@router.post("/option-config/import-holding", response_model=OptionConfigImportResult)
+def import_option_config_from_holding(db: Session = Depends(get_db)):
+    """从 `bills_option_contract` 导入在仓合约到同步清单。
+
+    与账单的代码口径差异（这是已踩过的坑）：
+    - `CFFEX.IO2611-P-4000` → `IO2611-P-4000`（去前缀）
+    - `SHEX.au2612P840`     → `au2612P840`（去前缀）
+    - `SHQQ.10012562`（券商柜台码）→ 交易所码必须**重新拼**：
+      `{标的6位}{C/P}{yymm}M{行权价×1000 五位}`，与券商码无任何字符串关系。
+
+    重复导入按 symbol 跳过，不报错（幂等）。
+    """
+    # 跨应用只读：bills 的持仓合约字典是「合约静态属性」的唯一来源
+    from server_fast.app.bills.models import OptionContract
+
+    imported, skipped, failed = 0, 0, []
+    rows = db.query(OptionContract).all()
+    existing = {r.symbol for r in db.query(OptionConfig).all()}
+
+    for c in rows:
+        try:
+            broker = c.symbol if "." in c.symbol else None
+            head = c.symbol.split(".", 1)[0].upper() if "." in c.symbol else ""
+            exp = c.expiry_date
+            if head in ("SHQQ", "SZQQ"):
+                # 券商柜台码 → 交易所标准码
+                ud6 = (c.underlying or "").split(".")[-1]
+                if len(ud6) != 6 or exp is None:
+                    failed.append({"symbol": c.symbol,
+                                   "reason": "缺标的6位码或到期日，无法拼出交易所码"})
+                    continue
+                strike5 = f"{int(round(float(c.strike) * 1000)):05d}"
+                sym = f"{ud6}{c.cp.upper()}{exp.strftime('%y%m')}M{strike5}"
+                option_name = _name_by_underlying(c.underlying)
+                end_month = exp.strftime("%Y%m")
+            else:
+                sym = option_market.normalize_symbol(c.symbol)
+                option_name = _name_by_underlying(c.underlying)
+                end_month = ("ALL" if option_name == "黄金期权"
+                             else (exp.strftime("%Y%m") if exp else None))
+
+            if not option_name:
+                failed.append({"symbol": c.symbol, "reason": f"标的不在 IrsCfg 中：{c.underlying}"})
+                continue
+            if sym in existing:
+                skipped += 1
+                continue
+
+            meta = _opt_meta_by_name(option_name)
+            underlying = _canon_underlying(c.underlying) or meta["underlying_symbol"]
+            db.add(OptionConfig(
+                symbol=sym,
+                broker_symbol=broker,
+                underlying_symbol=underlying,
+                und_key=_OPT_UND_KEY.get(underlying, ""),
+                option_name=option_name,
+                end_month=end_month,
+                is_enabled=1,
+                source="holding",
+                note=f"从持仓导入（{c.symbol}）",
+            ))
+            existing.add(sym)
+            imported += 1
+        except Exception as e:  # noqa: BLE001
+            failed.append({"symbol": c.symbol, "reason": f"{type(e).__name__}: {e}"})
+
+    db.commit()
+    return {"imported": imported, "skipped": skipped, "failed": failed}
+
+
+def _name_by_underlying(underlying: Optional[str]) -> Optional[str]:
+    """标的代码 → akshare 品种名（先归一 SHEX/SHFE 两套口径）。"""
+    u = _canon_underlying(underlying)
+    for item in IrsCfg.OPTIONS_MARCH:
+        if item["underlying_symbol"] == u:
+            return item["option_name"]
+    return None

@@ -571,3 +571,107 @@ class BdsSyncTaskOut(BaseModel):
     end_time: Optional[datetime] = Field(default=None, description="实际结束时间")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
+
+
+# ============================================================================
+# 期权行情（bds_option_config / bds_option_market）
+# ============================================================================
+
+
+class OptionConfigOut(BaseModel):
+    """期权同步清单响应 Schema（对应 bds.OptionConfig）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    symbol: str = Field(description="交易所标准期权代码")
+    broker_symbol: Optional[str] = Field(default=None, description="券商账单代码（ETF 对账用）")
+    underlying_symbol: str = Field(description="标的代码")
+    und_key: str = Field(description="情景分组键: csi300/csi500etf/au")
+    option_name: str = Field(description="akshare 品种名")
+    end_month: Optional[str] = Field(default=None, description="到期年月 YYYYMM；商品期权为 ALL")
+    is_enabled: int = Field(description="1=参与一键同步")
+    source: str = Field(description="manual=手工 / holding=从持仓导入")
+    note: Optional[str] = Field(default=None, description="备注")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")
+
+
+class OptionConfigCreate(BaseModel):
+    """新增同步配置入参。
+
+    ⚠️ 不继承 OptionConfigOut：id / create_time / update_time 是库生成的派生字段，
+    混进 Save schema 会导致「无默认值的必填 id」这类恒 422 的缺陷（已有前车之鉴）。
+    """
+
+    symbol: str = Field(description="交易所标准期权代码（会做归一化：去账单前缀、去 ETF 标的数字前缀）")
+    broker_symbol: Optional[str] = Field(default=None, description="券商账单代码（可选）")
+    option_name: str = Field(description="akshare 品种名，须在 IrsCfg.OPTIONS_MARCH 中")
+    end_month: Optional[str] = Field(default=None, description="到期年月 YYYYMM；商品期权填 ALL")
+    underlying_symbol: Optional[str] = Field(default=None, description="标的代码；留空则按品种自动取")
+    und_key: Optional[str] = Field(default=None, description="情景分组键；留空则按标的自动取")
+    is_enabled: int = Field(default=1, description="1=参与一键同步")
+    note: Optional[str] = Field(default=None, description="备注")
+
+
+class OptionConfigUpdate(BaseModel):
+    """修改配置（只允许改人工列，symbol/underlying 等身份字段不可改）。
+
+    `is_enabled`/`note` 是人工列（铁律 4.9）：同步任务只写 bds_option_market，永不覆盖本表。
+    """
+
+    is_enabled: Optional[int] = Field(default=None, description="1=参与一键同步")
+    note: Optional[str] = Field(default=None, description="备注")
+
+
+class OptionMarketOut(BaseModel):
+    """期权行情响应 Schema（对应 bds.OptionMarket）。
+
+    `settle` / `delta_opt` 为 None 表示「该品种接口不提供」，不是数据缺失 ——
+    股指与 ETF 期权的 akshare 接口本来就没有这两个字段。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(description="主键")
+    symbol: str = Field(description="交易所标准期权代码")
+    broker_symbol: Optional[str] = Field(default=None, description="券商账单代码（ETF 有）")
+    trade_date: date = Field(description="行情日期（交易日）")
+    underlying_symbol: str = Field(description="标的代码")
+    und_key: str = Field(description="情景分组键")
+    option_type: str = Field(description="call / put")
+    price_strike: Decimal = Field(description="行权价")
+    delisted_date: Optional[date] = Field(default=None, description="到期日")
+    days_left: Optional[int] = Field(default=None, description="剩余自然日")
+    multiplier: int = Field(description="合约乘数")
+    price: Optional[Decimal] = Field(default=None, description="最新价（盘中实时/盘后收盘）")
+    pre_settle: Optional[Decimal] = Field(default=None, description="前结算价")
+    settle: Optional[Decimal] = Field(default=None, description="结算价（仅商品期权可得）")
+    price_ud: Optional[Decimal] = Field(default=None, description="标的价")
+    value_i: Optional[Decimal] = Field(default=None, description="内在价值")
+    value_t: Optional[Decimal] = Field(default=None, description="时间价值")
+    delta_opt: Optional[Decimal] = Field(default=None, description="delta（仅商品期权，认沽为负）")
+    volume: Optional[int] = Field(default=None, description="成交量（ETF 恒 null）")
+    open_interest: Optional[int] = Field(default=None, description="持仓量（ETF 恒 null）")
+    quote_time: Optional[datetime] = Field(default=None, description="接口返回的行情时点")
+    source: str = Field(description="akshare_shfe / akshare_board")
+    sync_time: datetime = Field(description="本次写入时间")
+    create_time: datetime = Field(description="创建时间")
+    update_time: datetime = Field(description="更新时间")
+
+
+class OptionSyncPlanOut(BaseModel):
+    """同步前置确认信息（点「行情同步」时弹窗用）。"""
+
+    symbol_count: int = Field(description="启用配置的合约张数")
+    group_count: int = Field(description="品种×到期月组合数（= 接口请求次数）")
+    option_names: list[str] = Field(description="涉及的期权品种")
+    groups: list[dict] = Field(description="组合明细 [{option_name, end_month}]")
+
+
+class OptionConfigImportResult(BaseModel):
+    """从持仓导入配置的结果。"""
+
+    imported: int = Field(description="新增条数")
+    skipped: int = Field(description="已存在跳过条数")
+    failed: list[dict] = Field(default_factory=list, description="无法解析的持仓合约 [{symbol, reason}]")

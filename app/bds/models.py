@@ -815,6 +815,133 @@ class BdsSyncTask(Base, BaseModel):
         return f"task-{self.id}({self.scope})"
 
 
+class OptionConfig(Base, BaseModel):
+    """期权行情同步清单（对应表 bds_option_config）。
+
+    这是「一键同步配置的全部期权」这句话的地基：`bills_option_contract` 是**持仓属性**
+    （一个合约一份静态信息），`irs_option_monitor` 是**监测结果**（按品种×月份全量铺开），
+    两者都不是"我要同步哪些"。没有这张表，同步只能二选一：全部 866 条 / 全部持仓。
+
+    - `end_month`：股指/ETF 必须指定（`option_finance_board` 按到期月拉）；
+      **商品期权填 `ALL`**——`option_hist_shfe` 一次返回当日全部到期月（实测 812 行），
+      没有按月筛选的参数，填实际月份反而会造成"以为只拉了一个月"的误解。
+    - `option_name`：akshare 的入参是中文品种名（"沪深300股指期权"），不是代码。
+      写在配置里而不是代码里，以后加新品种不用改代码。
+    - `broker_symbol`：ETF 是券商内部码（`SHQQ.10012562`），与交易所码（`P2611M06250`）
+      **没有任何字符串关系**，只能靠这个列对账。
+    """
+
+    __tablename__ = "bds_option_config"
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="交易所标准期权代码")
+    broker_symbol: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="券商账单代码（ETF 对账用）")
+    underlying_symbol: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="标的：SHSE.000300 / SHSE.510500 / SHFE.au")
+    und_key: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="情景分组键：csi300 / csi500etf / au")
+    option_name: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="akshare 品种名")
+    end_month: Mapped[Optional[str]] = mapped_column(
+        String(6), nullable=True, comment="到期年月 YYYYMM；商品期权填 ALL")
+    is_enabled: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1", comment="1=参与一键同步")
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="manual", comment="manual/holding")
+    note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="备注")
+
+    __table_args__ = (
+        UniqueConstraint("symbol", name="uk_opt_cfg"),
+        Index("k_cfg_group", "option_name", "end_month"),
+    )
+
+    unique_keys = ["symbol"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}({self.option_name})"
+
+
+class OptionMarket(Base, BaseModel):
+    """期权行情日快照（对应表 bds_option_market）。
+
+    **按日累积**：唯一键 `(symbol, trade_date)`，同日重跑幂等覆盖，跨日自然成为时间序列。
+    这是相对 `irs_option_monitor`（只存最新一版、一同步历史就没了）的核心收益。
+
+    三列价格必须分开（`irs_option_monitor` 把它们挤在一列是历史缺陷）：
+
+    | 列 | 含义 | IO | 510500 | au |
+    |---|---|---|---|---|
+    | `price` | 最新价（盘中实时/盘后收盘） | lastprice | 当前价 | 收盘价 |
+    | `pre_settle` | 前结算价 | **NULL** | 前结价 | 前结算价 |
+    | `settle` | 结算价 | **NULL** | **NULL** | 结算价 ✅ |
+
+    ⇒ `settle` / `delta_opt` / `volume` / `open_interest` 允许 NULL，**不硬造**。
+    下游要用结算价时按 `COALESCE(settle, pre_settle, price)` 降级，**降级链只在服务层一处**，
+    展示层如实留空（拿前结价冒充结算价会误导）。
+
+    ⚠️ ETF 接口的「数量」列恒等于返回行数（实测 26 行 → 全部为 26），不是成交量，故
+    ETF 的 `volume`/`open_interest` 一律 NULL。
+    """
+
+    __tablename__ = "bds_option_market"
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="交易所标准期权代码")
+    broker_symbol: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="券商账单代码（来自配置）")
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="行情日期（交易日）")
+    underlying_symbol: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="标的代码")
+    und_key: Mapped[str] = mapped_column(String(16), nullable=False, comment="情景分组键")
+    option_type: Mapped[str] = mapped_column(
+        String(8), nullable=False, comment="call / put")
+    price_strike: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, comment="行权价")
+    delisted_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="到期日（_calc_delisted_date 推算）")
+    days_left: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="剩余自然日")
+    multiplier: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="合约乘数")
+    price: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="最新价")
+    pre_settle: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="前结算价")
+    settle: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="结算价（仅商品期权）")
+    price_ud: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="标的价（同标的同交易日唯一）")
+    value_i: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="内在价值")
+    value_t: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="时间价值")
+    delta_opt: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(10, 6), nullable=True, comment="delta（仅商品期权，认沽为负）")
+    volume: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True, comment="成交量（ETF 恒 NULL）")
+    open_interest: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True, comment="持仓量（ETF 恒 NULL）")
+    quote_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, comment="接口返回的行情时点")
+    source: Mapped[str] = mapped_column(
+        String(24), nullable=False, comment="akshare_shfe / akshare_board")
+    sync_time: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="本次写入时间")
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uk_opt_market"),
+        Index("k_opt_trade_date", "trade_date"),
+        Index("k_opt_und", "und_key", "trade_date"),
+        Index("k_opt_strike", "und_key", "delisted_date", "price_strike", "option_type"),
+    )
+
+    unique_keys = ["symbol", "trade_date"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}@{self.trade_date}"
+
+
 class BdsTableStat(Base, BaseModel):
     """列表页总数缓存（对应表 bds_table_stat）。
 
