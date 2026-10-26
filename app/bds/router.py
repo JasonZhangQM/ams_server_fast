@@ -2613,6 +2613,11 @@ def _run_option_market_thread(task_id: int, group_total: int):
         db.commit()
 
     try:
+        # start_time 必须自己写：本线程不走 _run_sync_thread 的初始化，漏写会让审计表出现
+        # 「有 end_time 没有 start_time」的半截记录（历史 #167/#168/#169 三例）
+        task.start_time = datetime.now()
+        db.commit()
+
         stats = option_market.sync_option_market(on_progress=on_progress)
         errors = stats.pop("errors", []) or []
         stopped = stop_event is not None and stop_event.is_set()
@@ -2620,9 +2625,14 @@ def _run_option_market_thread(task_id: int, group_total: int):
         task.status = "stopped" if stopped else ("failed" if stats["group_ok"] == 0 else "done")
         task.done_count = group_total
         task.progress = 100
+        # 口径：本任务 success_count = **写入行数**（与 macro_sync 任务里「项数」不同，
+        # 但与该任务 result.stages[].rows 同义）——前端文案统一写「行」
         task.success_count = stats["row_insert"] + stats["row_update"]
         task.error_count = len(errors)
-        task.no_data_count = stats.get("row_skip", 0)   # 复用该列：价格 0/空等被跳过的行数
+        # 跳过行数只留在 result.row_skip，**不再借用 no_data_count**：
+        # 该列在 macro_sync / index_valuation 里分别表示「无数据项数」「未出数交易日数」，
+        # 同一列三种语义会让前端把「跳过 6 行」读成「6 项无数据」
+        task.no_data_count = 0
         task.errors = errors or None
         task.result = stats
         task.end_time = datetime.now()
@@ -2746,7 +2756,13 @@ def import_option_config_from_holding(db: Session = Depends(get_db)):
     - `CFFEX.IO2611-P-4000` → `IO2611-P-4000`（去前缀）
     - `SHEX.au2612P840`     → `au2612P840`（去前缀）
     - `SHQQ.10012562`（券商柜台码）→ 交易所码必须**重新拼**：
-      `{标的6位}{C/P}{yymm}M{行权价×1000 五位}`，与券商码无任何字符串关系。
+      `{C/P}{yymm}M{行权价×1000 五位}`，与券商码无任何字符串关系。
+
+    ⚠️ ETF 交易所码**不含标的代码**：`P2611M06250`。akshare 的「合约交易代码」列
+    是 `510500P2611M06250`，前 6 位是标的，`_ETF_CODE_RE` 正是用来剥掉它的。
+    早期这里误把 `{标的6位}` 拼进去，得到 `510500P2611M06250`：同步靠
+    `normalize_symbol()` 兜住所以行情照样入库，但**配置表 symbol 与行情表 symbol
+    从此对不上**（任何 `JOIN ON symbol` 都会漏掉 ETF）。已修正并清洗存量。
 
     重复导入按 symbol 跳过，不报错（幂等）。
     """
@@ -2755,7 +2771,9 @@ def import_option_config_from_holding(db: Session = Depends(get_db)):
 
     imported, skipped, failed = 0, 0, []
     rows = db.query(OptionContract).all()
-    existing = {r.symbol for r in db.query(OptionConfig).all()}
+    # 既有一律归一后再比对：库里可能残留早期未归一的 symbol（510500P2611M06250），
+    # 不归一就会把同一个合约当成新行再插一条
+    existing = {option_market.normalize_symbol(r.symbol) for r in db.query(OptionConfig).all()}
 
     for c in rows:
         try:
@@ -2764,13 +2782,13 @@ def import_option_config_from_holding(db: Session = Depends(get_db)):
             exp = c.expiry_date
             if head in ("SHQQ", "SZQQ"):
                 # 券商柜台码 → 交易所标准码
-                ud6 = (c.underlying or "").split(".")[-1]
-                if len(ud6) != 6 or exp is None:
+                if exp is None:
                     failed.append({"symbol": c.symbol,
-                                   "reason": "缺标的6位码或到期日，无法拼出交易所码"})
+                                   "reason": "缺到期日，无法拼出交易所码"})
                     continue
                 strike5 = f"{int(round(float(c.strike) * 1000)):05d}"
-                sym = f"{ud6}{c.cp.upper()}{exp.strftime('%y%m')}M{strike5}"
+                # 交易所标准码 = CP + yymm + M + 行权价×1000 五位，**不含标的代码**
+                sym = f"{c.cp.upper()}{exp.strftime('%y%m')}M{strike5}"
                 option_name = _name_by_underlying(c.underlying)
                 end_month = exp.strftime("%Y%m")
             else:
