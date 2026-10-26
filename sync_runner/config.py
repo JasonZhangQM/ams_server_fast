@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """批量同步常量 / 全局 Session。
 
-从 run2-批量同步.ipynb Cell 2 原样抽取，单行逻辑未改。
+从原 run2-批量同步.ipynb Cell 2 原样抽取（该 notebook 已于 2026-10-26 删除），单行逻辑未改。
 """
 
 import requests

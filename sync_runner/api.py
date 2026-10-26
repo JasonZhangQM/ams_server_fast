@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """HTTP 工具函数 + symbol 来源解析。
 
-被两个入口共用：后端后台线程（app/bds/router.py）与 CLI（run2_batch_sync.py）。
+由后端后台线程（app/bds/router.py）调用。
 """
 
 from .config import API_BASE, REQUEST_TIMEOUT, MARKET_PREFIXES, SESSION

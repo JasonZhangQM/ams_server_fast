@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """单只同步 + 当日标记。
 
-从 run2-批量同步.ipynb Cell 3 原样抽取，单行逻辑未改。
+从原 run2-批量同步.ipynb Cell 3 原样抽取（该 notebook 已于 2026-10-26 删除），单行逻辑未改。
 """
 
 import random

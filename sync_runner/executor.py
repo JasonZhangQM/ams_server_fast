@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """批量执行器 + 结果汇总。
 
-从 run2-批量同步.ipynb Cell 5-6 原样抽取，全局变量 RESULTS 改为参数传入/返回。
+从原 run2-批量同步.ipynb Cell 5-6 原样抽取（该 notebook 已于 2026-10-26 删除），全局变量 RESULTS 改为参数传入/返回。
 """
 
 import time
