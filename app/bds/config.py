@@ -76,6 +76,67 @@ class Config:
         'BJSE.': 1,
     }
 
+    # ==================== 期权品种基础数据（2026-10-26 复制自 irs） ====================
+    # 这四项原在 `app/irs/config.py`，按用户要求**先复制一份到 bds**：期权品种、到期日规则、
+    # 标的映射描述的都是市场事实，属基础数据层；等 bds 的基础数据功能补齐后再去改 irs。
+    #
+    # ⚠️ **当前 irs 仍是唯一事实源，bds 的代码还读 `IrsCfg.OPTIONS_MARCH`，尚未切到本副本。**
+    #    所以两份并存期间：改 irs 的这四项必须同步改这里，否则切源那天行为会悄悄变。
+    #    切换顺序固定为：① bds 全部改读本副本 → ② 验证行为逐字节一致 → ③ irs 改为引用 bds。
+    #    在此之前**不要**在 bds 侧做任何「改进」（补品种、改乘数类型、删死代码）——
+    #    副本一旦与原件不一致，"切源"就不再是零风险动作。
+    #
+    # 与 MAP_MULTIPLIER 的关系：OPTIONS_MARCH 每行自带 multiplier，是同一事实的第三处定义
+    # （另两处：本表、irs 的 OPTIONS_MARCH）。⚠️ 类型还不一致：这里是 int，OPTIONS_MARCH 是
+    # **字符串** '100'。复制保真未改，统一时一并处理。
+
+    # akshare 期权品种表。option_name 是**接口入参的中文名**（不是代码），
+    # underlying_symbol 定标的，rule_exercise_date 指向下方 RULE_EXERCISE_DATE 的规则码。
+    # 加品种只改这里 + 各自的数据源分支即可，不用动代码。
+    OPTIONS_MARCH = (
+        {'underlying_symbol':'SHSE.000300','option_type':'股指期权','option_name':'沪深300股指期权','multiplier':'100','rule_exercise_date':'R1'},
+        {'underlying_symbol':'SHSE.510500','option_type':'ETF期权','option_name':'南方中证500ETF期权','multiplier':'10000','rule_exercise_date':'R2'},
+        {'underlying_symbol':'SHFE.au','option_type':'商品期权','option_name':'黄金期权','multiplier':'1000','rule_exercise_date':'R3'},
+        )
+
+    # 到期日规则：rule -> (第几个星期 1-based, 星期几 0=周一 ... 4=周五)
+    # R1 股指期权（IO/HO/MO）＝合约月第三个周五
+    # R2 ETF 期权（510300/510500/159919）＝合约月第四个周三
+    # R3 商品期权（沪金等）＝标的交割月前一月倒数第 5 个交易日 ⇒ **无元组**，
+    #    这里只放 None 占位，真实逻辑在服务层按日历倒数，不能按 (week_n, weekday) 套用。
+    # 遇节假日顺延由服务层查 bds_trade_date 处理（这也是 irs 无法自给、必须依赖 bds 的原因）。
+    RULE_EXERCISE_DATE = {
+        'R1': (3, 4),
+        'R2': (4, 2),
+        'R3': None,
+    }
+
+    # 期权标的市场映射：交易所 -> 标的代码列表。
+    # ⚠️ **当前全仓零消费者**（.py / .ipynb 全局 grep 只有本处与 irs 的定义，没有任何调用）。
+    #    推测是早期版本直接用它筛标的、后来改为读标的表了。复制保真保留，
+    #    统一时确认是删除还是真正接上——不要在「复制」阶段擅自删。
+    MAP_OPTIONS_UD_MARKET = {
+        'SHSE': [
+            '000016', '000300', '000852', '510050',
+            '510300', '510500', '588000', '588080',
+        ],
+        'SZSE': ['159901', '159919', '159922', '159915'],
+    }
+
+    @classmethod
+    def map_ud_market(cls):
+        """把 MAP_OPTIONS_UD_MARKET 反查成「标的代码 -> 完整 symbol」。
+
+        {'SZSE': ['159919']} -> {'159919': 'SZSE.159919'}
+
+        ⚠️ 与 MAP_OPTIONS_UD_MARKET 同为零消费者，复制保真。
+        """
+        ud_market_dict = {}
+        for k, v in cls.MAP_OPTIONS_UD_MARKET.items():
+            for symbol in v:
+                ud_market_dict[symbol] = f'{k}.{symbol}'
+        return ud_market_dict
+
     INDEX_CODE = { #指数代码映射
         # constituent_count：**成分股只数上限**，供成分同步做伪快照拦截（见 index_constituent._judge_change）。
         # 宽基指数成分数恒定，超过它必然是新旧名单并存；缺 2 只以上必然是 gm 返回缺股。
