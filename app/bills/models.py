@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """bills 应用的 SQLAlchemy 2.0 模型定义。
 
-共 7 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / BillNote / ProfitYear。
+共 10 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / BillNote / ProfitYear /
+OptionContract / RiskParam / ScenarioGrid。
 
 - 继承 (Base, BaseModel)，BaseModel 提供 id/create_time/update_time 及通用方法
 - 外键列名以 _id 结尾
@@ -426,4 +427,90 @@ class ProfitYear(Base, BaseModel):
 
     def __str__(self) -> str:
         return f'年度收益-{self.year}'
+
+
+class OptionContract(Base, BaseModel):
+    """期权合约字典（静态属性，人工维护）。
+
+    - symbol 是 bills_bill/bills_group 里的原始代码（含交易所前缀）；
+    - strike 统一本位：ETF 期权「6250」的真实行权价是 6.250 元，靠这里校正；
+    - margin_type 选保证金公式族：cffex（15%/7%）/ etf（12%/7%）/ shex（内在价值全额式）；
+    - und_key 是情景分组键：csi300/csi500/csi500etf/astock/nasdaq/au，
+      决定该仓位在模式 B（仅A股）/ C（仅股指）里动不动。
+    """
+
+    __tablename__ = "bills_option_contract"
+
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, comment="原始代码")
+    exchange: Mapped[str] = mapped_column(String(8), comment="CFFEX/SHEX/SHQQ/SZQQ")
+    underlying: Mapped[Optional[str]] = mapped_column(String(32), comment="标的代码")
+    und_key: Mapped[str] = mapped_column(String(16), comment="情景分组键")
+    cp: Mapped[str] = mapped_column(String(1), comment="C=认购 P=认沽")
+    strike: Mapped[Decimal] = mapped_column(Numeric(12, 4), comment="行权价（统一本位）")
+    strike_raw: Mapped[Optional[str]] = mapped_column(String(16), comment="原始串")
+    multiplier: Mapped[int] = mapped_column(Integer, comment="合约乘数")
+    settlement: Mapped[str] = mapped_column(String(8), comment="cash/etf/future")
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date, comment="到期日")
+    margin_type: Mapped[str] = mapped_column(String(8), comment="保证金公式族")
+    notional_per: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="单张名义")
+    source: Mapped[str] = mapped_column(String(8), comment="manual/auto")
+
+    __table_args__ = (
+        Index('k_opt_und', 'und_key'),
+    )
+
+    def __str__(self) -> str:
+        return f'期权合约-{self.symbol}'
+
+
+class RiskParam(Base, BaseModel):
+    """风险参数（保证金率/波动率/报价覆盖），人工维护 + 日结单反解。"""
+
+    __tablename__ = "bills_risk_param"
+
+    scope: Mapped[str] = mapped_column(String(16), comment="品种或账户")
+    param_key: Mapped[str] = mapped_column(String(32), comment="margin_rate/vol/quote")
+    param_value: Mapped[Decimal] = mapped_column(Numeric(12, 6), comment="参数值")
+    source: Mapped[str] = mapped_column(String(16), comment="manual/statement/calc")
+    effective_on: Mapped[date] = mapped_column(Date, comment="生效日")
+    note: Mapped[Optional[str]] = mapped_column(String(200), comment="备注")
+
+    __table_args__ = (
+        UniqueConstraint('scope', 'param_key', 'effective_on', name='uk_param'),
+    )
+
+    def __str__(self) -> str:
+        return f'风险参数-{self.scope}-{self.param_key}'
+
+
+class ScenarioGrid(Base, BaseModel):
+    """情景压力测试矩阵（任务化重算，铁律 4.8）。
+
+    - loss_amt 负=亏；net_after = 组合净值 − loss；
+    - risk_ratio 穿仓时写 9999（DECIMAL 存不了 inf）；
+    - account='ALL' 是组合行，其余是分账户行（分账户必看，铁律 §七-6）。
+    """
+
+    __tablename__ = "bills_scenario_grid"
+
+    calc_date: Mapped[date] = mapped_column(Date, comment="计算基准日")
+    mode: Mapped[str] = mapped_column(String(8), comment="sync/astock_only/index_only")
+    drop_pct: Mapped[Decimal] = mapped_column(Numeric(6, 4), comment="跌幅")
+    account: Mapped[str] = mapped_column(String(16), comment="账户；ALL=组合")
+    loss_amt: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="亏损额（负=亏）")
+    net_after: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="情景后净值")
+    margin_req: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="保证金需求")
+    risk_ratio_real: Mapped[Decimal] = mapped_column(Numeric(10, 4), comment="真实口径风险度")
+    risk_ratio_exch: Mapped[Decimal] = mapped_column(Numeric(10, 4), comment="交易所口径风险度")
+    breached: Mapped[int] = mapped_column(Integer, default=0, comment="1=已追保/穿仓")
+    engine_ver: Mapped[str] = mapped_column(String(16), comment="公式版本")
+
+    __table_args__ = (
+        UniqueConstraint('calc_date', 'mode', 'drop_pct', 'account', name='uk_grid'),
+        Index('k_grid_date', 'calc_date'),
+        {'comment': '情景压力测试矩阵'},
+    )
+
+    def __str__(self) -> str:
+        return f'情景-{self.calc_date}-{self.mode}-{self.drop_pct}-{self.account}'
 
