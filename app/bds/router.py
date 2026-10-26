@@ -1400,7 +1400,7 @@ def sync_daily_indicators_all():
 
 
 # ============================================================================
-# 一键同步（基础数据 + 宏观数据）：六段固定顺序执行，复用 bds_sync_task 轮询进度
+# 一键同步（基础数据 + 宏观数据）：七段固定顺序执行，复用 bds_sync_task 轮询进度
 # 方案：docs/基础数据并入同步卡片方案_2026-10-22.md
 #       docs/宏观同步合并一键顺序执行方案_2026-10-21.md（初版，仅宏观三段）
 #
@@ -1415,12 +1415,14 @@ def sync_daily_indicators_all():
 
 # 固定执行顺序：基础在前（下游依赖）+ 快 → 慢
 # 实测耗时（2026-10-22 盘前）：trade_date 0.17s / symbol_info 8.5s / index_history 0.22s
+#                             option_market 3 组约 5s（2026-10-26 实测，6 合约）
 #                             wscn 约 15s / daily 约 13s / gold 20 国约 5.5min（每国 16.4s）
-SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "index_history", "wscn", "daily", "gold"]
+SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "index_history", "option_market", "wscn", "daily", "gold"]
 SYNC_STAGE_NAMES = {
     "trade_date": "交易日历",
     "symbol_info": "证券信息",
     "index_history": "指数行情",
+    "option_market": "期权行情",
     "wscn": "经济指标（华尔街见闻）",
     "daily": "美债收益率（FRED）",
     "gold": "黄金储备（IMF）",
@@ -1431,6 +1433,7 @@ SYNC_STAGE_GROUPS = {
     "trade_date": "basic",
     "symbol_info": "basic",
     "index_history": "basic",
+    "option_market": "basic",
     "wscn": "macro",
     "daily": "macro",
     "gold": "macro",
@@ -1443,6 +1446,8 @@ def _sync_stage_items(stage: str) -> list:
     - trade_date：原子操作（一年只在跨年时真写库），整体 1 项
     - symbol_info：东财 Excel / gm 两条通道各 1 项（与 sync_symbol_info_all 的步骤划分一致）
     - index_history：按 Config.INDEX_CODE 逐指数
+    - option_market：按「品种 × 到期月」逐组（= 一次接口请求），与 /option-market/sync 的分组口径一致；
+      清单为空时给一个 `__no_config__` 伪项，让失败明细能说清原因，而不是 0 项静默通过
     - wscn：service 内部按自然月分批（首次全量 141 批起）**不可切分** ⇒ 整体 1 项
     - daily / gold：按配置逐项，与前端 store 列出的条目同源
     """
@@ -1452,6 +1457,14 @@ def _sync_stage_items(stage: str) -> list:
         return [("excel", "东财Excel"), ("gm", "gm证券信息")]
     if stage == "index_history":
         return [(code, info.get("sec_name") or code) for code, info in Config.INDEX_CODE.items()]
+    if stage == "option_market":
+        groups = option_market.build_sync_plan()["groups"]
+        if not groups:
+            return [("__no_config__", "未配置合约")]
+        return [
+            (f"{g['option_name']}|{g['end_month']}", f"{g['option_name']}/{g['end_month'] or 'ALL'}")
+            for g in groups
+        ]
     if stage == "wscn":
         return [("wscn", "全部指标")]
     if stage == "daily":
@@ -1483,6 +1496,11 @@ def _run_sync_item(stage: str, key: str) -> int:
             if not info:
                 return -1
             return sync_one_index(key, info)
+        if stage == "option_market":
+            if key == "__no_config__":
+                return -1
+            option_name, _, end_month = key.partition("|")
+            return option_market.sync_one_group(option_name, end_month)
         if stage == "wscn":
             return upsert_economic_indicator_from_wscn_sql()
         if stage == "daily":
@@ -1557,10 +1575,13 @@ def _run_sync_thread(task_id: int, stages: list):
                 else:
                     err += 1
                     st["error"] += 1
+                    # option_market 的伪项给明确原因，别让「清单为空」看起来像接口挂了
+                    msg = ("期权同步清单为空，请先在「期权同步清单」里配置要同步的合约"
+                           if key == "__no_config__" else "取数失败（count=-1，详见后端日志）")
                     errors.append({
                         "symbol": key,
                         "table": SYNC_STAGE_NAMES[stage],
-                        "message": "取数失败（count=-1，详见后端日志）",
+                        "message": msg,
                     })
                 print(f"[sync #{task_id}] {stage}/{key} -> {count} ({done}/{total})")
                 flush(stage)

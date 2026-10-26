@@ -441,17 +441,18 @@ class BatchSyncRequest(BaseModel):
 class MacroSyncRequest(BaseModel):
     """一键同步请求体（POST /bds/sync/macro）—— 基础数据 + 宏观数据。
 
-    六段**固定按 trade_date → symbol_info → index_history → wscn → daily → gold 顺序执行**
-    （基础在下游依赖之前，整体快 → 慢），只跑 stages 里勾选的段。
+    七段**固定按 trade_date → symbol_info → index_history → option_market → wscn → daily → gold
+    顺序执行**（基础在下游依赖之前，整体快 → 慢），只跑 stages 里勾选的段。
     执行在后台线程，返回 task 供前端轮询进度（与 /bds/run/batch-sync 同一套任务表）。
     """
 
     model_config = ConfigDict(extra='forbid')
 
     stages: list[str] = Field(
-        default_factory=lambda: ['symbol_info', 'index_history', 'wscn', 'daily'],
-        description="要同步的段（顺序固定 trade_date→symbol_info→index_history→wscn→daily→gold）："
-                    "trade_date=交易日历 / symbol_info=证券信息 / index_history=指数行情 / "
+        default_factory=lambda: ['symbol_info', 'index_history', 'option_market', 'wscn', 'daily'],
+        description="要同步的段（顺序固定 trade_date→symbol_info→index_history→option_market→"
+                    "wscn→daily→gold）：trade_date=交易日历 / symbol_info=证券信息 / "
+                    "index_history=指数行情 / option_market=期权行情（按「品种 × 到期月」逐组） / "
                     "wscn=经济指标（华尔街见闻）/ daily=美债收益率（FRED）/ gold=黄金储备（IMF）。"
                     "不传 ⇔ 前端默认勾选（不含 trade_date 与 gold：前者一年只需跑一次，后者 IMF 接口 502）",
     )

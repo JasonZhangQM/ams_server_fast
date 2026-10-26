@@ -765,7 +765,7 @@ class BdsSyncTask(Base, BaseModel):
     # ⚠️ 列宽 String(16)：新增 scope 取值必须 <= 16 字符，否则 MySQL 会截断/报 1406
     # index_backfill  = 指数成分股同步/回填（POST /bds/sync/index-constituent）
     # index_valuation = 指数估值重算（POST /bds/sync/index-valuation，15 字符）
-    # macro_sync      = 一键同步（POST /bds/sync/macro，10 字符；基础数据+宏观数据六段顺序执行。
+    # macro_sync      = 一键同步（POST /bds/sync/macro，10 字符；基础数据+宏观数据七段顺序执行。
     #                   名字沿用不改——历史任务靠它被前端卡片接管，改了会导致老任务刷不出来）
     scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill/index_valuation/macro_sync")
     scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols} 或 {index_codes/start_date} 或 {stages}")

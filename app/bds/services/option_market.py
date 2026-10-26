@@ -412,6 +412,30 @@ def build_sync_plan() -> dict:
         }
 
 
+def sync_one_group(option_name: str, end_month: str) -> int:
+    """同步单个「品种 × 到期月」分组，返回写入行数（新增+更新）；失败返回 -1。
+
+    供统一同步任务（`POST /bds/sync/macro` 的 option_market 段）**按组报进度**使用。
+    与 `sync_option_market()` 共用同一个 `_sync_group`，口径完全一致——区别只是把
+    「循环遍历分组」搬到调用方（任务线程），这样每组都能单独计一次进度。
+    """
+    try:
+        with SessionLocal() as session:
+            rows = session.query(OptionConfig).filter(
+                OptionConfig.is_enabled == 1,
+                OptionConfig.option_name == option_name,
+            ).all()
+            cfgs = [r for r in rows if (r.end_month or "") == (end_month or "")]
+            if not cfgs:
+                # 配置在同步过程中被删/停用：算 0 条（无数据），不算失败
+                return 0
+            st = _sync_group(session, option_name, end_month, cfgs)
+            return int(st.get("insert", 0) + st.get("update", 0))
+    except Exception as e:  # noqa: BLE001 —— 单组失败不中断整批
+        logger.error("[option_market] 单组同步失败 %s/%s: %s", option_name, end_month, e)
+        return -1
+
+
 def sync_option_market(on_progress: Optional[Callable[[int, int, str], None]] = None) -> dict:
     """一键同步：把 `bds_option_config` 里所有启用合约的行情拉回来入库。
 
