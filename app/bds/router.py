@@ -53,6 +53,7 @@ from server_fast.app.bds.models import (
     IndexConstituentSync,
     IndexHistory, 
     OptionConfig,
+    OptionContract,
     OptionMarket,
     SymbolInfo, 
     TradeDate,
@@ -2750,7 +2751,7 @@ def delete_option_config(cfg_id: int, db: Session = Depends(get_db)):
 
 @router.post("/option-config/import-holding", response_model=OptionConfigImportResult)
 def import_option_config_from_holding(db: Session = Depends(get_db)):
-    """从 `bills_option_contract` 导入在仓合约到同步清单。
+    """从 `bds_option_contract` 导入在仓合约到同步清单。
 
     与账单的代码口径差异（这是已踩过的坑）：
     - `CFFEX.IO2611-P-4000` → `IO2611-P-4000`（去前缀）
@@ -2764,11 +2765,12 @@ def import_option_config_from_holding(db: Session = Depends(get_db)):
     `normalize_symbol()` 兜住所以行情照样入库，但**配置表 symbol 与行情表 symbol
     从此对不上**（任何 `JOIN ON symbol` 都会漏掉 ETF）。已修正并清洗存量。
 
+    ⚠️ 这张字典表 2026-10-26 已从 bills 迁入 bds（`bills_option_contract` →
+    `bds_option_contract`），因此本端点不再跨应用读取。但**表内数据仍是人工维护**：
+    新开一个期权合约必须手工补一行，否则这里导入不到、`risk_scenario` 会拒绝估算。
+
     重复导入按 symbol 跳过，不报错（幂等）。
     """
-    # 跨应用只读：bills 的持仓合约字典是「合约静态属性」的唯一来源
-    from server_fast.app.bills.models import OptionContract
-
     imported, skipped, failed = 0, 0, []
     rows = db.query(OptionContract).all()
     # 既有一律归一后再比对：库里可能残留早期未归一的 symbol（510500P2611M06250），

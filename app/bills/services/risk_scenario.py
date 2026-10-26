@@ -22,10 +22,10 @@ from datetime import date
 
 from sqlalchemy import func
 
+from server_fast.app.bds.models import OptionContract
 from server_fast.app.bills.models import (
     Group,
     GroupAcc,
-    OptionContract,
     RiskParam,
     ScenarioGrid,
 )
@@ -88,7 +88,7 @@ def load_context() -> dict:
     """读全部底数，返回计算上下文。
 
     持仓分类规则：
-    - 期权：卖 put（p_long>0 且成本为负）→ 从 bills_option_contract 拿 strike/mult/
+    - 期权：卖 put（p_long>0 且成本为负）→ 从 bds_option_contract 拿 strike/mult/
       margin_type/und_key/expiry；字典缺失的期权仓位直接 raise（宁可算不出，不可算错）
     - 期货：品种前缀映射 und_key；保证金率从 risk_param scope='{交易所}.{品种}' 拿
     - 证券：SEC_UND_KEY 映射，默认 astock
@@ -132,7 +132,7 @@ def load_context() -> dict:
                 c = contracts.get(g.symbol)
                 if c is None:
                     raise ValueError(
-                        f"期权 {g.symbol} 缺合约字典（bills_option_contract），拒绝估算"
+                        f"期权 {g.symbol} 缺合约字典（bds_option_contract），拒绝估算"
                     )
                 positions.append({
                     "kind": "put", "acct": g.account, "name": g.symbol,

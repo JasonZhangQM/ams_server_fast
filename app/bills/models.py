@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 """bills 应用的 SQLAlchemy 2.0 模型定义。
 
-共 10 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / BillNote / ProfitYear /
-OptionContract / RiskParam / ScenarioGrid。
+共 9 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / BillNote / ProfitYear /
+RiskParam / ScenarioGrid。
 
 - 继承 (Base, BaseModel)，BaseModel 提供 id/create_time/update_time 及通用方法
 - 外键列名以 _id 结尾
 - unique_together 与同名唯一索引合并为 UniqueConstraint
 - 笔记（logic/plan/invalidate/review/theme）v3 起已从 GroupSymbol 整体迁出：
   标的层档案 -> irs_vm_*，单笔成交 -> BillNote。GroupSymbol 只留 vm_symbol 一个手动列。
+
+2026-10-26：`OptionContract` 迁至 `app/bds/models.py`（表 `bills_option_contract`
+→ `bds_option_contract`）。它是合约静态属性（行权价/乘数/到期日/交割方式），属市场
+事实而非账单解析产物；放在 bills 会让 bds 反向依赖 bills。本模块如需读取，
+从 `server_fast.app.bds.models` 导入——方向上 bills → bds 是允许的（bds 为基础层）。
 """
 from datetime import date, datetime
 from decimal import Decimal
@@ -427,40 +432,6 @@ class ProfitYear(Base, BaseModel):
 
     def __str__(self) -> str:
         return f'年度收益-{self.year}'
-
-
-class OptionContract(Base, BaseModel):
-    """期权合约字典（静态属性，人工维护）。
-
-    - symbol 是 bills_bill/bills_group 里的原始代码（含交易所前缀）；
-    - strike 统一本位：ETF 期权「6250」的真实行权价是 6.250 元，靠这里校正；
-    - margin_type 选保证金公式族：cffex（15%/7%）/ etf（12%/7%）/ shex（内在价值全额式）；
-    - und_key 是情景分组键：csi300/csi500/csi500etf/astock/nasdaq/au，
-      决定该仓位在模式 B（仅A股）/ C（仅股指）里动不动。
-    """
-
-    __tablename__ = "bills_option_contract"
-
-    symbol: Mapped[str] = mapped_column(String(32), unique=True, comment="原始代码")
-    exchange: Mapped[str] = mapped_column(String(8), comment="CFFEX/SHEX/SHQQ/SZQQ")
-    underlying: Mapped[Optional[str]] = mapped_column(String(32), comment="标的代码")
-    und_key: Mapped[str] = mapped_column(String(16), comment="情景分组键")
-    cp: Mapped[str] = mapped_column(String(1), comment="C=认购 P=认沽")
-    strike: Mapped[Decimal] = mapped_column(Numeric(12, 4), comment="行权价（统一本位）")
-    strike_raw: Mapped[Optional[str]] = mapped_column(String(16), comment="原始串")
-    multiplier: Mapped[int] = mapped_column(Integer, comment="合约乘数")
-    settlement: Mapped[str] = mapped_column(String(8), comment="cash/etf/future")
-    expiry_date: Mapped[Optional[date]] = mapped_column(Date, comment="到期日")
-    margin_type: Mapped[str] = mapped_column(String(8), comment="保证金公式族")
-    notional_per: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="单张名义")
-    source: Mapped[str] = mapped_column(String(8), comment="manual/auto")
-
-    __table_args__ = (
-        Index('k_opt_und', 'und_key'),
-    )
-
-    def __str__(self) -> str:
-        return f'期权合约-{self.symbol}'
 
 
 class RiskParam(Base, BaseModel):

@@ -815,12 +815,79 @@ class BdsSyncTask(Base, BaseModel):
         return f"task-{self.id}({self.scope})"
 
 
+class OptionContract(Base, BaseModel):
+    """期权合约字典（静态属性，人工维护）（对应表 bds_option_contract）。
+
+    2026-10-26 从 bills 迁入并改名（原 `bills_option_contract`）。迁移理由是
+    **层次归位**：本表存的是「这个合约是什么」（R=行权价、乘数、到期日、交割方式、
+    保证金公式族），是市场事实，与任何一家的账单格式无关；而 bills 的职责是
+    「账单怎么解析」。原位置导致 bds 的「从持仓导入」必须反向 import bills，
+    形成基础层依赖业务层。
+
+    与另外两张表的分工（三者不可互相替代）：
+
+    | 表 | 回答的问题 | 粒度 |
+    |---|---|---|
+    | `bds_option_contract`（本表） | 这个合约**是什么** | 每个合约一份静态属性 |
+    | `bds_option_config` | **要同步哪些**合约 | 每个合约一份开关 |
+    | `bds_option_market` | 这个合约**今天多少价** | `(symbol, trade_date)` |
+
+    为什么必须有人工维护的这一层：账单只给券商柜台码（`SHQQ.10012598`），
+    **代码里不含行权价、认购认沽、到期日**；而 ETF 交易所码与柜台码
+    没有任何字符串关系，只能靠 `(标的, 行权价, C/P, 到期日)` 四元组关联。
+    `strike` 还承担本位校正：ETF 名称里的「6250」实为 6.250 元。
+
+    - `margin_type` 选保证金公式族：cffex（15%/7%）/ etf（12%/7%）/ shex（内在价值全额式）。
+      存「公式族」而不是「费率」，因为三套公式不可互套（见 MEMORY 铁律）。
+    - `und_key` 是情景分组键：csi300/csi500/csi500etf/astock/nasdaq/au，
+      决定该仓位在模式 B（仅A股）/ C（仅股指）里动不动。
+    - `source`：manual=人工录入；auto 分支**从未实现**（当前 6 行全是 manual）。
+    """
+
+    __tablename__ = "bds_option_contract"
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, unique=True, comment="账单里的原始代码（含交易所前缀）")
+    exchange: Mapped[str] = mapped_column(
+        String(8), nullable=False, comment="CFFEX/SHEX/SHQQ/SZQQ")
+    underlying: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="标的：SHSE.000300 / SHSE.510500 / SHEX.au")
+    und_key: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="情景分组键：csi300/csi500/csi500etf/astock/nasdaq/au")
+    cp: Mapped[str] = mapped_column(String(1), nullable=False, comment="C=认购 P=认沽")
+    strike: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, comment="行权价（统一本位）")
+    strike_raw: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, comment="名称里的原始串")
+    multiplier: Mapped[int] = mapped_column(Integer, nullable=False, comment="合约乘数")
+    settlement: Mapped[str] = mapped_column(
+        String(8), nullable=False, comment="cash=现金交割 etf=实物ETF future=期货期权")
+    expiry_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="到期日")
+    margin_type: Mapped[str] = mapped_column(
+        String(8), nullable=False, comment="保证金公式族：cffex/etf/shex")
+    notional_per: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2), nullable=False, comment="单张名义 = strike × multiplier")
+    source: Mapped[str] = mapped_column(
+        String(8), nullable=False, comment="manual=人工 auto=解析（未实现）")
+
+    __table_args__ = (
+        UniqueConstraint("symbol", name="uk_opt_contract"),
+        Index("k_opt_und", "und_key"),
+    )
+
+    unique_keys = ["symbol"]
+
+    def __str__(self) -> str:
+        return f"期权合约-{self.symbol}"
+
+
 class OptionConfig(Base, BaseModel):
     """期权行情同步清单（对应表 bds_option_config）。
 
-    这是「一键同步配置的全部期权」这句话的地基：`bills_option_contract` 是**持仓属性**
-    （一个合约一份静态信息），`irs_option_monitor` 是**监测结果**（按品种×月份全量铺开），
-    两者都不是"我要同步哪些"。没有这张表，同步只能二选一：全部 866 条 / 全部持仓。
+    这是「一键同步配置的全部期权」这句话的地基：`bds_option_contract` 是**合约静态属性**
+    （一个合约一份，回答"它是什么"），`irs_option_monitor` 是**监测结果**（按品种×月份
+    全量铺开），两者都不是"我要同步哪些"。没有这张表，同步只能二选一：全部 866 条 / 全部持仓。
 
     - `end_month`：股指/ETF 必须指定（`option_finance_board` 按到期月拉）；
       **商品期权填 `ALL`**——`option_hist_shfe` 一次返回当日全部到期月（实测 812 行），
