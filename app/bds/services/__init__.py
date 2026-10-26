@@ -4,7 +4,7 @@
 按 6 个数据域分目录组织，router.py 只需从此处导入：
 - macro_data/         宏观数据（经济指标、黄金储备、美债收益率）
 - fund_data/          财务数据（三大财报 + 财务指标）
-- market_data/        行情数据（指数历史、实时行情、每日估值）
+- market_data/        行情数据（指数历史、实时行情、每日估值、期权行情）
 - index_constituent/  指数成分
 - symbol_info/        证券信息
 - trade_date/         交易日历
