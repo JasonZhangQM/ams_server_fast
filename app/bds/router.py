@@ -53,7 +53,6 @@ from server_fast.app.bds.models import (
     IndexConstituentSync,
     IndexHistory, 
     OptionConfig,
-    OptionContract,
     OptionMarket,
     SymbolInfo, 
     TradeDate,
@@ -76,8 +75,8 @@ from server_fast.app.bds.schemas import (
     IndexValuationRow,
     IndexValuationSyncRequest,
     MacroSyncRequest,
+    OptionConfigBackfillResult,
     OptionConfigCreate,
-    OptionConfigImportResult,
     OptionConfigOut,
     OptionConfigUpdate,
     OptionMarketOut,
@@ -2712,6 +2711,13 @@ def create_option_config(req: OptionConfigCreate, db: Session = Depends(get_db))
         is_enabled=req.is_enabled,
         source="manual",
         note=req.note,
+        # 规格字段：可留空（观察型合约只看行情），同步时会自动回填。
+        # margin_type 是品种属性，没显式传就按品种派生，省一次手工填写。
+        cp=req.cp.upper() if req.cp else None,
+        strike=req.strike,
+        multiplier=req.multiplier,
+        margin_type=req.margin_type or option_market.margin_type_of(req.option_name),
+        expiry_date=req.expiry_date,
     )
     db.add(row)
     db.commit()
@@ -2721,18 +2727,22 @@ def create_option_config(req: OptionConfigCreate, db: Session = Depends(get_db))
 
 @router.put("/option-config/{cfg_id}", response_model=OptionConfigOut)
 def update_option_config(cfg_id: int, req: OptionConfigUpdate, db: Session = Depends(get_db)):
-    """改人工列（启用开关 / 备注）。身份字段（symbol/标的/到期月）不可改。
+    """改人工列（启用开关 / 备注 / 合约规格）。身份字段（symbol / 标的 / 到期月）不可改。
 
-    ⚠️ 只回填传入的字段：`is_enabled` 与 `note` 相互独立，前端若只改一个
-    必须只发一个（本端点对 None 视为"不改"，不用全字段覆盖）。
+    ⚠️ **一律 None 视为「不改」**，绝不做全字段覆盖 —— 前端只改一个字段就只发一个，
+    否则会把没传的列清空（这是 PUT 全字段覆盖踩过的坑）。
+    规格字段可人工修正：历史上 `au2612P840` 到期日确实手填错过（11-23，实为 11-24）。
     """
     row = db.query(OptionConfig).filter(OptionConfig.id == cfg_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"配置不存在：{cfg_id}")
-    if req.is_enabled is not None:
-        row.is_enabled = req.is_enabled
-    if req.note is not None:
-        row.note = req.note
+    for field in ("is_enabled", "note", "strike", "multiplier",
+                  "margin_type", "expiry_date"):
+        value = getattr(req, field)
+        if value is not None:
+            setattr(row, field, value)
+    if req.cp is not None:
+        row.cp = req.cp.upper()
     db.commit()
     db.refresh(row)
     return row
@@ -2749,89 +2759,70 @@ def delete_option_config(cfg_id: int, db: Session = Depends(get_db)):
     return {"status": "ok", "message": f"已删除配置 {row.symbol}（行情历史保留）"}
 
 
-@router.post("/option-config/import-holding", response_model=OptionConfigImportResult)
-def import_option_config_from_holding(db: Session = Depends(get_db)):
-    """从 `bds_option_contract` 导入在仓合约到同步清单。
+@router.post("/option-config/backfill-spec", response_model=OptionConfigBackfillResult)
+def backfill_option_config_spec(db: Session = Depends(get_db)):
+    """从行情快照补全 config 中为空的合约规格（兜底路径）。
 
-    与账单的代码口径差异（这是已踩过的坑）：
-    - `CFFEX.IO2611-P-4000` → `IO2611-P-4000`（去前缀）
-    - `SHEX.au2612P840`     → `au2612P840`（去前缀）
-    - `SHQQ.10012562`（券商柜台码）→ 交易所码必须**重新拼**：
-      `{C/P}{yymm}M{行权价×1000 五位}`，与券商码无任何字符串关系。
+    ⚠️ **原 `POST /option-config/import-holding` 已随合并下线**（2026-10-26）：
+    它的唯一职责是把 `bds_option_contract`（合约字典）的行搬进同步清单，而合并后
+    字典就是清册本身，不存在"搬"这个动作。需要恢复"从持仓自动建行"时必须另找
+    持仓源——`bills_group` 属跨应用依赖，已明确不走；正确方向是从行情接口选合约。
 
-    ⚠️ ETF 交易所码**不含标的代码**：`P2611M06250`。akshare 的「合约交易代码」列
-    是 `510500P2611M06250`，前 6 位是标的，`_ETF_CODE_RE` 正是用来剥掉它的。
-    早期这里误把 `{标的6位}` 拼进去，得到 `510500P2611M06250`：同步靠
-    `normalize_symbol()` 兜住所以行情照样入库，但**配置表 symbol 与行情表 symbol
-    从此对不上**（任何 `JOIN ON symbol` 都会漏掉 ETF）。已修正并清洗存量。
+    规格字段允许为空（观察型合约只看行情、不算风险），补全有两条路径：
 
-    ⚠️ 这张字典表 2026-10-26 已从 bills 迁入 bds（`bills_option_contract` →
-    `bds_option_contract`），因此本端点不再跨应用读取。但**表内数据仍是人工维护**：
-    新开一个期权合约必须手工补一行，否则这里导入不到、`risk_scenario` 会拒绝估算。
+    ① **自动**：同步时 `_sync_group` 拿到接口原文后顺手回填（常态，无需触发本端点）；
+    ② **手工**：本端点从 `bds_option_market` 最新快照补（兜底场景：config 行是
+       后来用 SQL 或 API 加的，而行情早已同步过）。
 
-    重复导入按 symbol 跳过，不报错（幂等）。
+    **只填空值、绝不覆盖已有值** —— 已有值可能是人工修正过的（`au2612P840` 到期日
+    曾被误填 `11-23`，权威算法给 `11-24`）。`margin_type` 不来自行情，按品种名派生。
     """
-    imported, skipped, failed = 0, 0, []
-    rows = db.query(OptionContract).all()
-    # 既有一律归一后再比对：库里可能残留早期未归一的 symbol（510500P2611M06250），
-    # 不归一就会把同一个合约当成新行再插一条
-    existing = {option_market.normalize_symbol(r.symbol) for r in db.query(OptionConfig).all()}
+    filled, skipped, no_data = 0, 0, []
 
-    for c in rows:
-        try:
-            broker = c.symbol if "." in c.symbol else None
-            head = c.symbol.split(".", 1)[0].upper() if "." in c.symbol else ""
-            exp = c.expiry_date
-            if head in ("SHQQ", "SZQQ"):
-                # 券商柜台码 → 交易所标准码
-                if exp is None:
-                    failed.append({"symbol": c.symbol,
-                                   "reason": "缺到期日，无法拼出交易所码"})
-                    continue
-                strike5 = f"{int(round(float(c.strike) * 1000)):05d}"
-                # 交易所标准码 = CP + yymm + M + 行权价×1000 五位，**不含标的代码**
-                sym = f"{c.cp.upper()}{exp.strftime('%y%m')}M{strike5}"
-                option_name = _name_by_underlying(c.underlying)
-                end_month = exp.strftime("%Y%m")
-            else:
-                sym = option_market.normalize_symbol(c.symbol)
-                option_name = _name_by_underlying(c.underlying)
-                end_month = ("ALL" if option_name == "黄金期权"
-                             else (exp.strftime("%Y%m") if exp else None))
+    # 一次取全部合约的最新快照：按 (symbol, trade_date) 升序遍历，后写覆盖前写
+    latest: dict[str, OptionMarket] = {}
+    for m in db.query(OptionMarket).order_by(
+            OptionMarket.symbol.asc(), OptionMarket.trade_date.asc()).all():
+        latest[m.symbol] = m
 
-            if not option_name:
-                failed.append({"symbol": c.symbol, "reason": f"标的不在 IrsCfg 中：{c.underlying}"})
+    for cfg in db.query(OptionConfig).all():
+        gaps = [f for f in ("cp", "strike", "multiplier", "expiry_date")
+                if getattr(cfg, f) is None]
+        need_mt = cfg.margin_type is None
+        if not gaps and not need_mt:
+            skipped += 1
+            continue
+
+        changed = False
+        if gaps:
+            m = latest.get(cfg.symbol)
+            if m is None:
+                no_data.append({"symbol": cfg.symbol,
+                                "reason": "无行情快照，请先执行一次行情同步"})
                 continue
-            if sym in existing:
-                skipped += 1
-                continue
+            if "cp" in gaps and m.option_type:
+                cfg.cp = "C" if str(m.option_type).lower().startswith("c") else "P"
+                changed = True
+            if "strike" in gaps and m.price_strike is not None:
+                cfg.strike = m.price_strike
+                changed = True
+            if "multiplier" in gaps and m.multiplier is not None:
+                cfg.multiplier = m.multiplier
+                changed = True
+            if "expiry_date" in gaps and m.delisted_date is not None:
+                cfg.expiry_date = m.delisted_date
+                changed = True
 
-            meta = _opt_meta_by_name(option_name)
-            underlying = _canon_underlying(c.underlying) or meta["underlying_symbol"]
-            db.add(OptionConfig(
-                symbol=sym,
-                broker_symbol=broker,
-                underlying_symbol=underlying,
-                und_key=_OPT_UND_KEY.get(underlying, ""),
-                option_name=option_name,
-                end_month=end_month,
-                is_enabled=1,
-                source="holding",
-                note=f"从持仓导入（{c.symbol}）",
-            ))
-            existing.add(sym)
-            imported += 1
-        except Exception as e:  # noqa: BLE001
-            failed.append({"symbol": c.symbol, "reason": f"{type(e).__name__}: {e}"})
+        if need_mt:
+            mt = option_market.margin_type_of(cfg.option_name)
+            if mt:
+                cfg.margin_type = mt
+                changed = True
+
+        if changed:
+            filled += 1
+        else:
+            no_data.append({"symbol": cfg.symbol, "reason": "快照缺必要字段，无法补全"})
 
     db.commit()
-    return {"imported": imported, "skipped": skipped, "failed": failed}
-
-
-def _name_by_underlying(underlying: Optional[str]) -> Optional[str]:
-    """标的代码 → akshare 品种名（先归一 SHEX/SHFE 两套口径）。"""
-    u = _canon_underlying(underlying)
-    for item in IrsCfg.OPTIONS_MARCH:
-        if item["underlying_symbol"] == u:
-            return item["option_name"]
-    return None
+    return {"filled": filled, "skipped": skipped, "no_data": no_data}

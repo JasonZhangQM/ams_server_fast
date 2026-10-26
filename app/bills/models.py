@@ -10,10 +10,12 @@ RiskParam / ScenarioGrid。
 - 笔记（logic/plan/invalidate/review/theme）v3 起已从 GroupSymbol 整体迁出：
   标的层档案 -> irs_vm_*，单笔成交 -> BillNote。GroupSymbol 只留 vm_symbol 一个手动列。
 
-2026-10-26：`OptionContract` 迁至 `app/bds/models.py`（表 `bills_option_contract`
-→ `bds_option_contract`）。它是合约静态属性（行权价/乘数/到期日/交割方式），属市场
-事实而非账单解析产物；放在 bills 会让 bds 反向依赖 bills。本模块如需读取，
-从 `server_fast.app.bds.models` 导入——方向上 bills → bds 是允许的（bds 为基础层）。
+2026-10-26：原 `OptionContract` 已两次迁移 —— 先由 `bills_option_contract` 迁至
+`app/bds/models.py`（改名为 `bds_option_contract`），当日又**并入 `bds_option_config`**
+（三表变两表）。理由：合约规格是市场事实、与账单格式无关，且它的 13 个字段里只有
+`margin_type` 不可被行情表或品种表替代，不值得单独一张表。
+本模块如需读规格，用 `from server_fast.app.bds.models import OptionConfig`，
+`broker_symbol` 才是账单口径的代码（`symbol` 是交易所标准码）。
 """
 from datetime import date, datetime
 from decimal import Decimal

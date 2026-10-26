@@ -815,87 +815,43 @@ class BdsSyncTask(Base, BaseModel):
         return f"task-{self.id}({self.scope})"
 
 
-class OptionContract(Base, BaseModel):
-    """期权合约字典（静态属性，人工维护）（对应表 bds_option_contract）。
+class OptionConfig(Base, BaseModel):
+    """期权合约档案 + 行情同步清单（对应表 bds_option_config）。
 
-    2026-10-26 从 bills 迁入并改名（原 `bills_option_contract`）。迁移理由是
-    **层次归位**：本表存的是「这个合约是什么」（R=行权价、乘数、到期日、交割方式、
-    保证金公式族），是市场事实，与任何一家的账单格式无关；而 bills 的职责是
-    「账单怎么解析」。原位置导致 bds 的「从持仓导入」必须反向 import bills，
-    形成基础层依赖业务层。
+    **2026-10-26 由两张表合并而来**（原 `bds_option_config` + `bds_option_contract`）：
+    contract 的 13 个字段中，4 个本表已有、3 个 `bds_option_market` 每天都有、2 个可由
+    品种表派生、4 个零消费者或纯派生（`notional_per` 逐行验算 = strike × multiplier）。
+    真正不可替代的只有 `margin_type`，而它是**品种级**属性（csi300→cffex、
+    csi500etf→etf、au→shex，同品种内所有合约一致），不构成独立一张表的理由。
+    合并前已核：contract 6 行与 config 6 行一一对应（`contract.symbol` = `broker_symbol`），
+    规格字段逐行完全一致。
 
-    与另外两张表的分工（三者不可互相替代）：
+    现在两张表的分工：
 
     | 表 | 回答的问题 | 粒度 |
     |---|---|---|
-    | `bds_option_contract`（本表） | 这个合约**是什么** | 每个合约一份静态属性 |
-    | `bds_option_config` | **要同步哪些**合约 | 每个合约一份开关 |
+    | `bds_option_config`（本表） | 合约**是什么** + **要不要同步** | 每个合约一行 |
     | `bds_option_market` | 这个合约**今天多少价** | `(symbol, trade_date)` |
 
-    为什么必须有人工维护的这一层：账单只给券商柜台码（`SHQQ.10012598`），
-    **代码里不含行权价、认购认沽、到期日**；而 ETF 交易所码与柜台码
-    没有任何字符串关系，只能靠 `(标的, 行权价, C/P, 到期日)` 四元组关联。
-    `strike` 还承担本位校正：ETF 名称里的「6250」实为 6.250 元。
+    规格字段（`cp` / `strike` / `multiplier` / `margin_type` / `expiry_date`）**允许为空**，
+    这是刻意的：清单允许加「只想看行情、暂不算风险」的合约。两处会自动补全——
+    ① 同步时 `_sync_group` 拿到接口原文后顺手回填；② `POST /option-config/backfill-spec`
+    从最新快照手工补。风险计算若遇必填项为空会直接 raise（宁可算不出，不可算错）。
 
-    - `margin_type` 选保证金公式族：cffex（15%/7%）/ etf（12%/7%）/ shex（内在价值全额式）。
-      存「公式族」而不是「费率」，因为三套公式不可互套（见 MEMORY 铁律）。
-    - `und_key` 是情景分组键：csi300/csi500/csi500etf/astock/nasdaq/au，
-      决定该仓位在模式 B（仅A股）/ C（仅股指）里动不动。
-    - `source`：manual=人工录入；auto 分支**从未实现**（当前 6 行全是 manual）。
-    """
-
-    __tablename__ = "bds_option_contract"
-
-    symbol: Mapped[str] = mapped_column(
-        String(32), nullable=False, unique=True, comment="账单里的原始代码（含交易所前缀）")
-    exchange: Mapped[str] = mapped_column(
-        String(8), nullable=False, comment="CFFEX/SHEX/SHQQ/SZQQ")
-    underlying: Mapped[Optional[str]] = mapped_column(
-        String(32), nullable=True, comment="标的：SHSE.000300 / SHSE.510500 / SHEX.au")
-    und_key: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="情景分组键：csi300/csi500/csi500etf/astock/nasdaq/au")
-    cp: Mapped[str] = mapped_column(String(1), nullable=False, comment="C=认购 P=认沽")
-    strike: Mapped[Decimal] = mapped_column(
-        Numeric(12, 4), nullable=False, comment="行权价（统一本位）")
-    strike_raw: Mapped[Optional[str]] = mapped_column(
-        String(16), nullable=True, comment="名称里的原始串")
-    multiplier: Mapped[int] = mapped_column(Integer, nullable=False, comment="合约乘数")
-    settlement: Mapped[str] = mapped_column(
-        String(8), nullable=False, comment="cash=现金交割 etf=实物ETF future=期货期权")
-    expiry_date: Mapped[Optional[date]] = mapped_column(
-        Date, nullable=True, comment="到期日")
-    margin_type: Mapped[str] = mapped_column(
-        String(8), nullable=False, comment="保证金公式族：cffex/etf/shex")
-    notional_per: Mapped[Decimal] = mapped_column(
-        Numeric(14, 2), nullable=False, comment="单张名义 = strike × multiplier")
-    source: Mapped[str] = mapped_column(
-        String(8), nullable=False, comment="manual=人工 auto=解析（未实现）")
-
-    __table_args__ = (
-        UniqueConstraint("symbol", name="uk_opt_contract"),
-        Index("k_opt_und", "und_key"),
-    )
-
-    unique_keys = ["symbol"]
-
-    def __str__(self) -> str:
-        return f"期权合约-{self.symbol}"
-
-
-class OptionConfig(Base, BaseModel):
-    """期权行情同步清单（对应表 bds_option_config）。
-
-    这是「一键同步配置的全部期权」这句话的地基：`bds_option_contract` 是**合约静态属性**
-    （一个合约一份，回答"它是什么"），`irs_option_monitor` 是**监测结果**（按品种×月份
-    全量铺开），两者都不是"我要同步哪些"。没有这张表，同步只能二选一：全部 866 条 / 全部持仓。
-
+    - `symbol`：**交易所标准码**，不含交易所前缀（ETF 也不含标的 6 位）。
+      账单原始码（`CFFEX.IO2611-P-4000` / `SHQQ.10012562`）放 `broker_symbol`。
+    - `broker_symbol`：券商内部码，与标准码**没有可靠的字符串关系**（ETF 只能靠四元组
+      关联），仅供对账与排查，不参与任何计算。
     - `end_month`：股指/ETF 必须指定（`option_finance_board` 按到期月拉）；
       **商品期权填 `ALL`**——`option_hist_shfe` 一次返回当日全部到期月（实测 812 行），
       没有按月筛选的参数，填实际月份反而会造成"以为只拉了一个月"的误解。
     - `option_name`：akshare 的入参是中文品种名（"沪深300股指期权"），不是代码。
       写在配置里而不是代码里，以后加新品种不用改代码。
-    - `broker_symbol`：ETF 是券商内部码（`SHQQ.10012562`），与交易所码（`P2611M06250`）
-      **没有任何字符串关系**，只能靠这个列对账。
+    - `margin_type`：选保证金公式族 cffex（15%/7%）/ etf（12%/7%）/ shex（内在价值
+      全额式）。存「公式族」而不是「费率」，因为三套公式不可互套（见 MEMORY 铁律）。
+    - `und_key`：情景分组键 csi300/csi500etf/au，决定该仓位在模式 B（仅A股）/ C（仅股指）
+      里动不动。
+    - `strike`：统一本位校正 —— ETF 名称里的「6250」实为 6.250 元。
     """
 
     __tablename__ = "bds_option_config"
@@ -903,11 +859,24 @@ class OptionConfig(Base, BaseModel):
     symbol: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="交易所标准期权代码")
     broker_symbol: Mapped[Optional[str]] = mapped_column(
-        String(32), nullable=True, comment="券商账单代码（ETF 对账用）")
+        String(32), nullable=True, comment="券商账单代码（对账用，不参与计算）")
     underlying_symbol: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="标的：SHSE.000300 / SHSE.510500 / SHFE.au")
     und_key: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="情景分组键：csi300 / csi500etf / au")
+
+    # —— 合约规格（可空：观察型合约不必填；同步与 backfill 会自动补全）——
+    cp: Mapped[Optional[str]] = mapped_column(
+        String(1), nullable=True, comment="C=认购 P=认沽")
+    strike: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 4), nullable=True, comment="行权价（统一本位，ETF 为 6.25 而非 6250）")
+    multiplier: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="合约乘数")
+    margin_type: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, comment="保证金公式族：cffex/etf/shex")
+    expiry_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="到期日")
+
     option_name: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="akshare 品种名")
     end_month: Mapped[Optional[str]] = mapped_column(

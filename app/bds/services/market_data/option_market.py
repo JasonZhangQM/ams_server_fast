@@ -195,6 +195,21 @@ def _variety_meta(option_name: str) -> dict:
     raise ValueError(f"未知期权品种（不在 IrsCfg.OPTIONS_MARCH 中）: {option_name}")
 
 
+# 品种类型 → 保证金公式族。三套公式不可互套（MEMORY 铁律），故存「族」不存费率。
+# 为什么按品种派生而不是逐合约存：同一品种内所有合约的公式族完全一致
+# （实测 csi300→cffex×3、csi500etf→etf×2、au→shex），它是品种属性不是合约属性。
+MARGIN_TYPE_BY_OPTION_TYPE = {"股指期权": "cffex", "ETF期权": "etf", "商品期权": "shex"}
+
+
+def margin_type_of(option_name: str) -> Optional[str]:
+    """akshare 品种名 → 保证金公式族（cffex/etf/shex）。未知品种返回 None。"""
+    try:
+        meta = _variety_meta(option_name)
+    except ValueError:
+        return None
+    return MARGIN_TYPE_BY_OPTION_TYPE.get(meta["option_type"])
+
+
 def _sync_group(session, option_name: str, end_month: str,
                 cfgs: list[OptionConfig]) -> dict:
     """同步一个 (品种, 到期月) 分组。返回本组统计。"""
@@ -355,6 +370,7 @@ def _sync_group(session, option_name: str, end_month: str,
 
     # ---- UPSERT（唯一键 symbol + trade_date）----
     insert = update = 0
+    spec_filled = 0
     if parsed:
         symbols = [p["symbol"] for p in parsed]
         exist = {
@@ -371,10 +387,41 @@ def _sync_group(session, option_name: str, end_month: str,
                 for k, v in p.items():
                     setattr(cur, k, v)
                 update += 1
+
+        # ---- 顺手回填合约规格（只填空值，绝不覆盖已有值）----
+        # 清单行允许只填代码与品种（观察型合约），规格在这里按接口原文补齐——
+        # 比人工填可靠：au2612P840 的到期日曾手填成 11-23，权威算法给的是 11-24。
+        # 反过来，已有值可能是人工**修正**过的，所以只在为 None 时写。
+        mt = MARGIN_TYPE_BY_OPTION_TYPE.get(meta["option_type"])
+        for p in parsed:
+            cfg = wanted.get(p["symbol"])
+            if cfg is None:
+                continue
+            touched = False
+            if cfg.cp is None:
+                cfg.cp = "C" if p["option_type"] == "call" else "P"
+                touched = True
+            if cfg.strike is None and p["price_strike"] is not None:
+                cfg.strike = p["price_strike"]
+                touched = True
+            if cfg.multiplier is None and p["multiplier"] is not None:
+                cfg.multiplier = p["multiplier"]
+                touched = True
+            if cfg.expiry_date is None and p["delisted_date"] is not None:
+                cfg.expiry_date = p["delisted_date"]
+                touched = True
+            if cfg.margin_type is None and mt:
+                cfg.margin_type = mt
+                touched = True
+            if touched:
+                spec_filled += 1
+        if spec_filled:
+            logger.info("[option_market] %s/%s 回填合约规格 %d 条",
+                        option_name, end_month, spec_filled)
         session.commit()
 
     stat = {"rows": len(parsed), "insert": insert, "update": update,
-            "skip": sum(skip_reasons.values())}
+            "skip": sum(skip_reasons.values()), "spec_filled": spec_filled}
     if skip_reasons:
         stat["skip_reasons"] = skip_reasons
     return stat

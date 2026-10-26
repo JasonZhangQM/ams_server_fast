@@ -22,7 +22,7 @@ from datetime import date
 
 from sqlalchemy import func
 
-from server_fast.app.bds.models import OptionContract
+from server_fast.app.bds.models import OptionConfig
 from server_fast.app.bills.models import (
     Group,
     GroupAcc,
@@ -88,8 +88,9 @@ def load_context() -> dict:
     """读全部底数，返回计算上下文。
 
     持仓分类规则：
-    - 期权：卖 put（p_long>0 且成本为负）→ 从 bds_option_contract 拿 strike/mult/
-      margin_type/und_key/expiry；字典缺失的期权仓位直接 raise（宁可算不出，不可算错）
+    - 期权：卖 put（p_long>0 且成本为负）→ 从 bds_option_config 拿 strike/mult/
+      margin_type/und_key/expiry（用 broker_symbol 匹配账单码）；缺行或规格不全直接
+      raise（宁可算不出，不可算错）
     - 期货：品种前缀映射 und_key；保证金率从 risk_param scope='{交易所}.{品种}' 拿
     - 证券：SEC_UND_KEY 映射，默认 astock
     """
@@ -112,8 +113,14 @@ def load_context() -> dict:
                 "fin": diff_br,
             }
 
-        # 合约字典
-        contracts = {c.symbol: c for c in db.query(OptionContract).all()}
+        # 合约规格：2026-10-26 起 bds_option_contract 已并入 bds_option_config（三表变两表）。
+        # ⚠️ key 必须用 broker_symbol（账单原始码）而不是 symbol：
+        #    bills_group.symbol 是账单口径（`CFFEX.IO2611-P-4000`），
+        #    而 config.symbol 是交易所标准码（`IO2611-P-4000`），直接比会一个都匹配不上。
+        #    broker_symbol 为空的（手工新增的观察合约）退回 symbol 兜底。
+        contracts = {
+            (c.broker_symbol or c.symbol): c for c in db.query(OptionConfig).all()
+        }
 
         # 在仓持仓（account='合计' 是聚合行，必须排除）
         pos_rows = (
@@ -132,7 +139,16 @@ def load_context() -> dict:
                 c = contracts.get(g.symbol)
                 if c is None:
                     raise ValueError(
-                        f"期权 {g.symbol} 缺合约字典（bds_option_contract），拒绝估算"
+                        f"期权 {g.symbol} 不在同步清单里（bds_option_config），拒绝估算"
+                    )
+                # 规格字段允许为空（观察型合约只看行情、不算风险），但算风险必须齐全。
+                # 缺了直接报错而不是按 0/None 往下走 —— 宁可算不出，不可算错。
+                missing = [f for f in ("strike", "multiplier", "margin_type", "expiry_date")
+                           if getattr(c, f) is None]
+                if missing:
+                    raise ValueError(
+                        f"期权 {g.symbol} 的合约规格不完整（缺 {', '.join(missing)}）："
+                        f"请补全 bds_option_config，或调用 POST /bds/option-config/backfill-spec"
                     )
                 positions.append({
                     "kind": "put", "acct": g.account, "name": g.symbol,
