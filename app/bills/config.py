@@ -53,30 +53,11 @@ class Config:
         'E': '沪市A股',
         '0': '深市A股',
     }
-    # 单点价值映射（合约乘数：价格 × 乘数 × 持仓 = 市值）
-    MAP_MULTIPLIER = {
-        'CFFEX.IF': 300,   # 沪深300股指期货 300元/点
-        'CFFEX.IC': 200,   # 中证500股指期货 200元/点
-        'CFFEX.IM': 200,   # 中证1000股指期货 200元/点
-        'CFFEX.T': 10000,  # 十年期国债期货 10000元/点
-        'CFFEX.TF': 10000, # 五年期国债期货 10000元/点
-        # 'CFFEX.IO': 100, # 沪深300股指期权 100元/点
-        # 'CFFEX.HO': 100, # 上证50股指期权 100元/点
-        # 'SHQQ.': 10000, # 沪市ETF期权 10000元/点
-        # 'SZQQ.': 10000, # 深市ETF期权 10000元/点
-        'SHEX.au': 1000,   # 黄金期货/期权 1000克/手
-        'SHSE.': 1,
-        'SZSE.': 1,
-        'BJSE.': 1,
-    }
-    MAP_AKSHARE_MARKET = {  # 交易所代码到 AkShare market 参数映射
-        'CFFEX': 'FF',  # 金融期货
-        'SHEX': 'CF',   # 商品期货
-        'DEX': 'CF',    # 商品期货
-        'CZCE': 'CF',   # 商品期货
-        'GFEX': 'CF',   # 商品期货
-        'INE': 'CF',    # 商品期货
-    }
+    # ⚠️ 合约乘数（原 MAP_MULTIPLIER）与 AkShare 期货 market 参数（原 MAP_AKSHARE_MARKET）
+    #    已上移至 app/bds/config.py —— 二者是「合约/交易所的静态属性」，与账单格式无关，
+    #    同源事实（irs 的 OPTIONS_MARCH 也各自存了乘数）应只有一处定义。
+    #    本模块只保留「账单方言解析」：市场方言(MAP_MARKET) / 股东账号首字母(MAP_ACOUNT_MARKET)
+    #    / 交易类型(MAP_CATEGORY) / 代码修正(MAP_SYMBOL)。
 
     MAP_CATEGORY = {  # 交易类型映射
         '证券交易': {

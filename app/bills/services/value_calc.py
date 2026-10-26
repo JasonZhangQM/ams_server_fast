@@ -5,7 +5,7 @@ import akshare as ak
 from gm.api import *
 from server_fast.config import settings
 from server_fast.common.utils import filter_dtypes, map_value, df_init_model, upsert_df_to_db, get_sql_to_df, call_with_timeout
-from server_fast.app.bills.config import Config as BlsCfg
+from server_fast.app.bds.config import Config as DbsCfg
 from server_fast.app.bills.models import Group
 
 logger = logging.getLogger("uvicorn.error")
@@ -62,7 +62,7 @@ def fetch_futures_realtime_prices(df_futures):
         exchange_code, contract_lower = db_symbol.split('.', 1)
         contract_code = contract_lower.upper()
         # 通过映射字典确定 AkShare market 参数（CFFEX->FF，其他->CF）
-        market = BlsCfg.MAP_AKSHARE_MARKET.get(exchange_code)
+        market = DbsCfg.MAP_AKSHARE_MARKET.get(exchange_code)
         if market is None:
             logger.warning(f'*****未找到交易所[{exchange_code}]对应的AkShare market映射，symbol:{db_symbol}，已跳过')
             continue
@@ -79,7 +79,7 @@ def fetch_futures_realtime_prices(df_futures):
 # 更新市值和浮动盈亏
 def value_float_em_sql():
     _engine = settings.DB_ENGINE
-    _multiplier = BlsCfg.MAP_MULTIPLIER
+    _multiplier = DbsCfg.MAP_MULTIPLIER
     _mdl = Group
     sql = f'''
         SELECT {','.join(_mdl.fields_f)}
