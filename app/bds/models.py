@@ -907,6 +907,12 @@ class OptionConfig(Base, BaseModel):
     > 副本的三个硬伤：① A 类调整合约的乘数（10180）拿不到；② 2027 到期的合约
     > 算不出来；③ 手工拼码导致 10-26「ETF symbol 多 6 位」那类 bug。
     > 详细论证与删列验收见 `docs/bds期权合约字典方案_2026-10-27.md`。
+    >
+    > **2026-10-27 二次瘦身：10 列 → 8 列**，删 `source` / `note`。`source` 是
+    > `import-holding` 那条已下线通道的遗留（6 行全是 `holding`，再也没有写入方）；
+    > `note` 6 行全是「从持仓导入（xxx）」，内容就是 `broker_symbol` 的复述，
+    > 而 `broker_symbol` 本身已可内联编辑 ⇒ 两个纯冗余列。删前快照在
+    > `_backup_2026-10-27/db/_backup_option_config_note_source_20261027.sql`。
 
     三张表的分工（判据是「这条事实的权威在谁手里」）：
 
@@ -967,9 +973,12 @@ class OptionConfig(Base, BaseModel):
     **商品期权填 `ALL`**——上期所 `.dat` 一次返回当日全部到期月（实测 813~817 行），
     没有按月筛选的参数，填实际月份反而会造成"以为只拉了一个月"的误解。
 
-    ### `is_enabled` / `source` / `note`
-    人工列（铁律 4.9），同步任务永不写本表。`source` 是历史遗留死列
-    （`import-holding` 已下线，`manual`/`holding` 不再有写入方）。
+    ### `is_enabled`
+    人工列（铁律 4.9），同步任务永不写本表。
+
+    > 2026-10-27 二次瘦身删掉了 `source` / `note`：前者是 `import-holding` 已下线
+    > 通道的遗留（恒 `holding`），后者恒为「从持仓导入（券商码）」的复述 ——
+    > `broker_symbol` 可内联编辑后，两个字段都没有存在的理由。
     """
 
     __tablename__ = "bds_option_config"
@@ -987,9 +996,6 @@ class OptionConfig(Base, BaseModel):
         String(6), nullable=True, comment="到期年月 YYYYMM；商品期权填 ALL")
     is_enabled: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="1", comment="1=参与一键同步")
-    source: Mapped[str] = mapped_column(
-        String(16), nullable=False, server_default="manual", comment="manual/holding")
-    note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="备注")
 
     __table_args__ = (
         # 唯一键只锁 contract_id：它 1:1 对应交易所的一个合约，本身就是唯一身份。

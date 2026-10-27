@@ -659,6 +659,15 @@ class OptionConfigOut(BaseModel):
 
     值为 None 表示**字典里查不到该合约**（字典未刷新或该合约已退市清空），
     不是数据错误。要修它只有一条路：刷新合约字典（批量同步的 `option_info` 段）。
+
+    🔴 **2026-10-27 二次瘦身：响应体再删 `source` / `note`**（表里已无物理列）。
+    `source` 恒 `holding`、`note` 恒为「从持仓导入（券商码）」的复述，两个字段
+    既没有产生方也没有消费方。清单里真正可编辑的只剩 `broker_symbol` + `is_enabled`。
+
+    🔄 **2026-10-27 五次变更：`expiry_date` 单独加回响应体**（不落库、纯 join 派生）。
+    规格五字段删的时候它跟着走了，但「这合约哪天到期、该不该续月」是清单页自己的
+    决策信息（到期月 YYYYMM 看不出具体哪天），故按只读派生恢复 —— 10-27 删的是
+    「逐行抄进本表」的物理列，不是这个事实本身。权威仍是 `bds_option_info.last_trade_date`。
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -677,8 +686,10 @@ class OptionConfigOut(BaseModel):
     option_name: str = Field(description="akshare 品种名")
     end_month: Optional[str] = Field(default=None, description="到期年月 YYYYMM；商品期权为 ALL")
     is_enabled: int = Field(description="1=参与一键同步")
-    source: str = Field(description="manual=手工 / holding=从持仓导入")
-    note: Optional[str] = Field(default=None, description="备注")
+    expiry_date: Optional[date] = Field(
+        default=None,
+        description="到期日【只读派生：bds_option_info.last_trade_date，权威值】；"
+                    "None = 字典里查不到该合约（先刷新合约字典）")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
 
@@ -716,11 +727,10 @@ class OptionConfigCreate(BaseModel):
         description="券商账单代码（与 bills_group.symbol 对齐）；有实盘持仓的合约必须填，"
                     "否则风险情景推演会以「不在同步清单里」报错")
     is_enabled: int = Field(default=1, description="1=参与一键同步")
-    note: Optional[str] = Field(default=None, description="备注")
 
 
 class OptionConfigUpdate(BaseModel):
-    """修改配置。**只允许改人工列**（`broker_symbol` / `is_enabled` / `note`）。
+    """修改配置。**只允许改人工列**（`broker_symbol` / `is_enabled`）。
 
     身份字段 `contract_id` 与「拉行情入参」`option_name` / `end_month` 都不可改：
     前者改了就是另一个合约（应 DELETE 后 POST 重建），后两者改了会指向另一个品种/到期月
@@ -738,7 +748,6 @@ class OptionConfigUpdate(BaseModel):
         default=None,
         description="券商账单代码（与 bills_group.symbol 对齐，认领实盘持仓用）；传空串=清空")
     is_enabled: Optional[int] = Field(default=None, description="1=参与一键同步")
-    note: Optional[str] = Field(default=None, description="备注")
 
 
 class OptionMarketOut(BaseModel):

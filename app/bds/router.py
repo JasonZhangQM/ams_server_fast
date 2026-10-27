@@ -2455,12 +2455,15 @@ def list_option_info(
     option_name: Optional[str] = Query(
         default=None, description="中文品种名（经台账换算成 品种ID+标的）"),
     underlying_contract_id: Optional[str] = Query(
-        default=None, description="标的合约ID：IO2611 / 510500 / au2612"),
-    expire_year_month: Optional[str] = Query(default=None, description="到期年月 YYYYMM"),
+        default=None, description="标的合约ID（模糊）：5105 → 510500，IO26 → IO2611"),
+    expire_year_month: Optional[str] = Query(
+        default=None, description="到期年月 YYYYMM（模糊）：2612 → 202612"),
     cp: Optional[str] = Query(default=None, description="C / P"),
     is_listed: Optional[int] = Query(default=None, description="1=仅在挂 0=仅退市；不传=全部"),
     keyword: Optional[str] = Query(
-        default=None, description="模糊搜 合约ID / 标准码 / 合约名称（支持 8 位券商码）"),
+        default=None,
+        description="全域模糊搜：合约ID / 标准码 / 合约名称 / 标的合约ID / 品种ID / 交易所"
+                    "（台账中文名如「股指/黄金」也命中；支持 8 位券商码）"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -2492,28 +2495,50 @@ def list_option_info(
             query = query.filter(
                 OptionInfo.underlying_contract_id == entry["ctp_underlying"])
     if underlying_contract_id:
-        query = query.filter(OptionInfo.underlying_contract_id == underlying_contract_id)
+        # 模糊匹配：'5105' 命中 510500/510500 系列，'IO26' 命中 IO2611/IO2612
+        query = query.filter(
+            OptionInfo.underlying_contract_id.contains(underlying_contract_id.strip()))
     if expire_year_month:
-        query = query.filter(OptionInfo.expire_year_month == expire_year_month)
+        # 模糊匹配：'2612' 等价于 '202612'；全量 25,910 行 LIKE 全扫代价可忽略
+        query = query.filter(
+            OptionInfo.expire_year_month.contains(expire_year_month.strip()))
     if cp:
         query = query.filter(OptionInfo.cp == cp.upper())
     if is_listed is not None:
         query = query.filter(OptionInfo.is_listed == is_listed)
     if keyword:
         kw = keyword.strip()
-        query = query.filter(or_(
+        # 全域模糊：一个框同时扫 代码/标准码/名称/标的/品种ID/交易所。
+        # MySQL utf8mb4 默认 CI 排序规则 ⇒ LIKE 大小写不敏感，'sse' 能命中 'SSE'。
+        conds = [
             OptionInfo.contract_id.contains(kw),
             OptionInfo.symbol.contains(kw),
             OptionInfo.contract_name.contains(kw),
-        ))
+            OptionInfo.underlying_contract_id.contains(kw),
+            OptionInfo.product_id.contains(kw),
+            OptionInfo.exchange.contains(kw),
+        ]
+        # 中文品种名模糊 → 经台账映射成 product_id 集合（如「股指」→ IO）。
+        # 台账只有 3 个带中文名的品种；其余品种中文名无数据源，搜不到属预期。
+        ledger_pids = {e["product_id"] for e in option_info.products() if kw in e["option_name"]}
+        if ledger_pids:
+            conds.append(OptionInfo.product_id.in_(ledger_pids))
+        query = query.filter(or_(*conds))
 
     total = query.count()
+    order = [
+        # 相关性优先：合约名称直接命中的排前面（否则搜「500ETF」时，
+        # 台账路径带进来的全量 ETF 会把名称命中的 290 行压到后面）
+        OptionInfo.contract_name.contains(kw).desc(),
+    ] if keyword else []
     items = (
-        query.order_by(OptionInfo.product_id.asc(),
-                       OptionInfo.underlying_contract_id.asc(),
-                       OptionInfo.expire_year_month.asc(),
-                       OptionInfo.cp.asc(),
-                       OptionInfo.strike.asc())
+        query.order_by(
+            *order,
+            OptionInfo.product_id.asc(),
+            OptionInfo.underlying_contract_id.asc(),
+            OptionInfo.expire_year_month.asc(),
+            OptionInfo.cp.asc(),
+            OptionInfo.strike.asc())
         .offset(offset).limit(limit).all()
     )
     return {"items": [i.to_dict() for i in items], "total": total,
@@ -2900,15 +2925,20 @@ def _run_option_market_thread(task_id: int, group_total: int):
 # ---- 同步清单 CRUD ----
 #
 # 🔴 2026-10-27 起，本表**只剩「同步意图」**：contract_id / broker_symbol / option_name /
-#    end_month / is_enabled / source / note。原来那 7 列（cp / strike / multiplier /
+#    end_month / is_enabled。原来那 7 列（cp / strike / multiplier /
 #    margin_type / expiry_date / underlying_symbol / und_key）已物理删除，
 #    响应体里只剩下面这些**现算后只读返回**的字段：
 #        contract_id                      ← 本表实列（唯一身份，与 info 1:1）
 #        symbol                           ← bds_option_info（按 contract_id join）
 #        und_key                          ← Config.OPTION_VARIETIES[option_name]['und_key']
 #        underlying_symbol                ← 品种表 `_opt_meta_by_name`
+#        expiry_date                      ← bds_option_info.last_trade_date（10-27 五次变更加回）
 #    ⇒ `POST /option-config/backfill-spec` 已删除（没有可回填的列了）。
 #    设计与验收见 `docs/bds期权合约字典方案_2026-10-27.md` §5。
+#
+# ⚠️ 2026-10-27 四次变更：`source` / `note` 也已物理删除（`import-holding` 下线后
+#    前者恒 holding、后者恒为券商码的复述）。本表 8 列，可写的只有 broker_symbol /
+#    is_enabled 两个人字段，其余全是身份与入参。
 #
 # ⚠️ 2026-10-27 三次变更：`cp` / `strike` / `multiplier` / `margin_type` / `expiry_date`
 #    这五个派生字段**已从响应体删除**。它们唯一的消费者是前端「规格（来自合约字典）」列，
@@ -2934,8 +2964,9 @@ def _info_map_for(rows: list[OptionConfig]) -> dict[str, Optional[dict]]:
 def _config_out(row: OptionConfig, info: Optional[dict]) -> OptionConfigOut:
     """config 行 + 字典行 → 响应体（标准码与品种级字段只读派生）。
 
-    `info` 只用来取 `symbol`：规格字段（cp/strike/multiplier/expiry_date）10-27 已从
-    响应体删除，`margin_type` 也不再回传（它是品种级派生，不是字典字段）。
+    `info` 用来取 `symbol` 与 `last_trade_date`（→ `expiry_date`，10-27 五次变更
+    单独加回，同步清单要看「哪天到期」）；其余规格（cp/strike/multiplier）与
+    `margin_type` 仍不回传（后者是品种级派生，不是字典字段）。
     """
     try:
         meta = _opt_meta_by_name(row.option_name)
@@ -2951,8 +2982,7 @@ def _config_out(row: OptionConfig, info: Optional[dict]) -> OptionConfigOut:
         option_name=row.option_name,
         end_month=row.end_month,
         is_enabled=row.is_enabled,
-        source=row.source,
-        note=row.note,
+        expiry_date=info["last_trade_date"] if info else None,
         create_time=row.create_time,
         update_time=row.update_time,
     )
@@ -2963,17 +2993,23 @@ def list_option_config(
     is_enabled: Optional[int] = Query(default=None, description="1=仅启用 0=仅停用"),
     db: Session = Depends(get_db),
 ):
-    """同步清单（按品种+到期月+合约ID排序，便于核对）。
+    """同步清单（**按到期日倒序**，越早到期的越靠后，续月时最该先看的在最上面）。
+
+    🔄 2026-10-27 由「品种+到期月+合约ID」改为到期日倒序：清单页已展示「到期日」列
+    （join 字典的 `last_trade_date`），排序跟着展示走。outer join 字典排序，
+    字典里查不到的合约（`last_trade_date` 为 NULL）排最后，不让它们消失。
 
     `symbol` 是 join `bds_option_info` 的**只读派生值**，为 None 说明字典里查不到
     这个合约（没刷新字典 / 该合约已退市被清），不是数据错误。
-    规格（方向/行权价/乘数/到期日）不再随本接口返回，要看请用 `GET /option-info`。
+    规格（方向/行权价/乘数）不再随本接口返回，要看请用 `GET /option-info`。
     """
-    query = db.query(OptionConfig)
+    query = (db.query(OptionConfig)
+             .outerjoin(OptionInfo, OptionInfo.contract_id == OptionConfig.contract_id))
     if is_enabled is not None:
         query = query.filter(OptionConfig.is_enabled == is_enabled)
-    rows = query.order_by(OptionConfig.option_name.asc(),
-                          OptionConfig.end_month.asc(),
+    # MySQL 无 NULLS LAST：用「IS NULL」布尔位（0=有日期在前，1=NULL 在后）+ 日期降序
+    rows = query.order_by(OptionInfo.last_trade_date.is_(None).asc(),
+                          OptionInfo.last_trade_date.desc(),
                           OptionConfig.contract_id.asc()).all()
     infos = _info_map_for(rows)
     return [_config_out(r, infos.get(r.contract_id)) for r in rows]
@@ -3060,8 +3096,6 @@ def create_option_config(req: OptionConfigCreate, db: Session = Depends(get_db))
         option_name=req.option_name,
         end_month=end_month,
         is_enabled=req.is_enabled,
-        source="manual",
-        note=req.note,
     )
     db.add(row)
     db.commit()
@@ -3071,7 +3105,7 @@ def create_option_config(req: OptionConfigCreate, db: Session = Depends(get_db))
 
 @router.put("/option-config/{cfg_id}", response_model=OptionConfigOut)
 def update_option_config(cfg_id: int, req: OptionConfigUpdate, db: Session = Depends(get_db)):
-    """改人工列（券商码 / 启用开关 / 备注）。**别的什么都改不了**。
+    """改人工列（券商码 / 启用开关）。**别的什么都改不了**。
 
     - 身份字段（`contract_id` / `option_name` / `end_month`）：改了就是另一个合约
       ⇒ 先 DELETE 再 POST，别在原地改
@@ -3095,8 +3129,6 @@ def update_option_config(cfg_id: int, req: OptionConfigUpdate, db: Session = Dep
         row.broker_symbol = req.broker_symbol.strip() or None
     if req.is_enabled is not None:
         row.is_enabled = req.is_enabled
-    if req.note is not None:
-        row.note = req.note
     db.commit()
     db.refresh(row)
     return _config_out(row, _info_map_for([row]).get(row.contract_id))
