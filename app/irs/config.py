@@ -3,8 +3,11 @@
 
 - SYMBOL_CON_LIST：贴水连续合约代码列表
 - SYMBOL_CON_ZL：主力连续合约代码前缀
-- MAP_OPTIONS_UD_MARKET + map_ud_market()：期权标的市场映射
+
+⚠️ 期权品种基础数据（品种表 / 到期规则 / 标的市场映射）**已迁至 `bds.config.Config`**，
+本类仅保留别名引用（见 `Config` 尾部注释）。依赖方向固定为 irs → bds。
 """
+from server_fast.app.bds.config import Config as BdsCfg
 
 
 class Config:
@@ -32,42 +35,21 @@ class Config:
         'CFFEX.IC', 'CFFEX.IF', 'CFFEX.IH', 'CFFEX.IM',
     ]
 
-    OPTIONS_MARCH = (
-        {'underlying_symbol':'SHSE.000300','option_type':'股指期权','option_name':'沪深300股指期权','multiplier':'100','rule_exercise_date':'R1'},
-        {'underlying_symbol':'SHSE.510500','option_type':'ETF期权','option_name':'南方中证500ETF期权','multiplier':'10000','rule_exercise_date':'R2'},
-        {'underlying_symbol':'SHFE.au','option_type':'商品期权','option_name':'黄金期权','multiplier':'1000','rule_exercise_date':'R3'},
-        )
-
-    # 到期日规则映射：rule_exercise_date -> (第几个星期, 星期几)
-    # 星期几：0=周一 ... 4=周五
-    # R1: 股指期权，合约月第三个周五；R2: ETF期权，合约月第四个周三
-    # R3: 商品期权（如黄金期权），标的期货合约交割月前第一月的倒数第五个交易日（不用 (week_n, weekday) 元组，由 service 层按"倒数第 5 个交易日"逻辑实现）
-    # 遇节假日顺延至下一交易日（由 service 层查 TradeDate 日历处理）
-    RULE_EXERCISE_DATE = {
-        'R1': (3, 4),  # 合约月第三个周五
-        'R2': (4, 2),  # 合约月第四个周三
-        'R3': None,    # 商品期权：交割月前第一月倒数第 5 个交易日（占位，逻辑在 service 层）
-    }
-
-
-    # 期权标的市场映射
-    MAP_OPTIONS_UD_MARKET = {
-        'SHSE': [
-            '000016', '000300', '000852', '510050',
-            '510300', '510500', '588000', '588080',
-        ],
-        'SZSE': ['159901', '159919', '159922', '159915'],
-    }
+    # ==========================================================================
+    # 期权品种基础数据：2026-10-27 起**正源归 bds**，本类只保留引用
+    # ==========================================================================
+    # 这三项（品种表 / 到期规则 / 标的市场映射）描述的都是市场事实，属基础数据层。
+    # 此前 bds 复制了一份并逐步切换读副本，方向是「bds 依赖 irs」，违反「依赖只能向下」。
+    # 现已反转：**实现与正源都在 `bds.config.Config`**，本类改为引用同一对象 ——
+    # 既有调用点（`IrsCfg.OPTIONS_MARCH` 等）照旧可用，同时结构上不可能再存在
+    # 「两份可各自被改」的副本。
+    #
+    # 🔒 新增/修改品种只改 `bds/config.py` 一处（及其上方「加品种三步」）。
+    OPTIONS_MARCH = BdsCfg.OPTIONS_MARCH
+    RULE_EXERCISE_DATE = BdsCfg.RULE_EXERCISE_DATE
+    MAP_OPTIONS_UD_MARKET = BdsCfg.MAP_OPTIONS_UD_MARKET
 
     @classmethod
     def map_ud_market(cls):
-        '''
-        'SZSE':['159901','159919','159922','159915']
-        ---------->
-        {'159901': 'SZSE.159901',}
-        '''
-        ud_market_dict = {}
-        for k, v in cls.MAP_OPTIONS_UD_MARKET.items():
-            for symbol in v:
-                ud_market_dict[symbol] = f'{k}.{symbol}'
-        return ud_market_dict
+        """转发 `bds.Config.map_ud_market()`（全仓零消费者，仅保留 API 兼容）。"""
+        return BdsCfg.map_ud_market()

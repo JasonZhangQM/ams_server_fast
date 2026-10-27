@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from server_fast.app.irs import service
+from server_fast.app.bds.config import Config as BdsCfg
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
@@ -796,14 +797,17 @@ def list_option_monitors(
 
 @router.get("/option-underlyings")
 def list_option_underlyings():
-    """返回期权标的下拉选项（数据源 Config.OPTIONS_MARCH，无数据库查询）。
+    """返回期权标的下拉选项（数据源 `bds.config.Config.OPTIONS_MARCH`，无数据库查询）。
 
     从配置元组提取 underlying_symbol 列表，供前端 NSelect 使用。
     label 格式为 `option_name`，value 为 underlying_symbol。
+
+    🔄 2026-10-27 起品种表正源在 bds（此前本文件读 `IrsCfg.OPTIONS_MARCH`，
+    与 bds 各存一份副本）。依赖方向自此固定为 irs → bds。
     """
     underlying_symbols = [
         {"label": item['option_name'], "value": item['underlying_symbol']}
-        for item in IrsCfg.OPTIONS_MARCH
+        for item in BdsCfg.OPTIONS_MARCH
     ]
     return {"underlying_symbols": underlying_symbols}
 

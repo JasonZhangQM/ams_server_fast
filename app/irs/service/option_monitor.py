@@ -1,96 +1,38 @@
 # -*- coding: utf-8 -*-
 """期权监测（OptionMonitor）业务函数：akshare 期权行情 + gm 标的现价同步入库。
 
-- option_monitor_sync_orm：按到期月同步期权行情，upsert 到 OptionMonitor 表
+- option_monitor_sync_orm：按到期月同步行情，upsert 到 OptionMonitor 表
+
+🔄 **2026-10-27 到期日算法已迁出本模块**：`_calc_delisted_date()` 的实现搬到
+`bds.services.market_data.option_market`（基础数据的算法归基础数据层），
+本模块改为**引用**它。同期 `OPTIONS_MARCH` / `RULE_EXERCISE_DATE` 的正源也归
+`bds.config`，本模块只读不再定义 —— 依赖方向自此固定为 irs → bds。
 """
-import calendar
 import re
-from datetime import date, datetime, time as dtime
+from datetime import datetime, time as dtime
 from decimal import Decimal, InvalidOperation
 
 from gm.api import *  # noqa: F401,F403  保留原 gm SDK 通配导入（current 等）
 
 from server_fast.common.db import SessionLocal
 from server_fast.common.utils import call_with_timeout
+from server_fast.app.bds.config import Config as BdsCfg
 from server_fast.app.bds.models import TradeDate
-from server_fast.app.irs.config import Config as IrsCfg
+from server_fast.app.bds.services.market_data.option_market import _calc_delisted_date
 from server_fast.app.irs.models import OptionMonitor
 from server_fast.app.irs.service.common import logger
-
-
-def _calc_delisted_date(end_month: str, rule: str) -> date:
-    """根据到期日规则推算 delisted_date（遇节假日顺延至下一交易日）。
-
-    :param end_month: 到期年月，格式 "YYYYMM"（如 "202608"）
-    :param rule: 到期日规则代码（对应 Config.RULE_EXERCISE_DATE，如 'R1'/'R2'/'R3'）
-    :return: 到期日 date
-    """
-    # 未知规则校验：R3 配置值为 None（占位），需排除在 None 校验之外
-    if rule != 'R3' and IrsCfg.RULE_EXERCISE_DATE.get(rule) is None:
-        raise ValueError(f"unknown rule_exercise_date: {rule}")
-
-    year = int(end_month[:4])
-    month = int(end_month[4:])
-
-    # R3：商品期权，标的期货合约交割月（end_month）前第一月的倒数第五个交易日
-    if rule == 'R3':
-        # 计算"前第一月"：若 month==1 则跨年至上年 12 月
-        if month == 1:
-            prev_year, prev_month = year - 1, 12
-        else:
-            prev_year, prev_month = year, month - 1
-        prev_first = date(prev_year, prev_month, 1)
-        prev_last = date(prev_year, prev_month, calendar.monthrange(prev_year, prev_month)[1])
-        # 查询该月所有交易日，按降序取倒数第 5 个
-        with SessionLocal() as session:
-            trade_dates = session.query(TradeDate.trade_date).filter(
-                TradeDate.trade_date >= prev_first,
-                TradeDate.trade_date <= prev_last,
-            ).order_by(TradeDate.trade_date.desc()).limit(5).all()
-        if len(trade_dates) < 5:
-            raise ValueError(
-                f"TradeDate 日历数据不足：{prev_year}-{prev_month:02d} 交易日不足 5 条"
-            )
-        return trade_dates[4][0]
-
-    # R1/R2：按 (week_n, weekday) 规则计算
-    week_n, weekday = IrsCfg.RULE_EXERCISE_DATE[rule]  # 第几个星期(1-based), 星期几(0=周一)
-
-    # 找到该月第 week_n 个星期 weekday 的日期
-    # date(year, month, 1).weekday() 得到 1 号的星期几(0=周一)
-    first_weekday = date(year, month, 1).weekday()
-    # 1 号到目标星期几的偏移天数（可能为负，表示需到下一周）
-    offset = (weekday - first_weekday) % 7
-    target_day = 1 + offset + (week_n - 1) * 7
-    delisted = date(year, month, target_day)
-
-    # 查询 TradeDate 日历，若非交易日则顺延至下一交易日
-    with SessionLocal() as session:
-        # 判断 delisted 是否为交易日
-        is_trade = session.query(TradeDate.trade_date).filter(
-            TradeDate.trade_date == delisted
-        ).first()
-        if not is_trade:
-            # 顺延至下一交易日
-            next_trade = session.query(TradeDate.trade_date).filter(
-                TradeDate.trade_date > delisted
-            ).order_by(TradeDate.trade_date.asc()).first()
-            if next_trade:
-                delisted = next_trade[0]
-            # 若日历中无更晚的交易日（极端情况），保留原计算日期
-    return delisted
 
 
 def option_monitor_sync_orm(option_name: str, end_month: str):
     """通过 akshare + gm 获取期权行情并 upsert 到 OptionMonitor 表。
 
-    :param option_name: 期权品种名称（对应 Config.OPTIONS_MARCH 的 option_name）
+    :param option_name: 期权品种名称（对应 `bds.config.Config.OPTIONS_MARCH` 的 option_name）
     :param end_month: 到期年月，格式 "YYYYMM"（如 "202608"）
     :return: 插入+更新的总条数
     """
     # 1. 从配置查找 underlying_symbol、multiplier、rule_exercise_date
     config_item = None
-    for item in IrsCfg.OPTIONS_MARCH:
+    for item in BdsCfg.OPTIONS_MARCH:
         if item['option_name'] == option_name:
             config_item = item
             break

@@ -28,6 +28,7 @@
 `bds_trade_date`（已覆盖到 2026-12-31）为准，不依赖任何第三方日历。
 不要改 akshare 包内的 json，升级即失效。
 """
+import calendar
 import logging
 import re
 from datetime import date, datetime, time as dtime
@@ -37,7 +38,7 @@ from typing import Callable, Optional
 from server_fast.common.db import SessionLocal
 from server_fast.app.bds.models import OptionConfig, OptionMarket, TradeDate
 from server_fast.app.bds.services.market_data import option_info
-from server_fast.app.irs.config import Config as IrsCfg
+from server_fast.app.bds.config import Config as dbsCfg
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -124,13 +125,73 @@ def normalize_symbol(sym: str) -> str:
 
 
 def _calc_delisted_date(end_month: str, rule: str) -> date:
-    """转发 `option_monitor._calc_delisted_date`（唯一权威算法，禁止二次实现）。
+    """按到期规则推算到期日（遇节假日顺延至下一交易日）。
 
-    懒导入的理由：`option_monitor` 模块顶层 `from gm.api import *`，把它提到本模块
-    顶层会让 bds 服务在导入期就拉起 gm SDK。算法本身只有一处定义，这里不复制。
+    🔄 **2026-10-27 实现迁入 bds**：此前本函数只是一层转发，真正实现在
+    `irs.service.option_monitor` 里 —— 基础数据的算法放在研究模块、而 bds 反过来
+    依赖 irs，方向是反的（违反「依赖只能向下」）。现在实现归 bds，irs 反向引用本函数。
+
+    ⚠️ 它已**降级为回退/交叉校验，不是权威**：权威是 `bds_option_info.last_trade_date`
+    （交易所给的）。保留算法只为两件事——① 字典缺行时兜底；② `_cross_check_delisted()`
+    用它对字典值做二次核对（`fu_o` 上确实差过一周，61/63 一致）。
+
+    :param end_month: 到期年月，格式 "YYYYMM"（如 "202608"）
+    :param rule: 到期日规则码（`Config.RULE_EXERCISE_DATE` 的键：R1/R2/R3）
     """
-    from server_fast.app.irs.service.option_monitor import _calc_delisted_date as impl
-    return impl(end_month, rule)
+    # 未知规则校验：R3 配置值为 None（占位），需排除在 None 校验之外
+    if rule != "R3" and dbsCfg.RULE_EXERCISE_DATE.get(rule) is None:
+        raise ValueError(f"unknown rule_exercise_date: {rule}")
+
+    year = int(end_month[:4])
+    month = int(end_month[4:])
+
+    # R3：商品期权，标的期货合约交割月（end_month）前第一月的倒数第五个交易日
+    if rule == "R3":
+        # 计算"前第一月"：若 month==1 则跨年至上年 12 月
+        if month == 1:
+            prev_year, prev_month = year - 1, 12
+        else:
+            prev_year, prev_month = year, month - 1
+        prev_first = date(prev_year, prev_month, 1)
+        prev_last = date(prev_year, prev_month, calendar.monthrange(prev_year, prev_month)[1])
+        # 查询该月所有交易日，按降序取倒数第 5 个
+        with SessionLocal() as session:
+            trade_dates = session.query(TradeDate.trade_date).filter(
+                TradeDate.trade_date >= prev_first,
+                TradeDate.trade_date <= prev_last,
+            ).order_by(TradeDate.trade_date.desc()).limit(5).all()
+        if len(trade_dates) < 5:
+            raise ValueError(
+                f"TradeDate 日历数据不足：{prev_year}-{prev_month:02d} 交易日不足 5 条"
+            )
+        return trade_dates[4][0]
+
+    # R1/R2：按 (week_n, weekday) 规则计算
+    week_n, weekday = dbsCfg.RULE_EXERCISE_DATE[rule]  # 第几个星期(1-based), 星期几(0=周一)
+
+    # 找到该月第 week_n 个星期 weekday 的日期
+    # date(year, month, 1).weekday() 得到 1 号的星期几(0=周一)
+    first_weekday = date(year, month, 1).weekday()
+    # 1 号到目标星期几的偏移天数（可能为负，表示需到下一周）
+    offset = (weekday - first_weekday) % 7
+    target_day = 1 + offset + (week_n - 1) * 7
+    delisted = date(year, month, target_day)
+
+    # 查询 TradeDate 日历，若非交易日则顺延至下一交易日
+    with SessionLocal() as session:
+        # 判断 delisted 是否为交易日
+        is_trade = session.query(TradeDate.trade_date).filter(
+            TradeDate.trade_date == delisted
+        ).first()
+        if not is_trade:
+            # 顺延至下一交易日
+            next_trade = session.query(TradeDate.trade_date).filter(
+                TradeDate.trade_date > delisted
+            ).order_by(TradeDate.trade_date.asc()).first()
+            if next_trade:
+                delisted = next_trade[0]
+            # 若日历中无更晚的交易日（极端情况），保留原计算日期
+    return delisted
 
 
 def _resolve_trade_date(session, closed_only: bool) -> date:
@@ -289,11 +350,15 @@ def _sina_code(und_symbol: str, und_key: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _variety_meta(option_name: str) -> dict:
-    """从 irs 配置取品种元信息（乘数 / 到期规则 / 品种类型）。"""
-    for item in IrsCfg.OPTIONS_MARCH:
+    """取品种元信息（乘数 / 到期规则 / 品种类型）。
+
+    🔄 2026-10-27 起读 **bds 自己的** `Config.OPTIONS_MARCH`（此前读 `IrsCfg` 的副本，
+    造成 bds → irs 的反向依赖）。irs 现在反向引用同一份。
+    """
+    for item in dbsCfg.OPTIONS_MARCH:
         if item["option_name"] == option_name:
             return item
-    raise ValueError(f"未知期权品种（不在 IrsCfg.OPTIONS_MARCH 中）: {option_name}")
+    raise ValueError(f"未知期权品种（不在 Config.OPTIONS_MARCH 中）: {option_name}")
 
 
 # 品种类型 → 保证金公式族。三套公式不可互套（MEMORY 铁律），故存「族」不存费率。

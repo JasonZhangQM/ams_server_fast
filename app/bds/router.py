@@ -114,7 +114,6 @@ from server_fast.app.bds.services import (
 from server_fast.app.bds.config import Config
 from server_fast.app.bds.services import index_valuation
 from server_fast.app.bds.services.market_data import option_info, option_market
-from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
@@ -2429,14 +2428,18 @@ _OPT_UND_KEY = {
 
 
 def _opt_meta_by_name(option_name: str) -> dict:
-    """按品种名取 irs 配置里的元信息（标的/乘数/到期规则）。"""
-    for item in IrsCfg.OPTIONS_MARCH:
+    """按品种名取品种元信息（标的/乘数/到期规则）。
+
+    🔄 2026-10-27 起读 bds 自己的 `Config.OPTIONS_MARCH`（此前读 `IrsCfg`，
+    造成 bds → irs 的反向依赖；irs 现在反向引用同一份）。
+    """
+    for item in Config.OPTIONS_MARCH:
         if item["option_name"] == option_name:
             return item
     raise HTTPException(
         status_code=400,
-        detail=f"未知期权品种「{option_name}」，须是 IrsCfg.OPTIONS_MARCH 里的 option_name"
-               f"（{'、'.join(i['option_name'] for i in IrsCfg.OPTIONS_MARCH)}）")
+        detail=f"未知期权品种「{option_name}」，须是 Config.OPTIONS_MARCH 里的 option_name"
+               f"（{'、'.join(i['option_name'] for i in Config.OPTIONS_MARCH)}）")
 
 
 # ---- 期权合约字典（bds_option_info）----
@@ -2644,7 +2647,7 @@ def list_option_market(
         # 品种名经配置表映射成 und_key 集合，避免前端硬编码映射
         und_keys = [
             _OPT_UND_KEY[m["underlying_symbol"]]
-            for m in IrsCfg.OPTIONS_MARCH
+            for m in Config.OPTIONS_MARCH
             if m["option_name"] == option_name and m["underlying_symbol"] in _OPT_UND_KEY
         ]
         if not und_keys:
@@ -2708,7 +2711,7 @@ def get_option_market_filters(db: Session = Depends(get_db)):
     """下拉选项：品种 / 到期月 / 分组键（来自配置表 + 行情表现有值）。"""
     cfg_names = [r[0] for r in db.query(OptionConfig.option_name).distinct().all()]
     if not cfg_names:
-        cfg_names = [m["option_name"] for m in IrsCfg.OPTIONS_MARCH]
+        cfg_names = [m["option_name"] for m in Config.OPTIONS_MARCH]
     dms = [r[0] for r in db.query(OptionMarket.delisted_date).distinct().all() if r[0]]
     end_months = sorted({d.strftime("%Y%m") for d in dms})
     return {
