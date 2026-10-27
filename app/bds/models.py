@@ -843,7 +843,7 @@ class OptionConfig(Base, BaseModel):
     - `broker_symbol`：券商内部码，与标准码**没有可靠的字符串关系**（ETF 只能靠四元组
       关联），仅供对账与排查，不参与任何计算。
     - `end_month`：股指/ETF 必须指定（`option_finance_board` 按到期月拉）；
-      **商品期权填 `ALL`**——`option_hist_shfe` 一次返回当日全部到期月（实测 812 行），
+      **商品期权填 `ALL`**——上期所 `.dat` 一次返回当日全部到期月（实测 813~817 行），
       没有按月筛选的参数，填实际月份反而会造成"以为只拉了一个月"的误解。
     - `option_name`：akshare 的入参是中文品种名（"沪深300股指期权"），不是代码。
       写在配置里而不是代码里，以后加新品种不用改代码。
@@ -961,7 +961,7 @@ class OptionMarket(Base, BaseModel):
     quote_time: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True, comment="接口返回的行情时点")
     source: Mapped[str] = mapped_column(
-        String(24), nullable=False, comment="akshare_shfe / akshare_board")
+        String(24), nullable=False, comment="shfe_direct / akshare_board")
     sync_time: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, comment="本次写入时间")
 

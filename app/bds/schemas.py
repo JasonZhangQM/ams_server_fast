@@ -677,7 +677,7 @@ class OptionMarketOut(BaseModel):
     volume: Optional[int] = Field(default=None, description="成交量（ETF 恒 null）")
     open_interest: Optional[int] = Field(default=None, description="持仓量（ETF 恒 null）")
     quote_time: Optional[datetime] = Field(default=None, description="接口返回的行情时点")
-    source: str = Field(description="akshare_shfe / akshare_board")
+    source: str = Field(description="shfe_direct / akshare_board")
     sync_time: datetime = Field(description="本次写入时间")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")

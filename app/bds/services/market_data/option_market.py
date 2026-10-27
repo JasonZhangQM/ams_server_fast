@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """bds 期权行情同步服务（`bds_option_market`，配置驱动）。
 
-设计要点见 `docs/bds期权行情表与查询页需求方案_2026-10-26.md`：
+设计要点见 `docs/期权行情基础数据方案_2026-10-27.md`：
 
 1. **配置驱动**：读 `bds_option_config` 的启用行，按 `(option_name, end_month)` 分组调接口。
    没有这张配置表，"一键同步配置的全部期权"无处落地（持仓表是静态属性、监测表是全量铺开）。
@@ -13,13 +13,20 @@
 5. **降级链只在本文件一处**：结算价缺失时下游按 `COALESCE(settle, pre_settle, price)` 降级。
    展示层如实留空——拿前结价冒充结算价会误导。
 
-三个 akshare 接口的能力差异（实测 2026-10-26，这是表设计的第一约束）：
+三个数据源的能力差异（实测 2026-10-26，这是表设计的第一约束）：
 
 | 数据源 | 结算价 | delta | 成交量/持仓量 | 备注 |
 |---|---|---|---|---|
 | `option_finance_board`（IO） | ❌ | ❌ | ✅ volume / position | `lastprice` 盘中≠结算价 |
 | `option_finance_board`（510500） | ❌（仅前结价） | ❌ | ❌（「数量」列恒等于行数） | 带完整时间戳 |
-| `option_hist_shfe`（au） | ✅ | ✅（德尔塔） | ✅ | 一次返回全部到期月 |
+| 上期所 `.dat` 直连（au） | ✅ | ✅（德尔塔） | ✅ | 一次返回全部品种全部到期月 |
+
+**au 为什么不走 akshare（2026-10-27 实测）**：`option_hist_shfe` 用包内本地
+`calendar.json` 判交易日，该日历最大日期停在 **2025-12-31** ⇒ 2026 年任何日期都
+「非交易日」返回空 DataFrame，且其内部 `except: return pd.DataFrame()` 把网络失败
+也一并吞成空 ⇒ 表现为**静默 0 行**。故改为直连原始 `.dat`，交易日一律以
+`bds_trade_date`（已覆盖到 2026-12-31）为准，不依赖任何第三方日历。
+不要改 akshare 包内的 json，升级即失效。
 """
 import logging
 import re
@@ -40,6 +47,27 @@ _ETF_CODE_RE = re.compile(r"^\d{6}(?P<code>[CP]\d{4}M\d{5})$")
 
 # 无效数值的统一取值集合（akshare 各接口用空串/'-'/'nan' 表示缺失，不统一）
 _BAD_TOKENS = {"", "-", "--", "None", "nan", "NaN", "null"}
+
+# 上期所期权日行情原始文件（含全部品种，一次请求服务所有商品期权分组）
+SHFE_OPTION_DAY_URL = "https://www.shfe.com.cn/data/tradedata/option/dailydata/kx{ymd}.dat"
+_SHFE_HEADERS = {"User-Agent": "Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)"}
+# 交易所把「小计」「合计」与真实合约混在同一个数组里
+_SHFE_SUMMARY_IDS = {"", "小计", "合计", "总计"}
+
+# 只有「当日快照」才写的列。历史快照新增行留空、已存在的行不覆盖：
+# - `price_ud`/`value_i`/`value_t`：由「同步时点标的现价」派生，对历史行无意义
+# - `volume`：当日**累计**成交量，盘前取到的恒为 0（实测 2026-10-27 08:07 盘前同步
+#   把 10-26 的 IO 成交量 1431/2527/4587 全刷成 0），历史行必须保留原值
+_TODAY_ONLY_COLS = ("price_ud", "value_i", "value_t", "volume")
+
+
+class ShfeDataNotReady(Exception):
+    """当日 `.dat` 已存在，但结算数据尚未生成（盘前占位文件）。
+
+    实测 2026-10-27 08:02 的文件：au 有 777 行合约、`CLOSEPRICE`/`SETTLEMENTPRICE`
+    全为空串，`update_date` 是当天 08:02。这种文件不是「无数据」而是「还没算完」，
+    必须与「取数失败」区分开：前者退一个交易日、后者必须报错。
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +130,9 @@ def _calc_delisted_date(end_month: str, rule: str) -> date:
 def _resolve_trade_date(session, closed_only: bool) -> date:
     """判定本次行情属于哪个交易日。
 
-    - `closed_only=True`（商品期权）：`option_hist_shfe` 是**日频结算数据**，必须收盘后
-      （≥15:00）才有当日数据，否则取上一交易日。
+    - `closed_only=True`（商品期权）：上期所 `.dat` 是**日频结算数据**，必须收盘后
+      （≥15:00）才有当日数据，否则取上一交易日。结算数据晚于 15:00 发布的窗口由
+      `ShfeDataNotReady` 再退一天兜住（见 `fetch_shfe_option_day`）。
     - `closed_only=False`（股指/ETF）：`option_finance_board` 返回**实时盘口**，
       开盘（≥09:30）后即为当日行情；盘前拿到的是昨收，标成今天会失鲜。
     """
@@ -121,6 +150,72 @@ def _resolve_trade_date(session, closed_only: bool) -> date:
     if prev is None:
         raise ValueError("bds_trade_date 日历中找不到可用交易日")
     return prev[0]
+
+
+def _prev_trade_date(session, day: date) -> date:
+    """取 `day` 之前最近的交易日（`bds_trade_date` 为唯一日历）。"""
+    prev = session.query(TradeDate.trade_date).filter(
+        TradeDate.trade_date < day).order_by(TradeDate.trade_date.desc()).first()
+    if prev is None:
+        raise ValueError(f"bds_trade_date 日历中找不到 {day} 之前的交易日")
+    return prev[0]
+
+
+# ---------------------------------------------------------------------------
+# 上期所直连（商品期权唯一通道）
+# ---------------------------------------------------------------------------
+
+def fetch_shfe_option_day(trade_date: date, option_name: str) -> list[dict]:
+    """直连上期所期权日行情 `.dat`，返回该**交易日 × 品种**的合约行（交易所原始字段名）。
+
+    字段取自交易所原文，不做中文改名——映射表在 `_sync_group` 里集中处理，避免
+    「看起来还是 akshare」的假象。常用字段：
+
+    | 交易所字段 | 含义 | 落到 `bds_option_market` |
+    |---|---|---|
+    | `INSTRUMENTID` | `au2612P840` | `symbol` |
+    | `CLOSEPRICE` | 收盘价 | `price` |
+    | `PRESETTLEMENTPRICE` | 前结算价 | `pre_settle` |
+    | `SETTLEMENTPRICE` | 结算价 | `settle` |
+    | `DELTA` | 德尔塔 | `delta_opt` |
+    | `VOLUME` / `OPENINTEREST` | 成交量 / 持仓量 | `volume` / `open_interest` |
+
+    三种异常必须分开，不能像 akshare 那样统一吞成空表：
+
+    - `FileNotFoundError`：该日无文件（404）⇒ 日历与交易所不一致，必须暴露
+    - `ShfeDataNotReady`：文件在但结算价全空 ⇒ 盘前占位文件，调用方退一个交易日
+    - `ValueError`：非 JSON / 品种名不匹配 ⇒ 配置或接口变更，必须暴露
+
+    回补历史直接复用本函数（一次一天），不需要第二套取数逻辑。
+    """
+    import requests
+
+    ymd = trade_date.strftime("%Y%m%d")
+    url = SHFE_OPTION_DAY_URL.format(ymd=ymd)
+    r = requests.get(url, headers=_SHFE_HEADERS, timeout=30)
+    if r.status_code == 404:
+        raise FileNotFoundError(f"上期所 {ymd} 无期权日行情文件：{url}")
+    r.raise_for_status()
+    try:
+        payload = r.json()
+    except ValueError as e:
+        raise ValueError(
+            f"上期所 {ymd} 返回非 JSON（Content-Type={r.headers.get('Content-Type')}）: {e}") from e
+
+    rows = payload.get("o_curinstrument") or []
+    picked = [
+        x for x in rows
+        if str(x.get("PRODUCTNAME", "")).strip() == option_name
+        and str(x.get("INSTRUMENTID", "")).strip() not in _SHFE_SUMMARY_IDS
+    ]
+    if not picked:
+        raise ValueError(f"上期所 {ymd} 文件里没有品种「{option_name}」的合约（PRODUCTNAME 不匹配）")
+    # 结算价是日终产物：全品种全部合约都空 ⇒ 当天还没结算完，不是「今天没有行情」
+    if not any(str(x.get("SETTLEMENTPRICE", "")).strip() for x in picked):
+        raise ShfeDataNotReady(
+            f"上期所 {ymd}「{option_name}」结算价全空"
+            f"（文件 update_date={payload.get('update_date')}，盘前占位）")
+    return picked
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +308,6 @@ def margin_type_of(option_name: str) -> Optional[str]:
 def _sync_group(session, option_name: str, end_month: str,
                 cfgs: list[OptionConfig]) -> dict:
     """同步一个 (品种, 到期月) 分组。返回本组统计。"""
-    import akshare as ak
-
     meta = _variety_meta(option_name)
     is_commodity = meta["option_type"] == "商品期权"
     multiplier = int(meta["multiplier"])
@@ -223,17 +316,32 @@ def _sync_group(session, option_name: str, end_month: str,
     trade_date = _resolve_trade_date(session, closed_only=is_commodity)
 
     if is_commodity:
-        df = ak.option_hist_shfe(symbol=option_name, trade_date=trade_date.strftime("%Y%m%d"))
-        source = "akshare_shfe"
+        # 商品期权唯一通道：直连上期所 .dat（akshare 通道对 2026 年全失效，见文件头）
+        source = "shfe_direct"
+        try:
+            records = fetch_shfe_option_day(trade_date, option_name)
+        except ShfeDataNotReady as e:
+            # 15:00 ~ 交易所结算数据发布之间的窗口：退一个交易日。
+            # 写的是**真实的历史快照**（同一 trade_date 幂等覆盖），不会造出假数据。
+            prev = _prev_trade_date(session, trade_date)
+            logger.warning("[option_market] %s，改用上一交易日 %s", e, prev)
+            trade_date = prev
+            records = fetch_shfe_option_day(trade_date, option_name)
     else:
+        import akshare as ak
         if not end_month or end_month == "ALL":
             raise ValueError(f"{option_name} 必须在配置里指定 end_month（接口按到期月拉取）")
         df = ak.option_finance_board(symbol=option_name, end_month=end_month)
         source = "akshare_board"
+        records = [] if df is None or df.empty else df.to_dict("records")
 
-    if df is None or df.empty:
+    if not records:
         return {"rows": 0, "insert": 0, "update": 0, "skip": 0,
                 "note": f"{option_name}/{end_month} 接口返回空"}
+
+    # 本次同步写的是不是「今天的快照」。盘前/非交易日跑同步时 trade_date 会是上一交易日，
+    # 此时标的现价与派生列无意义（见下方 ud 处的说明）。
+    is_today_snapshot = trade_date == datetime.now().date()
 
     # 配置清单：交易所标准码 → 配置行（过滤用，同时提供 broker_symbol）
     wanted: dict[str, OptionConfig] = {}
@@ -258,10 +366,11 @@ def _sync_group(session, option_name: str, end_month: str,
         """
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
 
-    for _, row in df.iterrows():
+    for row in records:
         try:
             if is_commodity:
-                raw = str(row["合约代码"]).strip()
+                # 字段用上期所原名（见 fetch_shfe_option_day 的映射表）
+                raw = str(row["INSTRUMENTID"]).strip()
                 m = _SHFE_CODE_RE.match(raw)
                 if not m:
                     _bump("合约代码格式不符")
@@ -272,12 +381,12 @@ def _sync_group(session, option_name: str, end_month: str,
                 strike = _dec(m.group("k"))
                 und_symbol = f"{meta['underlying_symbol']}{ym}"  # SHFE.au2612
                 em = f"20{ym}"
-                price = _dec(row.get("收盘价"))
-                pre_settle = _dec(row.get("前结算价"))
-                settle = _dec(row.get("结算价"))
-                delta = _dec(row.get("德尔塔"))
-                volume = _int(row.get("成交量"))
-                oi = _int(row.get("持仓量"))
+                price = _dec(row.get("CLOSEPRICE"))
+                pre_settle = _dec(row.get("PRESETTLEMENTPRICE"))
+                settle = _dec(row.get("SETTLEMENTPRICE"))
+                delta = _dec(row.get("DELTA"))
+                volume = _int(row.get("VOLUME"))
+                oi = _int(row.get("OPENINTEREST"))
                 quote_time = None
             elif option_name == "沪深300股指期权":
                 code = str(row["instrument"]).strip()      # IO2611-P-4000
@@ -330,7 +439,16 @@ def _sync_group(session, option_name: str, end_month: str,
             cfg = wanted[code]
             option_type = "call" if cp.upper() == "C" else "put"
             delisted = _calc_delisted_date(em, rule)
-            ud = _ud(und_symbol, cfg.und_key)
+            # 标的现价是**同步那一刻**的值，只对「当日快照」成立。
+            # 盘前跑同步拿到的是上一交易日的收盘快照（trade_date=昨天），此时再取现价
+            # 就是把今天的价贴到昨天那一行上——实测 10-27 08:04 把 10-26 的
+            # price_ud 从 862.58 改成 865.36，连带 value_i/value_t 一起失真。
+            # 历史快照一律不取，写库时跳过这三列（保留原值，新行为 NULL）。
+            ud = _ud(und_symbol, cfg.und_key) if is_today_snapshot else None
+            if not is_today_snapshot:
+                # 同理：盘前拿到的「成交量」属于下一交易日，写成 0 会把历史行的量抹掉。
+                # 宁可留空让人知道「这一列没回补」，也不能填 0 假装当天无成交。
+                volume = None
 
             value_i = None
             value_t = None
@@ -385,6 +503,9 @@ def _sync_group(session, option_name: str, end_month: str,
                 insert += 1
             else:
                 for k, v in p.items():
+                    # 历史快照不覆盖「只有当日才有意义」的列：那是同步时点的现价/当日累计量
+                    if not is_today_snapshot and k in _TODAY_ONLY_COLS:
+                        continue
                     setattr(cur, k, v)
                 update += 1
 
