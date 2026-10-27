@@ -467,7 +467,10 @@ class ScenarioGrid(Base, BaseModel):
     __tablename__ = "bills_scenario_grid"
 
     calc_date: Mapped[date] = mapped_column(Date, comment="计算基准日")
-    mode: Mapped[str] = mapped_column(String(8), comment="sync/astock_only/index_only")
+    # ⚠️ 16 而不是 8：MODES 的键是 sync / astock_only（11 字符）/ index_only（10 字符），
+    # 原先 String(8) 装不下，`run_and_persist` 一写就 `Data too long for column 'mode'`。
+    # 只因 category 精确匹配缺陷让 compute() 从未产出过有效 grid，这条路径没被走到。
+    mode: Mapped[str] = mapped_column(String(16), comment="sync/astock_only/index_only")
     drop_pct: Mapped[Decimal] = mapped_column(Numeric(6, 4), comment="跌幅")
     account: Mapped[str] = mapped_column(String(16), comment="账户；ALL=组合")
     loss_amt: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="亏损额（负=亏）")

@@ -36,6 +36,7 @@ from typing import Callable, Optional
 
 from server_fast.common.db import SessionLocal
 from server_fast.app.bds.models import OptionConfig, OptionMarket, TradeDate
+from server_fast.app.bds.services.market_data import option_info
 from server_fast.app.irs.config import Config as IrsCfg
 
 logger = logging.getLogger("uvicorn.error")
@@ -43,7 +44,12 @@ logger = logging.getLogger("uvicorn.error")
 # 上期所商品期权合约：au2612P840 = 标的au + 月份2612 + C/P + 行权价840
 _SHFE_CODE_RE = re.compile(r"^(?P<prod>[a-zA-Z]+)(?P<ym>\d{4})(?P<cp>[CP])(?P<k>\d+(?:\.\d+)?)$")
 # 上交所/深交所 ETF 期权：510500P2611M06250 → 交易所标准码 P2611M06250
-_ETF_CODE_RE = re.compile(r"^\d{6}(?P<code>[CP]\d{4}M\d{5})$")
+#   分隔符有 **M 与 A 两种**：A 是标的除权后交易所对存续合约的「调整合约」
+#   （510500C2612A07500：乘数 10180、行权价 7.367、名义价 7.500）。
+#   2026-10-27 之前只认 M ⇒ 510500/202612 的 58 张里有 28 张被判「代码格式不符」
+#   静默跳过（实测）。A 与 M 不能合并：C2612A07500 与 C2612M07500 名义价同为 7.500
+#   但乘数不同（10180 vs 10000），合并即撞码。
+_ETF_CODE_RE = re.compile(r"^\d{6}(?P<code>[CP]\d{4}[MA]\d{5})$")
 
 # 无效数值的统一取值集合（akshare 各接口用空串/'-'/'nan' 表示缺失，不统一）
 _BAD_TOKENS = {"", "-", "--", "None", "nan", "NaN", "null"}
@@ -100,7 +106,7 @@ def normalize_symbol(sym: str) -> str:
     """把各家代码归一成「交易所标准期权代码」。
 
     - `CFFEX.IO2611-P-4000` → `IO2611-P-4000`（账单前缀可去）
-    - `SHEX.au2612P840`     → `au2612P840`（账单前缀可去）
+    - `SHFE.au2612P840`     → `au2612P840`（账单前缀可去；旧库里的 `SHEX.` 写法已统一为 `SHFE.`）
     - `510500P2611M06250`   → `P2611M06250`（akshare 带回标的代码前缀）
     - `SHQQ.10012562`       → **原样返回**：券商内部码与交易所码无任何字符串关系，
       去前缀只会得到一个既不是券商码也不是交易所码的垃圾串。
@@ -305,13 +311,50 @@ def margin_type_of(option_name: str) -> Optional[str]:
     return MARGIN_TYPE_BY_OPTION_TYPE.get(meta["option_type"])
 
 
+def _cross_check_delisted(code: str, em: str, rule: str,
+                          info_date: date) -> Optional[str]:
+    """到期日交叉校验：字典（交易所）vs 自研算法。
+
+    不一致时**采用字典值**、只记告警，不静默采用任何一方。理由：
+    - 字典是交易所给的，权威（`au`/`IO`/`HO`/`MO`/ETF 实测 61/63 一致）
+    - 但 openctp 是第三方聚合源，`fu_o` 上确实与算法差一周 ⇒ 校验不能省
+
+    算法抛异常（2027 年合约超出 `bds_trade_date` 日历）时什么都不做：
+    那正是字典存在的意义（它让这条路径不再依赖日历）。
+    """
+    try:
+        calc = _calc_delisted_date(em, rule)
+    except Exception:  # noqa: BLE001 —— 日历不足属预期，不是错误
+        return None
+    if calc != info_date:
+        return f"{code}: 到期日 字典={info_date} 算法={calc}（已采用字典值）"
+    return None
+
+
 def _sync_group(session, option_name: str, end_month: str,
                 cfgs: list[OptionConfig]) -> dict:
-    """同步一个 (品种, 到期月) 分组。返回本组统计。"""
+    """同步一个 (品种, 到期月) 分组。返回本组统计。
+
+    **规格（乘数 / 到期日）从 `bds_option_info` 逐合约取**，不再用品种级默认值
+    与自研推算 —— 这是 P2 的核心改动，解决两个既有缺陷：
+
+    | 缺陷 | 旧行为 | 新行为 |
+    |---|---|---|
+    | A 类调整合约 | 用品种乘数 10000，市值差 1.8% | 用字典的 10180 |
+    | 2027 年合约 | `_calc_delisted_date()` 抛 `日历数据不足` | 用字典的 `last_trade_date`，不碰日历 |
+
+    字典缺失时回退旧逻辑（品种乘数 + 算法），并记 `info_miss` 告警——
+    宁可降级也不让整组同步失败。
+    """
     meta = _variety_meta(option_name)
     is_commodity = meta["option_type"] == "商品期权"
-    multiplier = int(meta["multiplier"])
+    variety_multiplier = int(meta["multiplier"])
     rule = meta["rule_exercise_date"]
+    underlying_symbol = meta["underlying_symbol"]
+
+    # und_key 从台账取（P3 后配置表不再存这一列），台账缺失才回退配置行
+    ledger = option_info.resolve(option_name) or {}
+    und_key = ledger.get("und_key") or (cfgs[0].und_key if cfgs else None)
 
     trade_date = _resolve_trade_date(session, closed_only=is_commodity)
 
@@ -348,6 +391,12 @@ def _sync_group(session, option_name: str, end_month: str,
     for c in cfgs:
         wanted[normalize_symbol(c.symbol)] = c
 
+    # 逐合约规格：从字典取乘数与权威到期日。
+    # ⚠️ 必须传 option_name 做品种过滤：ETF 标准码不含标的 6 位，9 个 ETF 标的会拼出
+    # 同码（`C2612M01350` 同时属于 588000 与 588080），不过滤就会串到别的标的。
+    info_map = option_info.lookup_symbols(list(wanted.keys()), option_name=option_name)
+    spec_warnings: list[str] = []
+
     # 标的价：同 und_key 只取一次（au 按合约月份各取一次）
     ud_cache: dict[str, Optional[Decimal]] = {}
 
@@ -379,7 +428,7 @@ def _sync_group(session, option_name: str, end_month: str,
                 ym = m.group("ym")
                 cp = m.group("cp")
                 strike = _dec(m.group("k"))
-                und_symbol = f"{meta['underlying_symbol']}{ym}"  # SHFE.au2612
+                und_symbol = f"{underlying_symbol}{ym}"  # SHFE.au2612
                 em = f"20{ym}"
                 price = _dec(row.get("CLOSEPRICE"))
                 pre_settle = _dec(row.get("PRESETTLEMENTPRICE"))
@@ -397,7 +446,7 @@ def _sync_group(session, option_name: str, end_month: str,
                 ym = parts[0][-4:]                          # IO2611 → 2611
                 cp = parts[1]
                 strike = _dec(parts[2])
-                und_symbol = meta["underlying_symbol"]
+                und_symbol = underlying_symbol
                 em = f"20{ym}"
                 price = _dec(row.get("lastprice"))
                 pre_settle = None
@@ -438,13 +487,27 @@ def _sync_group(session, option_name: str, end_month: str,
 
             cfg = wanted[code]
             option_type = "call" if cp.upper() == "C" else "put"
-            delisted = _calc_delisted_date(em, rule)
+            # 规格（乘数 / 到期日）优先取字典：它是这两个事实的权威源。
+            # 字典缺失才回退旧逻辑，且回退必须留痕 —— 「静默用品种乘数」正是
+            # A 类合约差 1.8% 市值的成因。
+            spec = info_map.get(code)
+            if spec:
+                multiplier = int(spec["multiplier"])
+                delisted = spec["last_trade_date"]
+                warn = _cross_check_delisted(code, em, rule, delisted)
+                if warn:
+                    spec_warnings.append(warn)
+            else:
+                multiplier = variety_multiplier
+                delisted = _calc_delisted_date(em, rule)
+                spec_warnings.append(
+                    f"{code}: 字典无此合约，回退品种乘数 {variety_multiplier} + 算法到期日")
             # 标的现价是**同步那一刻**的值，只对「当日快照」成立。
             # 盘前跑同步拿到的是上一交易日的收盘快照（trade_date=昨天），此时再取现价
             # 就是把今天的价贴到昨天那一行上——实测 10-27 08:04 把 10-26 的
             # price_ud 从 862.58 改成 865.36，连带 value_i/value_t 一起失真。
             # 历史快照一律不取，写库时跳过这三列（保留原值，新行为 NULL）。
-            ud = _ud(und_symbol, cfg.und_key) if is_today_snapshot else None
+            ud = _ud(und_symbol, und_key) if is_today_snapshot else None
             if not is_today_snapshot:
                 # 同理：盘前拿到的「成交量」属于下一交易日，写成 0 会把历史行的量抹掉。
                 # 宁可留空让人知道「这一列没回补」，也不能填 0 假装当天无成交。
@@ -462,8 +525,8 @@ def _sync_group(session, option_name: str, end_month: str,
                 symbol=code,
                 broker_symbol=cfg.broker_symbol,
                 trade_date=trade_date,
-                underlying_symbol=cfg.underlying_symbol,
-                und_key=cfg.und_key,
+                underlying_symbol=underlying_symbol,
+                und_key=und_key,
                 option_type=option_type,
                 price_strike=strike,
                 delisted_date=delisted,
@@ -488,7 +551,6 @@ def _sync_group(session, option_name: str, end_month: str,
 
     # ---- UPSERT（唯一键 symbol + trade_date）----
     insert = update = 0
-    spec_filled = 0
     if parsed:
         symbols = [p["symbol"] for p in parsed]
         exist = {
@@ -508,43 +570,20 @@ def _sync_group(session, option_name: str, end_month: str,
                         continue
                     setattr(cur, k, v)
                 update += 1
-
-        # ---- 顺手回填合约规格（只填空值，绝不覆盖已有值）----
-        # 清单行允许只填代码与品种（观察型合约），规格在这里按接口原文补齐——
-        # 比人工填可靠：au2612P840 的到期日曾手填成 11-23，权威算法给的是 11-24。
-        # 反过来，已有值可能是人工**修正**过的，所以只在为 None 时写。
-        mt = MARGIN_TYPE_BY_OPTION_TYPE.get(meta["option_type"])
-        for p in parsed:
-            cfg = wanted.get(p["symbol"])
-            if cfg is None:
-                continue
-            touched = False
-            if cfg.cp is None:
-                cfg.cp = "C" if p["option_type"] == "call" else "P"
-                touched = True
-            if cfg.strike is None and p["price_strike"] is not None:
-                cfg.strike = p["price_strike"]
-                touched = True
-            if cfg.multiplier is None and p["multiplier"] is not None:
-                cfg.multiplier = p["multiplier"]
-                touched = True
-            if cfg.expiry_date is None and p["delisted_date"] is not None:
-                cfg.expiry_date = p["delisted_date"]
-                touched = True
-            if cfg.margin_type is None and mt:
-                cfg.margin_type = mt
-                touched = True
-            if touched:
-                spec_filled += 1
-        if spec_filled:
-            logger.info("[option_market] %s/%s 回填合约规格 %d 条",
-                        option_name, end_month, spec_filled)
+        # ⚠️ 2026-10-27 起**没有「顺手回填 config 规格」这一步了**：config 的规格列
+        #    （cp/strike/multiplier/expiry_date/margin_type）已物理删除，规格的权威源
+        #    是 `bds_option_info`（上面 `info_map` 已经逐合约取过）。原先那段回填
+        #    「只填空值、绝不覆盖已有值」的逻辑，恰恰是「手填 11-23 覆盖算法 11-24」
+        #    那次事故的通道 —— 删掉它本身就是收益，不是损失。
         session.commit()
 
     stat = {"rows": len(parsed), "insert": insert, "update": update,
-            "skip": sum(skip_reasons.values()), "spec_filled": spec_filled}
+            "skip": sum(skip_reasons.values())}
     if skip_reasons:
         stat["skip_reasons"] = skip_reasons
+    if spec_warnings:
+        # 到期日交叉校验不一致 / 字典缺失回退，都要能追到具体合约
+        stat["warnings"] = spec_warnings
     return stat
 
 
@@ -628,6 +667,8 @@ def sync_option_market(on_progress: Optional[Callable[[int, int, str], None]] = 
             "row_insert": 0,
             "row_update": 0,
             "row_skip": 0,
+            # 到期日交叉校验不一致 / 字典缺失回退：不是失败，但必须能被看到
+            "warnings": [],
         }
         errors: list[dict] = []
         per_group: list[dict] = []
@@ -642,6 +683,7 @@ def sync_option_market(on_progress: Optional[Callable[[int, int, str], None]] = 
                 stats["row_insert"] += st.get("insert", 0)
                 stats["row_update"] += st.get("update", 0)
                 stats["row_skip"] += st.get("skip", 0)
+                stats["warnings"].extend(st.get("warnings", []))
                 per_group.append({"option_name": option_name, "end_month": end_month,
                                   "config_count": len(items), **st})
             except Exception as e:  # noqa: BLE001 —— 单组失败不中断整批

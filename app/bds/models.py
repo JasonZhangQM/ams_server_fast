@@ -815,43 +815,122 @@ class BdsSyncTask(Base, BaseModel):
         return f"task-{self.id}({self.scope})"
 
 
+class OptionInfo(Base, BaseModel):
+    """期权合约字典（对应表 bds_option_info）：openctp 静态合约表本地副本。
+
+    **这张表回答「合约是什么」**，`bds_option_config` 回答「要同步哪些合约」，
+    `bds_option_market` 回答「今天多少价」。三者不重叠。
+
+    为什么需要它：合约乘数、到期日、A 类调整行权价这三项，行情接口要么不给
+    （`option_finance_board` 无 settle/delta/乘数），要么给的不是权威值（自研
+    `_calc_delisted_date()` 对 `fu_o` 差一周）。交易所字典是这些事实的唯一权威源。
+
+    🔴 **累积不删**：数据源只返回**当前挂牌**合约（实测最早一条就是次日），
+    若按全量覆盖做，表会越刷越短，已退市合约的历史行情行就再也查不到规格。
+    规则：只 UPSERT 永不 DELETE；命中的行置 `is_listed=1` + `last_seen_date=今天`；
+    全量成功后把 `last_seen_date < 今天` 的置 `is_listed=0`（带行数哨兵，见服务层）。
+
+    - `contract_id`：openctp 原生主键（`IO2611-P-4000` / `au2612P840` / ETF 8 位码
+      `10012562`），25,910 行无重复。**唯一键用它而不是 `symbol`**——`symbol` 是我们
+      自己拼的派生值，用派生值做身份是本末倒置。
+    - `symbol`：系统标准码。非 ETF 与 `contract_id` 相同；ETF 由
+      `CP + YYMM + (M|A) + 5 位名义价` 拼装（实测 510500/202612 的 58 张 58/58 命中）。
+      ⚠️ **`A` 不能统一成 `M`**：`C2612A07500`（乘数 10180）与 `C2612M07500`（乘数
+      10000）名义价同为 7.500 且并存，合并即撞码。
+    - `strike` vs `nominal_strike`：前者是交易所给的真实行权价（A 类为调整后的 7.367），
+      后者是「按品种默认乘数折算的名义价」（7.367 × 10180 ÷ 10000 = 7.500），只用于
+      生成标准码。**乘数与行权价必须成对使用**，混用差 1.8% 市值。
+    - `last_trade_date`：权威到期日，取代 `_calc_delisted_date()` 的推算。
+      后者降级为交叉校验（au/IO/HO/MO/ETF 全部逐日相同，`fu_o` 差一周）。
+    - `product_id` 有 92 个，只有 5 个在 `MAP_OPTION_LEDGER` 里有中文名映射；
+      其余照存（将来加品种零迁移），`resolve()` 对未知品种返回 `None` 而不报错。
+    """
+
+    __tablename__ = "bds_option_info"
+
+    contract_id: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="openctp 原生合约ID")
+    symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="系统标准码（派生）")
+    contract_name: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="数据源原始名称（已 strip）")
+    exchange: Mapped[str] = mapped_column(
+        String(8), nullable=False, comment="交易所：CFFEX/SHFE/SSE/SZSE/...")
+    product_id: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="品种ID：IO/HO/MO/au_o/ETF_O/AP ...")
+    underlying_contract_id: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="标的合约ID：IO2611 / 510500 / au2612")
+
+    cp: Mapped[str] = mapped_column(
+        String(1), nullable=False, comment="C=认购 P=认沽（源 1/2）")
+    strike: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, comment="行权价（交易所原始值，A类已调整）")
+    nominal_strike: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, comment="名义行权价（生成标准码用）")
+    multiplier: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="合约乘数（A类 10180）")
+    tick_size: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(10, 6), nullable=True, comment="最小变动价位")
+
+    list_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="上市日期")
+    last_trade_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="最后交易日（权威到期日）")
+    delivery_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="交割日")
+    expire_year_month: Mapped[str] = mapped_column(
+        String(6), nullable=False,
+        comment="期权到期年月 YYYYMM（由 last_trade_date 派生，非数据源的交割月）")
+
+    is_listed: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1", comment="1=最近一次拉取仍挂牌")
+    last_seen_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="最后一次出现在数据源的日期")
+    sync_time: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="本次写入时刻")
+
+    __table_args__ = (
+        UniqueConstraint("contract_id", name="uk_opt_info_contract"),
+        Index("k_opt_info_symbol", "symbol"),
+        Index("k_opt_info_und", "product_id", "underlying_contract_id", "last_trade_date"),
+        Index("k_opt_info_listed", "is_listed", "last_seen_date"),
+        Index("k_opt_info_expiry", "expire_year_month"),
+    )
+
+
 class OptionConfig(Base, BaseModel):
-    """期权合约档案 + 行情同步清单（对应表 bds_option_config）。
+    """期权**同步清单**（对应表 bds_option_config）。
 
-    **2026-10-26 由两张表合并而来**（原 `bds_option_config` + `bds_option_contract`）：
-    contract 的 13 个字段中，4 个本表已有、3 个 `bds_option_market` 每天都有、2 个可由
-    品种表派生、4 个零消费者或纯派生（`notional_per` 逐行验算 = strike × multiplier）。
-    真正不可替代的只有 `margin_type`，而它是**品种级**属性（csi300→cffex、
-    csi500etf→etf、au→shex，同品种内所有合约一致），不构成独立一张表的理由。
-    合并前已核：contract 6 行与 config 6 行一一对应（`contract.symbol` = `broker_symbol`），
-    规格字段逐行完全一致。
+    > **2026-10-27 瘦身：17 列 → 10 列。** 原来这里还存着合约规格
+    > （`cp` / `strike` / `multiplier` / `margin_type` / `expiry_date`）和
+    > 品种级派生（`underlying_symbol` / `und_key`），都是 `bds_option_info` 的副本。
+    > 副本的三个硬伤：① A 类调整合约的乘数（10180）拿不到；② 2027 到期的合约
+    > 算不出来；③ 手工拼码导致 10-26「ETF symbol 多 6 位」那类 bug。
+    > 详细论证与删列验收见 `docs/bds期权合约字典方案_2026-10-27.md`。
 
-    现在两张表的分工：
+    三张表的分工（判据是「这条事实的权威在谁手里」）：
 
-    | 表 | 回答的问题 | 粒度 |
-    |---|---|---|
-    | `bds_option_config`（本表） | 合约**是什么** + **要不要同步** | 每个合约一行 |
-    | `bds_option_market` | 这个合约**今天多少价** | `(symbol, trade_date)` |
-
-    规格字段（`cp` / `strike` / `multiplier` / `margin_type` / `expiry_date`）**允许为空**，
-    这是刻意的：清单允许加「只想看行情、暂不算风险」的合约。两处会自动补全——
-    ① 同步时 `_sync_group` 拿到接口原文后顺手回填；② `POST /option-config/backfill-spec`
-    从最新快照手工补。风险计算若遇必填项为空会直接 raise（宁可算不出，不可算错）。
+    | 表 | 回答的问题 | 权威 | 粒度 |
+    |---|---|---|---|
+    | `bds_option_info` | 合约**是什么**（乘数/到期日/行权价） | 交易所 | 每个合约一行 |
+    | `bds_option_config`（本表） | **要不要同步、怎么拉** | 我 | 每个合约一行 |
+    | `bds_option_market` | 这个合约**今天多少价** | 行情接口 | `(symbol, trade_date)` |
 
     - `symbol`：**交易所标准码**，不含交易所前缀（ETF 也不含标的 6 位）。
-      账单原始码（`CFFEX.IO2611-P-4000` / `SHQQ.10012562`）放 `broker_symbol`。
+      ⚠️ ETF 标准码沿用交易所「合约简称」口径，9 个 ETF 标的的行权价区间重叠
+      ⇒ **跨标的必然同码**（如 `C2612M01350` 同时属于 588000 与 588080）。
+      正确的不变式是 `(option_name, symbol)` 唯一，不是 `symbol` 唯一；
+      又因本表 `option_name` 是列，唯一约束落在 `symbol` 上仍成立（一个清单里
+      同一标准码只登记一次，品种随行带出）。
     - `broker_symbol`：券商内部码，与标准码**没有可靠的字符串关系**（ETF 只能靠四元组
       关联），仅供对账与排查，不参与任何计算。
+    - `option_name`：akshare 的入参是中文品种名（"沪深300股指期权"），不是代码。
+      它同时是**品种上下文的唯一来源**——查 `bds_option_info` 必须带上它，
+      否则 ETF 同码会串到别的标的。
     - `end_month`：股指/ETF 必须指定（`option_finance_board` 按到期月拉）；
       **商品期权填 `ALL`**——上期所 `.dat` 一次返回当日全部到期月（实测 813~817 行），
       没有按月筛选的参数，填实际月份反而会造成"以为只拉了一个月"的误解。
-    - `option_name`：akshare 的入参是中文品种名（"沪深300股指期权"），不是代码。
-      写在配置里而不是代码里，以后加新品种不用改代码。
-    - `margin_type`：选保证金公式族 cffex（15%/7%）/ etf（12%/7%）/ shex（内在价值
-      全额式）。存「公式族」而不是「费率」，因为三套公式不可互套（见 MEMORY 铁律）。
-    - `und_key`：情景分组键 csi300/csi500etf/au，决定该仓位在模式 B（仅A股）/ C（仅股指）
-      里动不动。
-    - `strike`：统一本位校正 —— ETF 名称里的「6250」实为 6.250 元。
+    - `is_enabled` / `note`：人工列（铁律 4.9），同步任务永不写本表。
     """
 
     __tablename__ = "bds_option_config"
@@ -860,22 +939,6 @@ class OptionConfig(Base, BaseModel):
         String(32), nullable=False, comment="交易所标准期权代码")
     broker_symbol: Mapped[Optional[str]] = mapped_column(
         String(32), nullable=True, comment="券商账单代码（对账用，不参与计算）")
-    underlying_symbol: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="标的：SHSE.000300 / SHSE.510500 / SHFE.au")
-    und_key: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="情景分组键：csi300 / csi500etf / au")
-
-    # —— 合约规格（可空：观察型合约不必填；同步与 backfill 会自动补全）——
-    cp: Mapped[Optional[str]] = mapped_column(
-        String(1), nullable=True, comment="C=认购 P=认沽")
-    strike: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, comment="行权价（统一本位，ETF 为 6.25 而非 6250）")
-    multiplier: Mapped[Optional[int]] = mapped_column(
-        Integer, nullable=True, comment="合约乘数")
-    margin_type: Mapped[Optional[str]] = mapped_column(
-        String(8), nullable=True, comment="保证金公式族：cffex/etf/shex")
-    expiry_date: Mapped[Optional[date]] = mapped_column(
-        Date, nullable=True, comment="到期日")
 
     option_name: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="akshare 品种名")

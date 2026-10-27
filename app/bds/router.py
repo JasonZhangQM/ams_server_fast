@@ -53,6 +53,7 @@ from server_fast.app.bds.models import (
     IndexConstituentSync,
     IndexHistory, 
     OptionConfig,
+    OptionInfo,
     OptionMarket,
     SymbolInfo, 
     TradeDate,
@@ -75,10 +76,11 @@ from server_fast.app.bds.schemas import (
     IndexValuationRow,
     IndexValuationSyncRequest,
     MacroSyncRequest,
-    OptionConfigBackfillResult,
     OptionConfigCreate,
     OptionConfigOut,
     OptionConfigUpdate,
+    OptionInfoOut,
+    OptionInfoProductOut,
     OptionMarketOut,
     OptionSyncPlanOut,
     SymbolInfoOut,
@@ -111,7 +113,7 @@ from server_fast.app.bds.services import (
 )
 from server_fast.app.bds.config import Config
 from server_fast.app.bds.services import index_valuation
-from server_fast.app.bds.services.market_data import option_market
+from server_fast.app.bds.services.market_data import option_info, option_market
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
@@ -1417,11 +1419,16 @@ def sync_daily_indicators_all():
 # 实测耗时（2026-10-22 盘前）：trade_date 0.17s / symbol_info 8.5s / index_history 0.22s
 #                             option_market 3 组约 5s（2026-10-26 实测，6 合约）
 #                             wscn 约 15s / daily 约 13s / gold 20 国约 5.5min（每国 16.4s）
-SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "index_history", "option_market", "wscn", "daily", "gold"]
+#
+# 🔴 option_info 必须排在 option_market **之前**：行情同步要从字典取「逐合约乘数」
+#    与「权威到期日」，当天新挂牌的合约若还没进字典，行情会 MISS 跳过。
+SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "index_history", "option_info",
+                    "option_market", "wscn", "daily", "gold"]
 SYNC_STAGE_NAMES = {
     "trade_date": "交易日历",
     "symbol_info": "证券信息",
     "index_history": "指数行情",
+    "option_info": "期权合约字典",
     "option_market": "期权行情",
     "wscn": "经济指标（华尔街见闻）",
     "daily": "美债收益率（FRED）",
@@ -1433,6 +1440,7 @@ SYNC_STAGE_GROUPS = {
     "trade_date": "basic",
     "symbol_info": "basic",
     "index_history": "basic",
+    "option_info": "basic",
     "option_market": "basic",
     "wscn": "macro",
     "daily": "macro",
@@ -1457,6 +1465,10 @@ def _sync_stage_items(stage: str) -> list:
         return [("excel", "东财Excel"), ("gm", "gm证券信息")]
     if stage == "index_history":
         return [(code, info.get("sec_name") or code) for code, info in Config.INDEX_CODE.items()]
+    if stage == "option_info":
+        # 整批刷新只算 1 项：25,910 行是一次 HTTP + 一批 UPSERT，拆成「按品种」计项
+        # 只会让进度条显得很长而实际没有可并行的东西。
+        return [("all", "全量刷新合约字典")]
     if stage == "option_market":
         groups = option_market.build_sync_plan()["groups"]
         if not groups:
@@ -1496,6 +1508,10 @@ def _run_sync_item(stage: str, key: str) -> int:
             if not info:
                 return -1
             return sync_one_index(key, info)
+        if stage == "option_info":
+            # 返回「本次解析并写入的行数」；桶水位（哨兵跳过、撞码）写进服务的 log
+            st = option_info.fetch_and_store()
+            return int(st.get("parsed_rows", 0))
         if stage == "option_market":
             if key == "__no_config__":
                 return -1
@@ -2404,27 +2420,12 @@ def get_index_constituent_sync_status(db: Session = Depends(get_db)):
 # 性质与 batch-sync 页的卡片一致；行内仍然一个写按钮都没有 ⇒ 不违背铁律 4.8 的本意。
 # ============================================================================
 
-# 品种名 → und_key / 标的（当配置里留空时的兜底来源）
+# 品种名 → und_key / 标的（配置里不再存标的，纯查询辅助；und_key 的正源是 Config.MAP_OPTION_LEDGER）
 _OPT_UND_KEY = {
     "SHSE.000300": "csi300",
     "SHSE.510500": "csi500etf",
     "SHFE.au": "au",
 }
-
-
-def _canon_underlying(u: Optional[str]) -> Optional[str]:
-    """标的代码归一到 irs 口径。
-
-    ⚠️ 两套交易所代码并存：账单里是 `SHEX.au`（SHEX=上海期货交易所的券商写法），
-    irs 配置里是 `SHFE.au`（行情口径）。它们的国库号相同、字符串不同，
-    不做归一会导致「按标的找品种名」永远找不到黄金。
-    """
-    if not u:
-        return u
-    head, _, tail = u.partition(".")
-    if head.upper() in ("SHEX", "SHFE"):
-        return f"SHFE.{tail}"
-    return u
 
 
 def _opt_meta_by_name(option_name: str) -> dict:
@@ -2436,6 +2437,182 @@ def _opt_meta_by_name(option_name: str) -> dict:
         status_code=400,
         detail=f"未知期权品种「{option_name}」，须是 IrsCfg.OPTIONS_MARCH 里的 option_name"
                f"（{'、'.join(i['option_name'] for i in IrsCfg.OPTIONS_MARCH)}）")
+
+
+# ---- 期权合约字典（bds_option_info）----
+#
+# 这张表回答「合约是什么」（乘数 / 权威到期日 / A 类调整行权价），
+# 与 `bds_option_config`（要同步哪些合约）、`bds_option_market`（多少价）职责不重叠。
+# 设计见 `docs/bds期权合约字典方案_2026-10-27.md`。
+
+@router.get("/option-info", response_model=PageResponse[OptionInfoOut])
+def list_option_info(
+    product_id: Optional[str] = Query(default=None, description="品种ID：IO/au_o/ETF_O/..."),
+    option_name: Optional[str] = Query(
+        default=None, description="中文品种名（经台账换算成 品种ID+标的）"),
+    underlying_contract_id: Optional[str] = Query(
+        default=None, description="标的合约ID：IO2611 / 510500 / au2612"),
+    expire_year_month: Optional[str] = Query(default=None, description="到期年月 YYYYMM"),
+    cp: Optional[str] = Query(default=None, description="C / P"),
+    is_listed: Optional[int] = Query(default=None, description="1=仅在挂 0=仅退市；不传=全部"),
+    keyword: Optional[str] = Query(
+        default=None, description="模糊搜 合约ID / 标准码 / 合约名称（支持 8 位券商码）"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """分页查询合约字典（25,910 行，必须服务端分页）。
+
+    ⚠️ **标准码 `symbol` 不是全局唯一**：ETF 沿用交易所「合约简称」口径、不含标的
+    6 位，9 个 ETF 标的的行权价区间大量重叠 ⇒ 跨标的会返回多行（实测 422 组）。
+    这是口径决定的，不是数据错误；前端展示时要带标的名。
+
+    ⚠️ 排序必须显式给出：服务端 offset/limit 缺 ORDER BY 时 MySQL 不保证顺序，
+    会翻页跳行/重复行。
+    """
+    _guard_list_offset(offset)
+    query = db.query(OptionInfo)
+
+    if product_id:
+        query = query.filter(OptionInfo.product_id == product_id)
+    if option_name:
+        # 中文名 → 台账（品种ID + 标的）。ETF 必须带标的，否则 9 个 ETF 会串在一起
+        entry = option_info.resolve(option_name)
+        if entry is None:
+            raise HTTPException(status_code=400, detail=f"未知品种（不在台账里）：{option_name}")
+        query = query.filter(OptionInfo.product_id == entry["product_id"])
+        if entry["ctp_underlying"]:
+            query = query.filter(
+                OptionInfo.underlying_contract_id == entry["ctp_underlying"])
+    if underlying_contract_id:
+        query = query.filter(OptionInfo.underlying_contract_id == underlying_contract_id)
+    if expire_year_month:
+        query = query.filter(OptionInfo.expire_year_month == expire_year_month)
+    if cp:
+        query = query.filter(OptionInfo.cp == cp.upper())
+    if is_listed is not None:
+        query = query.filter(OptionInfo.is_listed == is_listed)
+    if keyword:
+        kw = keyword.strip()
+        query = query.filter(or_(
+            OptionInfo.contract_id.contains(kw),
+            OptionInfo.symbol.contains(kw),
+            OptionInfo.contract_name.contains(kw),
+        ))
+
+    total = query.count()
+    items = (
+        query.order_by(OptionInfo.product_id.asc(),
+                       OptionInfo.underlying_contract_id.asc(),
+                       OptionInfo.expire_year_month.asc(),
+                       OptionInfo.cp.asc(),
+                       OptionInfo.strike.asc())
+        .offset(offset).limit(limit).all()
+    )
+    return {"items": [i.to_dict() for i in items], "total": total,
+            "limit": limit, "offset": offset}
+
+
+@router.get("/option-info/products", response_model=List[OptionInfoProductOut])
+def list_option_info_products():
+    """字典品种下拉：只返回台账已登记的品种（92 个品种里只有这几个有中文名）。"""
+    return option_info.products()
+
+
+@router.get("/option-info/latest-date")
+def get_option_info_latest_date():
+    """字典新鲜度：最近拉取日期 / 总行数 / 在挂张数 / 写入时刻（页面头部展示）。"""
+    return option_info.latest_info()
+
+
+def _run_option_info_thread(task_id: int):
+    """后台线程：刷新合约字典，逐批回写进度，收尾写 result。"""
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).filter(BdsSyncTask.id == task_id).first()
+    if task is None:
+        db.close()
+        return
+    stop_event = _stop_events.get(task_id)
+
+    def on_progress(done: int, total: int, label: str):
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError(f"用户停止（{label}）")
+        # total_count 固定为 1（整批刷新算一步），progress 用批次粒度显得更连续
+        task.progress = round(done / total * 100, 2) if total else 100
+        db.commit()
+
+    try:
+        # start_time 必须自己写（本线程不走 _run_sync_thread 的初始化）
+        task.start_time = datetime.now()
+        db.commit()
+
+        stats = option_info.fetch_and_store(on_progress=on_progress)
+        stopped = stop_event is not None and stop_event.is_set()
+
+        task.status = "stopped" if stopped else "done"
+        task.done_count = 1
+        task.progress = 100
+        # 口径：success_count = 本次**解析并写入**的行数（新增+更新）
+        task.success_count = int(stats.get("parsed_rows", 0))
+        task.error_count = 0
+        task.result = stats
+        task.end_time = datetime.now()
+        db.commit()
+        print(f"[option-info #{task_id}] {task.status}：拉取 {stats['fetch_rows']} 行，"
+              f"写入 {stats['parsed_rows']} 行（新增 {stats['insert']}、"
+              f"更新 {stats['update']}、置退市 {stats['delisted']}）")
+    except Exception as e:  # noqa: BLE001
+        task.status = "failed"
+        task.errors = (task.errors or []) + [
+            {"symbol": "", "table": "option-info",
+             "message": f"线程异常: {type(e).__name__}: {e}"}]
+        task.end_time = datetime.now()
+        db.commit()
+        print(f"[option-info #{task_id}] 失败: {e}")
+    finally:
+        _stop_events.pop(task_id, None)
+        db.close()
+
+
+@router.post("/option-info/sync", response_model=BdsSyncTaskOut)
+def sync_option_info_now():
+    """刷新期权合约字典（后台线程 + 任务化 + 全局互斥）。
+
+    - 与批量同步 / 行情同步共用 `bds_sync_task` 与 `_stop_events`（铁律 4.8）
+    - 立即返回 task（status=running），前端轮询 `GET /bds/sync-tasks/{id}`
+    - 累积不删：本次未出现的合约保留，只把 `is_listed` 置 0；且行数低于哨兵时
+      连置 0 都跳过（防一次残缺拉取误标 2 万张合约退市）
+    """
+    db = next(get_db())
+    try:
+        _cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409,
+                                detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        task = BdsSyncTask(
+            scope="option_info",           # 11 字符，列宽 String(16) 之内
+            scope_params={"mode": "full"},
+            tables=["option-info"],
+            status="running",
+            total_count=1,                 # 整批刷新算一步，进度由批次回调推进
+            done_count=0,
+            success_count=0,
+            no_data_count=0,
+            error_count=0,
+            progress=0,
+            errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        _stop_events[task.id] = threading.Event()
+        threading.Thread(target=_run_option_info_thread, args=(task.id,), daemon=True).start()
+        return task
+    finally:
+        db.close()
 
 
 @router.get("/option-market", response_model=PageResponse[OptionMarketOut])
@@ -2654,98 +2831,195 @@ def _run_option_market_thread(task_id: int, group_total: int):
 
 
 # ---- 同步清单 CRUD ----
+#
+# 🔴 2026-10-27 起，本表**只剩「同步意图」**：symbol / broker_symbol / option_name /
+#    end_month / is_enabled / source / note。原来那 7 列（cp / strike / multiplier /
+#    margin_type / expiry_date / underlying_symbol / und_key）已物理删除，
+#    响应体里的这些字段全部**现算后只读返回**：
+#        cp/strike/multiplier/expiry_date ← bds_option_info（必须按 option_name 限定范围）
+#        margin_type                      ← option_market.margin_type_of(option_name)
+#        und_key                          ← Config.MAP_OPTION_LEDGER[option_name]
+#        underlying_symbol                ← 品种表 `_opt_meta_by_name`
+#    ⇒ `POST /option-config/backfill-spec` 已删除（没有可回填的列了）。
+#    设计与验收见 `docs/bds期权合约字典方案_2026-10-27.md` §5。
+
+
+def _info_map_for(rows: list[OptionConfig]) -> dict[str, Optional[dict]]:
+    """按 `option_name` 分组批量查合约字典，返回 `{symbol: info|None}`。
+
+    ⚠️ **必须分组传 `option_name`**：ETF 标准码不含标的，9 个标的存在大量同码
+    （实测 25,910 行里跨标的 422 组同码），不限定品种会取到别的标的的行。
+    """
+    out: dict[str, Optional[dict]] = {}
+    by_name: dict[str, list[str]] = {}
+    for r in rows:
+        by_name.setdefault(r.option_name, []).append(r.symbol)
+    for name, syms in by_name.items():
+        got = option_info.lookup_symbols(syms, option_name=name)
+        for s in syms:
+            out[s] = got.get(s)
+    return out
+
+
+def _config_out(row: OptionConfig, info: Optional[dict]) -> OptionConfigOut:
+    """config 行 + 字典行 → 响应体（规格与品种级字段全部只读派生）。"""
+    try:
+        meta = _opt_meta_by_name(row.option_name)
+    except HTTPException:
+        meta = {}                       # 品种已下架：派生字段留空，不让列表整体 500
+    return OptionConfigOut(
+        id=row.id,
+        symbol=row.symbol,
+        broker_symbol=row.broker_symbol,
+        underlying_symbol=meta.get("underlying_symbol"),
+        und_key=option_info.und_key_of(row.option_name),
+        cp=info["cp"] if info else None,
+        strike=info["strike"] if info else None,
+        multiplier=info["multiplier"] if info else None,
+        margin_type=option_market.margin_type_of(row.option_name),
+        expiry_date=info["last_trade_date"] if info else None,
+        option_name=row.option_name,
+        end_month=row.end_month,
+        is_enabled=row.is_enabled,
+        source=row.source,
+        note=row.note,
+        create_time=row.create_time,
+        update_time=row.update_time,
+    )
+
 
 @router.get("/option-config", response_model=List[OptionConfigOut])
 def list_option_config(
     is_enabled: Optional[int] = Query(default=None, description="1=仅启用 0=仅停用"),
     db: Session = Depends(get_db),
 ):
-    """同步清单（按品种+到期月+行权价排序，便于核对）。"""
+    """同步清单（按品种+到期月+标准码排序，便于核对）。
+
+    规格字段是 join `bds_option_info` 的**只读派生值**，为 None 说明字典里查不到
+    这个合约（没刷新字典 / 该合约已退市被清），不是数据错误。
+    """
     query = db.query(OptionConfig)
     if is_enabled is not None:
         query = query.filter(OptionConfig.is_enabled == is_enabled)
     rows = query.order_by(OptionConfig.option_name.asc(),
                           OptionConfig.end_month.asc(),
                           OptionConfig.symbol.asc()).all()
-    return rows
+    infos = _info_map_for(rows)
+    return [_config_out(r, infos.get(r.symbol)) for r in rows]
 
 
 @router.post("/option-config", response_model=OptionConfigOut)
 def create_option_config(req: OptionConfigCreate, db: Session = Depends(get_db)):
-    """新增同步配置。
+    """新增同步配置：合约必须先在 `bds_option_info` 里查得到。
 
-    symbol 会做归一化（去 `CFFEX.`/`SHEX.` 账单前缀、去 ETF 的标的数字前缀），
-    所以粘贴账单代码也能直接存成交易所标准码。
+    🔴 **不再接受手工拼码**（方案 §5.4）。10-26 那次「ETF symbol 多 6 位」事故的根因
+    就是 `normalize_symbol()` 对 `SHQQ.` 前缀有专门保护、会原样返回 `SHQQ.10012562`，
+    于是清单里存了一个永远匹配不上行情的码。现在改成「从字典里选合约」，
+    整类拼写错误在结构上不可能再发生。
+
+    两种入参写法（`contract_id` 优先）：
+
+    - `{"contract_id": "10012562", "option_name": "南方中证500ETF期权"}` ← 推荐
+    - `{"symbol": "P2611M06250", "option_name": "南方中证500ETF期权"}`
+      （ETF 标准码跨标的会撞，`option_name` **必须**带，否则可能取到别的标的）
+
+    `end_month` 留空时按字典的 `expire_year_month` 自动推；商品期权恒 `ALL`。
     """
-    meta = _opt_meta_by_name(req.option_name)
-    underlying = _canon_underlying(req.underlying_symbol) or meta["underlying_symbol"]
-    und_key = req.und_key or _OPT_UND_KEY.get(underlying)
-    if not und_key:
-        raise HTTPException(status_code=400,
-                            detail=f"无法从标的 {underlying} 推出 und_key，请显式指定（csi300/csi500etf/au）")
-    sym = option_market.normalize_symbol(req.symbol)
-    if not sym:
-        raise HTTPException(status_code=400, detail="symbol 不能为空")
+    meta = _opt_meta_by_name(req.option_name)          # 品种表校验（未知品种 400）
+    if option_info.resolve(req.option_name) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"品种「{req.option_name}」未在品种台账（Config.MAP_OPTION_LEDGER）登记，"
+                   f"无法确定 und_key / 保证金公式族。加品种见 option_info.py 的「三步」说明")
 
-    is_commodity = meta["option_type"] == "商品期权"
-    end_month = req.end_month or None
-    if is_commodity:
+    # ---- ① 在字典里解析合约：合同必须真实存在 ----
+    if req.contract_id:
+        info = option_info.lookup_contract(req.contract_id)
+        if info is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"合约字典里没有 contract_id={req.contract_id}，"
+                       f"请先刷新合约字典（POST /bds/option-info/sync）")
+        owner = option_info.option_name_of(info["product_id"], info["underlying_contract_id"])
+        if owner != req.option_name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"contract_id={req.contract_id} 属于「{owner}」，"
+                       f"与传入的「{req.option_name}」不符")
+        sym = info["symbol"]
+    else:
+        if not req.symbol:
+            raise HTTPException(
+                status_code=400,
+                detail="必须给 contract_id 或 symbol（推荐 contract_id：从合约字典页勾选）")
+        sym = option_market.normalize_symbol(req.symbol)
+        if not sym:
+            raise HTTPException(status_code=400, detail="symbol 不能为空")
+        info = option_info.lookup_symbols([sym], option_name=req.option_name).get(sym)
+        if info is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"合约字典里查不到 {sym}（品种={req.option_name}），"
+                       f"请先刷新合约字典（POST /bds/option-info/sync）")
+
+    # ---- ② end_month：商品恒 ALL，其余留空按字典到期年月推 ----
+    if meta["option_type"] == "商品期权":
         end_month = "ALL"          # 接口一次返回全部到期月，填实际月份会造成误解
-    elif not end_month:
-        raise HTTPException(status_code=400,
-                            detail=f"{req.option_name} 必须指定 end_month（接口按到期月拉取）")
-    if end_month and end_month != "ALL" and (len(end_month) != 6 or not end_month.isdigit()):
-        raise HTTPException(status_code=400, detail=f"end_month 格式应为 YYYYMM：{end_month}")
+    else:
+        end_month = req.end_month or info["expire_year_month"]
+        if not end_month:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{req.option_name} 必须指定 end_month，且字典里也没有到期年月")
+        if len(end_month) != 6 or not end_month.isdigit():
+            raise HTTPException(
+                status_code=400, detail=f"end_month 格式应为 YYYYMM：{end_month}")
 
     exists = db.query(OptionConfig).filter(OptionConfig.symbol == sym).first()
     if exists:
-        raise HTTPException(status_code=400, detail=f"该合约已在清单里：{sym}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"该合约已在清单里：{sym}（品种 {exists.option_name}）")
 
     row = OptionConfig(
         symbol=sym,
         broker_symbol=req.broker_symbol,
-        underlying_symbol=underlying,
-        und_key=und_key,
         option_name=req.option_name,
         end_month=end_month,
         is_enabled=req.is_enabled,
         source="manual",
         note=req.note,
-        # 规格字段：可留空（观察型合约只看行情），同步时会自动回填。
-        # margin_type 是品种属性，没显式传就按品种派生，省一次手工填写。
-        cp=req.cp.upper() if req.cp else None,
-        strike=req.strike,
-        multiplier=req.multiplier,
-        margin_type=req.margin_type or option_market.margin_type_of(req.option_name),
-        expiry_date=req.expiry_date,
     )
     db.add(row)
     db.commit()
     db.refresh(row)
-    return row
+    return _config_out(row, info)
 
 
 @router.put("/option-config/{cfg_id}", response_model=OptionConfigOut)
 def update_option_config(cfg_id: int, req: OptionConfigUpdate, db: Session = Depends(get_db)):
-    """改人工列（启用开关 / 备注 / 合约规格）。身份字段（symbol / 标的 / 到期月）不可改。
+    """改人工列（启用开关 / 备注）。**别的什么都改不了**。
+
+    - 身份字段（`symbol` / `option_name` / `end_month`）：改了就是另一个合约
+      ⇒ 先 DELETE 再 POST，别在原地改
+    - 规格字段（`cp` / `strike` / `multiplier` / `margin_type` / `expiry_date`）：
+      **物理上已不存在于本表**，权威在 `bds_option_info`。要修它只有一条路——
+      刷新字典（`POST /bds/option-info/sync`）。人工修正恰是历史上填错到期日的成因
+      （`au2612P840` 手填 11-23，权威值 11-24），这条通道已关闭。
 
     ⚠️ **一律 None 视为「不改」**，绝不做全字段覆盖 —— 前端只改一个字段就只发一个，
     否则会把没传的列清空（这是 PUT 全字段覆盖踩过的坑）。
-    规格字段可人工修正：历史上 `au2612P840` 到期日确实手填错过（11-23，实为 11-24）。
     """
     row = db.query(OptionConfig).filter(OptionConfig.id == cfg_id).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"配置不存在：{cfg_id}")
-    for field in ("is_enabled", "note", "strike", "multiplier",
-                  "margin_type", "expiry_date"):
-        value = getattr(req, field)
-        if value is not None:
-            setattr(row, field, value)
-    if req.cp is not None:
-        row.cp = req.cp.upper()
+    if req.is_enabled is not None:
+        row.is_enabled = req.is_enabled
+    if req.note is not None:
+        row.note = req.note
     db.commit()
     db.refresh(row)
-    return row
+    return _config_out(row, _info_map_for([row]).get(row.symbol))
 
 
 @router.delete("/option-config/{cfg_id}")
@@ -2757,72 +3031,3 @@ def delete_option_config(cfg_id: int, db: Session = Depends(get_db)):
     db.delete(row)
     db.commit()
     return {"status": "ok", "message": f"已删除配置 {row.symbol}（行情历史保留）"}
-
-
-@router.post("/option-config/backfill-spec", response_model=OptionConfigBackfillResult)
-def backfill_option_config_spec(db: Session = Depends(get_db)):
-    """从行情快照补全 config 中为空的合约规格（兜底路径）。
-
-    ⚠️ **原 `POST /option-config/import-holding` 已随合并下线**（2026-10-26）：
-    它的唯一职责是把 `bds_option_contract`（合约字典）的行搬进同步清单，而合并后
-    字典就是清册本身，不存在"搬"这个动作。需要恢复"从持仓自动建行"时必须另找
-    持仓源——`bills_group` 属跨应用依赖，已明确不走；正确方向是从行情接口选合约。
-
-    规格字段允许为空（观察型合约只看行情、不算风险），补全有两条路径：
-
-    ① **自动**：同步时 `_sync_group` 拿到接口原文后顺手回填（常态，无需触发本端点）；
-    ② **手工**：本端点从 `bds_option_market` 最新快照补（兜底场景：config 行是
-       后来用 SQL 或 API 加的，而行情早已同步过）。
-
-    **只填空值、绝不覆盖已有值** —— 已有值可能是人工修正过的（`au2612P840` 到期日
-    曾被误填 `11-23`，权威算法给 `11-24`）。`margin_type` 不来自行情，按品种名派生。
-    """
-    filled, skipped, no_data = 0, 0, []
-
-    # 一次取全部合约的最新快照：按 (symbol, trade_date) 升序遍历，后写覆盖前写
-    latest: dict[str, OptionMarket] = {}
-    for m in db.query(OptionMarket).order_by(
-            OptionMarket.symbol.asc(), OptionMarket.trade_date.asc()).all():
-        latest[m.symbol] = m
-
-    for cfg in db.query(OptionConfig).all():
-        gaps = [f for f in ("cp", "strike", "multiplier", "expiry_date")
-                if getattr(cfg, f) is None]
-        need_mt = cfg.margin_type is None
-        if not gaps and not need_mt:
-            skipped += 1
-            continue
-
-        changed = False
-        if gaps:
-            m = latest.get(cfg.symbol)
-            if m is None:
-                no_data.append({"symbol": cfg.symbol,
-                                "reason": "无行情快照，请先执行一次行情同步"})
-                continue
-            if "cp" in gaps and m.option_type:
-                cfg.cp = "C" if str(m.option_type).lower().startswith("c") else "P"
-                changed = True
-            if "strike" in gaps and m.price_strike is not None:
-                cfg.strike = m.price_strike
-                changed = True
-            if "multiplier" in gaps and m.multiplier is not None:
-                cfg.multiplier = m.multiplier
-                changed = True
-            if "expiry_date" in gaps and m.delisted_date is not None:
-                cfg.expiry_date = m.delisted_date
-                changed = True
-
-        if need_mt:
-            mt = option_market.margin_type_of(cfg.option_name)
-            if mt:
-                cfg.margin_type = mt
-                changed = True
-
-        if changed:
-            filled += 1
-        else:
-            no_data.append({"symbol": cfg.symbol, "reason": "快照缺必要字段，无法补全"})
-
-    db.commit()
-    return {"filled": filled, "skipped": skipped, "no_data": no_data}

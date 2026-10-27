@@ -19,10 +19,12 @@ docs/持仓风险敞口与情景压力测试方案_2026-10-25.md），三个入�
 """
 import math
 from datetime import date
+from typing import Optional
 
 from sqlalchemy import func
 
-from server_fast.app.bds.models import OptionConfig
+from server_fast.app.bds.models import OptionConfig, OptionInfo
+from server_fast.app.bds.services.market_data import option_market, option_info
 from server_fast.app.bills.models import (
     Group,
     GroupAcc,
@@ -53,6 +55,32 @@ FUT_UND_KEY = {"IC": "csi500", "IF": "csi300", "IH": "csi300", "IM": "csi500", "
 
 # 证券代码 → 情景分组键（其余证券默认 astock）
 SEC_UND_KEY = {"513100": "nasdaq", "510500": "csi500etf", "510300": "csi300", "159919": "csi300"}
+
+
+def _pick_info(rows: list, product_id: Optional[str],
+               underlying: Optional[str]) -> Optional[OptionInfo]:
+    """从「同一标准码的多行」里挑出正确的那一行字典记录。
+
+    为什么会有多行：ETF 标准码沿用交易所「合约简称」口径、**不含标的 6 位**，
+    而 9 个 ETF 标的的行权价区间大量重叠（`C2612M01350` 同时属于 588000 科创50
+    与 588080 科创板50，全量实测 422 组同码）。所以必须按（品种ID → 标的）
+    两级消歧，只按 symbol 取会拿到别的标的的乘数与行权价。
+
+    两级都是「有匹配才收窄」：未登记品种没有 product_id 时退回全量候选，
+    最后取最后交易日最新的一条（同一品种同一到期月通常唯一）。
+    """
+    cands = list(rows)
+    if not cands:
+        return None
+    if product_id:
+        narrowed = [r for r in cands if r.product_id == product_id]
+        if narrowed:
+            cands = narrowed
+    if underlying and len(cands) > 1:
+        narrowed = [r for r in cands if r.underlying_contract_id == underlying]
+        if narrowed:
+            cands = narrowed
+    return max(cands, key=lambda r: r.last_trade_date)
 
 
 def _norm_cdf(x: float) -> float:
@@ -113,14 +141,21 @@ def load_context() -> dict:
                 "fin": diff_br,
             }
 
-        # 合约规格：2026-10-26 起 bds_option_contract 已并入 bds_option_config（三表变两表）。
+        # 同步清单：账单原始码 → 配置行（只用来判断「这张合约要不要算」，不再承载规格）
         # ⚠️ key 必须用 broker_symbol（账单原始码）而不是 symbol：
         #    bills_group.symbol 是账单口径（`CFFEX.IO2611-P-4000`），
         #    而 config.symbol 是交易所标准码（`IO2611-P-4000`），直接比会一个都匹配不上。
         #    broker_symbol 为空的（手工新增的观察合约）退回 symbol 兜底。
-        contracts = {
-            (c.broker_symbol or c.symbol): c for c in db.query(OptionConfig).all()
-        }
+        cfg_rows = db.query(OptionConfig).all()
+        contracts = {(c.broker_symbol or c.symbol): c for c in cfg_rows}
+        # 合约规格：从 `bds_option_info` 取（乘数 / 行权价 / 到期日的权威源）。
+        # 2026-10-27 起不再读 bds_option_config 的规格列 —— 那是手填/同步回填的副本，
+        # A 类乘数与 2027 到期日都拿不到（详见 docs/bds期权合约字典方案_2026-10-27.md）。
+        info_by_symbol: dict[str, list[OptionInfo]] = {}
+        if cfg_rows:
+            for r in (db.query(OptionInfo)
+                      .filter(OptionInfo.symbol.in_({c.symbol for c in cfg_rows})).all()):
+                info_by_symbol.setdefault(r.symbol, []).append(r)
 
         # 在仓持仓（account='合计' 是聚合行，必须排除）
         pos_rows = (
@@ -135,29 +170,43 @@ def load_context() -> dict:
                 accounts[g.account] = {"system_net": 0.0, "fin": 0.0}
             qty = int(g.p_total)
             price = float(g.price or 0)
-            if g.category == "期权":
+            # ⚠️ 必须用**前缀**匹配：库里 category 实值是「期权交易 / 期货交易 / 证券交易」，
+            #    精确比 "期权" 会让 6 张期权 + 1 张 IC 期货全部落进证券分支，且**跑完不报错**
+            #    （bills_scenario_grid 从落盘起一直是 0 行，2026-10-27 才查出这个原因）。
+            if g.category.startswith("期权"):
                 c = contracts.get(g.symbol)
                 if c is None:
                     raise ValueError(
                         f"期权 {g.symbol} 不在同步清单里（bds_option_config），拒绝估算"
                     )
-                # 规格字段允许为空（观察型合约只看行情、不算风险），但算风险必须齐全。
-                # 缺了直接报错而不是按 0/None 往下走 —— 宁可算不出，不可算错。
-                missing = [f for f in ("strike", "multiplier", "margin_type", "expiry_date")
-                           if getattr(c, f) is None]
-                if missing:
+                entry = option_info.resolve(c.option_name) or {}
+                spec = _pick_info(info_by_symbol.get(c.symbol, []),
+                                  entry.get("product_id"), entry.get("ctp_underlying"))
+                if spec is None:
                     raise ValueError(
-                        f"期权 {g.symbol} 的合约规格不完整（缺 {', '.join(missing)}）："
-                        f"请补全 bds_option_config，或调用 POST /bds/option-config/backfill-spec"
+                        f"期权 {g.symbol} 在合约字典（bds_option_info）里找不到："
+                        f"请先点「刷新字典」（POST /bds/option-info/sync）再重算"
+                    )
+                # 保证金公式族与情景分组键都是**品种级**派生（同品种内所有合约一致），
+                # 不该逐合约存一份 —— 2026-10-27 起 bds_option_config 已物理删掉这两列，
+                # 唯一来源是品种台账 + margin_type_of()。
+                mtype = option_market.margin_type_of(c.option_name)
+                und_key = entry.get("und_key")
+                if not mtype or not und_key:
+                    raise ValueError(
+                        f"期权 {g.symbol} 的品种「{c.option_name}」未在品种台账"
+                        f"（Config.MAP_OPTION_LEDGER）登记，无法确定保证金公式族/情景分组"
                     )
                 positions.append({
                     "kind": "put", "acct": g.account, "name": g.symbol,
-                    "mult": int(c.multiplier), "qty": qty, "K": float(c.strike),
+                    # 乘数与行权价**必须成对取自字典**：A 类是 10180 + 7.367，
+                    # 与品种默认的 10000 + 7.367 混用会差 1.8% 市值。
+                    "mult": int(spec.multiplier), "qty": qty, "K": float(spec.strike),
                     "cost": abs(float(g.cost_total or 0)),  # 卖 put 成本记负，取绝对值
-                    "mtype": c.margin_type, "und_key": c.und_key,
-                    "expiry": c.expiry_date, "symbol": g.symbol,
+                    "mtype": mtype, "und_key": und_key,
+                    "expiry": spec.last_trade_date, "symbol": g.symbol,
                 })
-            elif g.category == "期货":
+            elif g.category.startswith("期货"):
                 root = g.symbol.split(".")[-1].rstrip("0123456789")
                 und_key = FUT_UND_KEY.get(root, root)
                 mrate = params.get((f"{g.symbol.split('.')[0]}.{root}", "margin_rate"))
@@ -298,9 +347,15 @@ def run(ctx: dict, mode: str, drop: float) -> dict:
         eq = n + accs[a]["fin"]
         real = margin[a] / n if n > 0 else None
         exch = margin[a] / eq if eq > 0 else None
+        # 空账户（无持仓、无保证金、净值为 0）不参与追保判定。
+        # 🔴 既有缺陷：原来 n<=0 一律判 breached，而 bills_group_acc 里有 5 个从未
+        # 使用过的账户（B01/B02/B03/M01/N01，acc_aset=0）⇒ 它们常驻 True，
+        # 进而把 ALL 行的 `any(breached)` 也带成 True。实测 0% 跌幅下组合真实风险度
+        # 只有 0.66、交易所口径也远未到 1，却被判「已追保」。
+        is_idle = (margin[a] == 0 and n == 0)
         out["accounts"][a] = {
             "net": n, "eq": eq, "margin": margin[a], "real": real, "exch": exch,
-            "breached": (n <= 0) or (exch is not None and exch >= 1.0),
+            "breached": (not is_idle) and (n <= 0 or (exch is not None and exch >= 1.0)),
         }
     return out
 
@@ -365,10 +420,18 @@ def compute() -> dict:
         rows = {}
         for d in STEPS:
             r = run(ctx, mode, d)
+            # 全局行也要有 exch（交易所口径风险度）。
+            # 🔴 这是既有缺陷的修复：原来 ALL 行只给 real 不给 exch，而
+            # `run_and_persist` 对每一行都取 x["exch"] ⇒ KeyError: 'exch'。
+            # 只因 category 精确匹配缺陷让 compute() 从未产出过有效 grid，
+            # 这条路径一直没被走到（2026-10-27 修好 category 后才暴露）。
+            eq_total = sum(x["eq"] for x in r["accounts"].values())
             row = {"ALL": {
                 "loss": round(r["loss"], 2), "net": round(r["net"], 2),
                 "margin": round(r["margin"], 2),
-                "real": r["real"], "breached": any(
+                "real": r["real"],
+                "exch": (r["margin"] / eq_total if eq_total > 0 else None),
+                "breached": any(
                     x["breached"] for x in r["accounts"].values()),
             }}
             # 分账户 loss = net0[a] − 情景后净值（run 按账户返回净值，反推亏损）
