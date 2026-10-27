@@ -9,11 +9,39 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import BigInteger, JSON, Date, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    JSON,
+    Date,
+    DateTime,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    event,
+    select,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
 from server_fast.common.models import BaseModel
+
+
+def _on_insert_update(model):
+    """装饰器：把函数同时注册为 model 的 before_insert + before_update 钩子。
+
+    在 flush 前对 target 实例赋值计算字段（与 `app/irs/models.py` 同款机制；
+    两边各持一份是因为 bds 不得反向依赖 irs，而这段实现只有 4 行）。
+    """
+
+    def decorator(fn):
+        event.listens_for(model, "before_insert")(fn)
+        event.listens_for(model, "before_update")(fn)
+        return fn
+
+    return decorator
 
 
 class SymbolInfo(Base, BaseModel):
@@ -1044,11 +1072,16 @@ class OptionMarket(Base, BaseModel):
     ⚠️ ETF 接口的「数量」列恒等于返回行数（实测 26 行 → 全部为 26），不是成交量，故
     ETF 的 `volume`/`open_interest` 一律 NULL。
 
-    **为什么 `price_strike` / `value_i` / `value_t` 仍留在本表**：它们记的是「当日事实」。
-    按「可派生即删」的口径它们也能从 info 现算，但 A 类调整合约的 `strike` 在标的除权后
-    会被交易所改写 ⇒ 现算会让**历史行的内在价值跟着变**，这是删列方案里唯一真正的
-    信息损失点。`delisted_date` / `days_left` 则留得没必要（到期日一旦定下就不变），
+    **为什么 `price_strike` 仍留在本表**：它记的是「当日事实」。按「可派生即删」的
+    口径它也能从 info 现算，但 A 类调整合约的 `strike` 在标的除权后会被交易所改写
+    ⇒ 现算会让**历史行的内在价值跟着变**，这是删列方案里唯一真正的信息损失点。
+    `delisted_date` / `days_left` 则留得没必要（到期日一旦定下就不变），
     改成按 `info.last_trade_date` 现算。
+
+    **value_i / value_t 的口径（2026-10-27「修法 B」拍板）**：与 atm_i / ratio_*
+    同属**计算值**，由模型钩子在每次写入（含历史行重刷）时重算，value_t 始终跟随
+    最新 price——与「事实列」（price_ud / volume，历史行冻结）刻意分开。
+    老规则「历史行衍生字段不覆盖」就此废止。
 
     **`symbol` 同理删掉**（同日第二轮）：它只是「展示/模糊搜索」用，值和
     `bds_option_info.symbol` 逐行相同（实测 11 行零差异），存两份只会两头漂移。
@@ -1073,9 +1106,19 @@ class OptionMarket(Base, BaseModel):
     price_ud: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 4), nullable=True, comment="标的价（同标的同交易日唯一）")
     value_i: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, comment="内在价值（当日事实，不随 info 变）")
+        Numeric(12, 4), nullable=True, comment="内在价值（钩子落库时计算，每次写入重算）")
     value_t: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, comment="时间价值（当日事实，不随 info 变）")
+        Numeric(12, 4), nullable=True, comment="时间价值（钩子落库时计算，每次写入重算；可为负）")
+    atm_i: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(9, 2), nullable=True, comment="平值(%)（钩子落库时计算）")
+    ratio_t: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(9, 2), nullable=True, comment="时间(%)（钩子落库时计算）")
+    ratio_i: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(9, 2), nullable=True, comment="内在(%)（钩子落库时计算）")
+    ratio_t_y: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(9, 2), nullable=True, comment="时间(%Y)（钩子落库时计算）")
+    ratio_i_y: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(9, 2), nullable=True, comment="内在(%Y)（钩子落库时计算）")
     delta_opt: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(10, 6), nullable=True, comment="delta（仅商品期权，认沽为负）")
     volume: Mapped[Optional[int]] = mapped_column(
@@ -1099,7 +1142,56 @@ class OptionMarket(Base, BaseModel):
     unique_keys = ["contract_id", "trade_date"]
 
     def __str__(self) -> str:
-        return f"{self.symbol}@{self.trade_date}"
+        return f"{self.contract_id}@{self.trade_date}"
+
+
+@_on_insert_update(OptionMarket)
+def _compute_option_market(mapper, connection, target):
+    """OptionMarket 衍生字段计算（落库时自动算，任何写路径都触发）。
+
+    计算口径的唯一实现在 `services/market_data/option_derived.py`（irs OptionMonitor
+    钩子已改为委托同一实现，2026-10-27 起两表口径强一致）。
+
+    本表没有 option_type / days_left 物理列（10-27 瘦身删了），按 contract_id 现查
+    `bds_option_info` 补齐：
+    - option_type ← info.cp（C/P → call/put）
+    - days_left   ← info.last_trade_date − target.trade_date（快照 as-of 口径；
+      当日快照下与 irs 的「到期日 − today」相等，历史行不随今天流逝而变）
+
+    字典缺行 ⇒ 七个衍生字段全部清空 —— 与读路径 `info_missing` 的处理一致，
+    宁可空也不猜。`option_type` / `days_left` 以普通 Python 属性挂在实例上
+    （无对应列，不会入库），仅作为共享函数的输入。
+
+    口径（2026-10-27「修法 B」用户拍板）：衍生字段是**计算值**，每次写入都重算，
+    历史行被重刷时 value_t 跟随最新 price——冻结的只是「事实列」（price_ud /
+    volume，服务层 `_TODAY_ONLY_COLS` 保护）。计算值与事实刻意的双轨，不要"顺手
+    统一"：统一成冻结会让 value_t 停在过期价上，统一成重算会让盘前同步把今日
+    price_ud 贴到昨日行上（10-27 08:04 事故）。
+
+    ⚠️ 延迟导入：本模块不能在顶层 import services —— `services/market_data/__init__`
+    会拉起全部子模块、它们又 import 本模块，顶层导入必循环。flush 时一切已加载，安全。
+    """
+    from server_fast.app.bds.services.market_data.option_derived import (  # noqa: E402
+        DERIVED_FIELDS,
+        compute_option_derived,
+    )
+
+    row = connection.execute(
+        select(OptionInfo.cp, OptionInfo.last_trade_date)
+        .where(OptionInfo.contract_id == target.contract_id)
+    ).first()
+    if row is None or row.cp is None or row.last_trade_date is None or target.trade_date is None:
+        for f in DERIVED_FIELDS:
+            setattr(target, f, None)
+        return
+    target.option_type = {"C": "call", "P": "put"}.get(row.cp)
+    if target.option_type is None:
+        # cp 异常（字典侧只该有 C/P，防御性兜底）：无法判方向 ⇒ 全清空，不猜成 put
+        for f in DERIVED_FIELDS:
+            setattr(target, f, None)
+        return
+    target.days_left = (row.last_trade_date - target.trade_date).days
+    compute_option_derived(target)
 
 
 class BdsTableStat(Base, BaseModel):

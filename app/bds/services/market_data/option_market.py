@@ -63,10 +63,16 @@ _SHFE_HEADERS = {"User-Agent": "Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)"}
 _SHFE_SUMMARY_IDS = {"", "小计", "合计", "总计"}
 
 # 只有「当日快照」才写的列。历史快照新增行留空、已存在的行不覆盖：
-# - `price_ud`/`value_i`/`value_t`：由「同步时点标的现价」派生，对历史行无意义
+# - `price_ud`：同步时点的标的现价，对历史行无意义（衍生字段由模型钩子从它派生，
+#   2026-10-27 起服务层不再直接写衍生字段）
 # - `volume`：当日**累计**成交量，盘前取到的恒为 0（实测 2026-10-27 08:07 盘前同步
 #   把 10-26 的 IO 成交量 1431/2527/4587 全刷成 0），历史行必须保留原值
-_TODAY_ONLY_COLS = ("price_ud", "value_i", "value_t", "volume")
+#
+# ⚠️ value_i / value_t **不在**本元组（2026-10-27 用户拍板「修法 B」）：衍生字段由
+# 模型钩子在每次写入（含历史行重刷）时重算，value_t 始终跟随最新 price。
+# 这有意与「历史行不覆盖」的老规则分开——衍生字段是**计算值**，重算即最新口径；
+# 冻结的只该是「事实」（price_ud / volume）。规则手册该条已同步修订。
+_TODAY_ONLY_COLS = ("price_ud", "volume")
 
 
 class ShfeDataNotReady(Exception):
@@ -504,7 +510,6 @@ def _sync_group(session, option_name: str, end_month: str,
                     continue
                 code = raw
                 ym = m.group("ym")
-                cp = m.group("cp")
                 strike = _dec(m.group("k"))
                 und_symbol = f"{underlying_symbol}{ym}"  # SHFE.au2612
                 em = f"20{ym}"
@@ -522,7 +527,6 @@ def _sync_group(session, option_name: str, end_month: str,
                     _bump("合约代码格式不符")
                     continue
                 ym = parts[0][-4:]                          # IO2611 → 2611
-                cp = parts[1]
                 strike = _dec(parts[2])
                 und_symbol = underlying_symbol
                 em = f"20{ym}"
@@ -539,7 +543,6 @@ def _sync_group(session, option_name: str, end_month: str,
                 if not _ETF_CODE_RE.match(raw):
                     _bump("合约代码格式不符")
                     continue
-                cp = code[0]
                 ym = code[1:5]
                 strike = _dec(row.get("行权价"))
                 und_symbol = meta["underlying_symbol"]
@@ -562,9 +565,6 @@ def _sync_group(session, option_name: str, end_month: str,
             if strike is None or strike <= 0:
                 _bump("行权价为空或<=0")
                 continue
-
-            # 方向只用于算内在价值（本表已不存 option_type，出参由 info.cp 派生）
-            option_type = "call" if cp.upper() == "C" else "put"
 
             # 规格（乘数 / 到期日 / 合约身份）**只能**取字典：10-27 瘦身后
             # `bds_option_market` 不再存 `multiplier` / `delisted_date` / `und_key` 等副本，
@@ -593,13 +593,10 @@ def _sync_group(session, option_name: str, end_month: str,
                 # 宁可留空让人知道「这一列没回补」，也不能填 0 假装当天无成交。
                 volume = None
 
-            value_i = None
-            value_t = None
-            if ud is not None:
-                intrinsic = (strike - ud) if option_type == "put" else (ud - strike)
-                value_i = intrinsic if intrinsic > 0 else Decimal("0")
-                tv = price - value_i
-                value_t = tv if tv > 0 else Decimal("0")
+            # value_i / value_t / atm_i / ratio_* 不在这里算：模型钩子
+            # （models._compute_option_market）在 flush 前统一按
+            # services/market_data/option_derived.py 的唯一口径计算，
+            # 服务层再算一份必然漂移。这里只负责把「原始输入」（price_ud 等）写进对象。
 
             parsed.append(dict(
                 # 唯一身份：contract_id。标准码**不入库**（与 bds_option_info.symbol 完全重复，
@@ -611,8 +608,6 @@ def _sync_group(session, option_name: str, end_month: str,
                 pre_settle=pre_settle,
                 settle=settle,
                 price_ud=ud,
-                value_i=value_i,
-                value_t=value_t,
                 delta_opt=delta,
                 volume=volume,
                 open_interest=oi,

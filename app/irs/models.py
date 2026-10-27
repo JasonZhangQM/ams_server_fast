@@ -26,6 +26,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
 from server_fast.common.models import BaseModel
+# 期权衍生字段唯一实现（bds 侧；irs → bds 是允许的依赖方向）
+from server_fast.app.bds.services.market_data.option_derived import compute_option_derived
 
 
 def _on_insert_update(model):
@@ -243,44 +245,17 @@ def _compute_value_monitor(mapper, connection, target):
 
 @_on_insert_update(OptionMonitor)
 def _compute_option_monitor(mapper, connection, target):
-    """OptionMonitor 计算逻辑：
-    - days_left = (delisted_date - today).days
-    - multiplier 直接存储，不计算（原 value_per 计算已移除）
-    - atm_i/value_i/value_t/ratio_t/ratio_i/ratio_t_y/ratio_i_y 基于本表字段计算
+    """OptionMonitor 计算逻辑（2026-10-27 起改为委托 bds 唯一实现）。
+
+    原先这里抄了 40 行公式（atm_i/value_i/value_t/ratio_*），与 bds_option_market
+    的模型钩子完全重复、必然漂移。现在：
+    - days_left = 到期日 − today（**irs 专属口径**：监测表随时点变化，
+      与 bds 行情表的 as-of 口径不同，所以留在本钩子里算）
+    - 七个衍生字段全部委托 `bds.services.market_data.option_derived.compute_option_derived`
+      （irs → bds 是允许的依赖方向；bds → irs 禁止，所以实现只能放 bds）
     """
-    # 来自 SymbolOption 钩子（仅 days_left，multiplier 直存不计算）
     target.days_left = (target.delisted_date - date.today()).days
-    # price_ud 或 price 为 None 时（如 gm 终端不可用），跳过衍生计算避免除以 None
-    if target.price_ud is None or target.price is None:
-        target.atm_i = None
-        target.value_i = None
-        target.value_t = None
-        target.ratio_t = None
-        target.ratio_i = None
-        target.ratio_t_y = None
-        target.ratio_i_y = None
-        return
-    # 来自 MonitorOption 钩子（option.xxx 改为 target.xxx，直接读本表字段）
-    target.atm_i = (target.price_strike / target.price_ud - Decimal("1")) * Decimal("100")
-    # 内在价值：认购/认沽方向不同
-    if target.option_type == OptionMonitor.OPTION_TYPE_CALL:
-        # 认购：行权价 > 标的现价时内在为 0，否则 = 标的现价 - 行权价
-        target.value_i = Decimal("0") if target.price_strike > target.price_ud else target.price_ud - target.price_strike
-    else:
-        # 认沽：行权价 < 标的现价时内在为 0，否则 = 行权价 - 标的现价
-        target.value_i = Decimal("0") if target.price_strike < target.price_ud else target.price_strike - target.price_ud
-    # 时间价值 = 现价 - 内在价值
-    target.value_t = target.price - target.value_i
-    # 时间/内在价值占行权价百分比
-    target.ratio_t = (target.value_t / target.price_strike) * Decimal("100")
-    target.ratio_i = (target.value_i / target.price_strike) * Decimal("100")
-    # 年化百分比（剩余天数为 0 时置 0，避免除零）
-    if target.days_left != 0:
-        target.ratio_t_y = target.ratio_t * Decimal("365") / target.days_left
-        target.ratio_i_y = target.ratio_i * Decimal("365") / target.days_left
-    else:
-        target.ratio_t_y = Decimal("0")
-        target.ratio_i_y = Decimal("0")
+    compute_option_derived(target)
 
 
 @_on_insert_update(DiscountMonitor)
