@@ -42,7 +42,7 @@ class Config:
         '深圳': 'SZQQ',
         '中金所': 'CFFEX',
         '大商所': 'DEX',
-        '上期所': 'SHEX',
+        '上期所': 'SHFE',
         '郑商所': 'CZCE',
         '广期所': 'GFEX',
         '上海能源': 'INE',

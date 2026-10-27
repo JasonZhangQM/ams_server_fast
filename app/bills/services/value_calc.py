@@ -47,7 +47,7 @@ def value_float(df, current_data, multiplier):
     return df
 
 # 获取期货实时行情（通过 AkShare）
-# 解析数据库 symbol（如 SHEX.au2608），逐个调用 AkShare 接口获取实时价格
+# 解析数据库 symbol（如 SHFE.au2608），逐个调用 AkShare 接口获取实时价格
 # 返回格式：[{symbol: 数据库原始symbol, price: current_price}]
 def fetch_futures_realtime_prices(df_futures):
     # 传入 DataFrame 为空时直接返回空列表

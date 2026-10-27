@@ -83,7 +83,7 @@ RESEARCH = {
         "价格距「低」档仅 +1.8%。"
     ),
     "research_log": (
-        "【持仓沿革】本持仓非主动建仓：由 SHEX.au2606P1040 卖 put 被行权被动持有，初始成本 1040，随后滚动换月至 au2612。"
+        "【持仓沿革】本持仓非主动建仓：由 SHFE.au2606P1040 卖 put 被行权被动持有，初始成本 1040，随后滚动换月至 au2612。"
         "三次向下滚仓把成本线写成 1040 → 998.82 → 880.94 → 909.26，产生约 −13.96 万已实现亏损。"
         "⚠️ 因此本合约成本 909.26 只代表本合约，全链真实回本价 = 1002.6 元/克（国际金约 4,620，已高于五档「中」4,500），"
         "复盘时不要用被重置的成本自我安慰。\n\n"
@@ -93,7 +93,7 @@ RESEARCH = {
         "【阶段记录 2026-10-22】浮亏 −27,821（−3.06%）。9-28 建仓后 16 个交易日内价格从 909.26 回落至 881.46，"
         "属研究已提示的「高位横盘 / 均值回归」情景，四条证伪条件均未触发。当前价距「低」档仅 +1.8%。"
         "黄金逻辑交易累计亏损 12 万（含期权权利金抵消、期货持仓亏损）。\n\n"
-        "【迁移说明】整理自 bills_group_symbol 旧笔记（SHEX.au2612 行，2026-10-22 19:28 写入），原文备份于 "
+        "【迁移说明】整理自 bills_group_symbol 旧笔记（SHFE.au2612 行，2026-10-22 19:28 写入），原文备份于 "
         "backup/vm_v3_20261023/bills_group_symbol.json。"
     ),
 }
@@ -103,19 +103,19 @@ RESEARCH = {
 # 由 reason 承载（下单时按当时价格选），否则会写出不存在的合约代码。
 PLANS = [
     dict(seq=1, b_s="卖", o_c="开", trigger_op="lte", trigger_ref="pp_l", trigger_price=None,
-         trade_symbol="SHEX.au2612P840",
+         trade_symbol="SHFE.au2612P840",
          reason="「低」档附近：每月滚动卖 put（虚值 5% 以上）等待被动加仓；行权价按当时价格选，此处记录当前执行档 au2612P840。"),
     dict(seq=2, b_s="买", o_c="开", trigger_op="lte", trigger_ref="pp_el", trigger_price=None,
-         trade_symbol="SHEX.au2612",
+         trade_symbol="SHFE.au2612",
          reason="「极低」档：主动加仓（买期货或卖 put 接货），加仓后须重算全链回本价，勿只看本合约成本。"),
     dict(seq=3, b_s="卖", o_c="开", trigger_op="gte", trigger_ref=None, trigger_price=1040,
-         trade_symbol="SHEX.au2612",
+         trade_symbol="SHFE.au2612",
          reason="价格回到 1040（初始成本线）附近：滚动卖 call 增厚收益，行权价 ≥ 成本价并留 5% 以上虚值，下单时选具体行权价。"),
     dict(seq=4, b_s="卖", o_c="平", trigger_op="gte", trigger_ref="pp_h", trigger_price=None,
-         trade_symbol="SHEX.au2612",
+         trade_symbol="SHFE.au2612",
          reason="「高」档：平掉期货多头，改买 call 博后续上涨——用有限权利金代替线性敞口，避免高位回落吃掉本金。"),
     dict(seq=5, b_s="卖", o_c="平", trigger_op="gte", trigger_ref="pp_eh", trigger_price=None,
-         trade_symbol="SHEX.au2612",
+         trade_symbol="SHFE.au2612",
          reason="「极高」档：清空敞口等回调；若仍想保留参与感，少量买 put / 买 call 而非继续持有期货。"),
 ]
 
@@ -131,12 +131,12 @@ INVALIDATE = dict(
 # 交易笔记：原 au2611P880.review（滚动调仓理由）+ 513100.logic（无标可挂，暂存成交）
 BILL_NOTES = [
     dict(bill_id=2919, kind="想法", note_at="2026-10-22 19:33:54",
-         expect_symbol="SHEX.au2611P880",
+         expect_symbol="SHFE.au2611P880",
          content=("［原 au2611P880.review，2026-10-22 记］平掉 880 的理由：判断很可能还有下行空间，决定向下移动开仓位置；"
                   "且若 880 被动行权，需要增加保证金并卖 call 增厚，而当前含股票与股指期货整体浮亏严重、增量资金有限。"
                   "（原文写「滚动调仓至 au2611P840」，实际成交为平 au2611P880 @3.52、开 au2612P840 @5.86，月份已按成交订正）")),
     dict(bill_id=2920, kind="想法", note_at="2026-10-22 19:33:54",
-         expect_symbol="SHEX.au2612P840",
+         expect_symbol="SHFE.au2612P840",
          content=("［同上，2026-10-22 记］新开 au2612P840 卖 put 的理由：接续 880 的多头敞口，向下移动开仓位置以降低被行权成本，"
                   "权利金 5.86 计入已实现。⚠️ 移动后本合约成本线 909.26，但全链回本价仍为 1002.6 元/克"
                   "（含前三次向下滚仓的约 −13.96 万已实现亏损），复盘别用被重置的成本。")),
@@ -148,8 +148,8 @@ BILL_NOTES = [
 
 # 合约行归属：只填 5 行，其余靠同代码自动命中
 VM_MAP = [
-    ("期货交易", "SHEX.au2612", "GC00Y"),
-    ("期权交易", "SHEX.au2611P880", "GC00Y"),
+    ("期货交易", "SHFE.au2612", "GC00Y"),
+    ("期权交易", "SHFE.au2611P880", "GC00Y"),
     ("证券交易", "SHSE.518880", "GC00Y"),
     ("期权交易", "CFFEX.IO2611-P-3800", "SHSE.000300"),
     ("期货交易", "CFFEX.IC2612", "SHSE.000905"),
@@ -271,7 +271,7 @@ def run(apply: bool) -> None:
             cur.execute("UPDATE bills_group_symbol SET vm_symbol=%s WHERE id=%s", (vm, r["id"]))
 
     # ---------------- 8) 丢弃项说明
-    print("\n[8] 丢弃：SHEX.au2611P880 的 logic/plan/invalidate 三个字段全是「同SHEX.au2612」")
+    print("\n[8] 丢弃：SHFE.au2611P880 的 logic/plan/invalidate 三个字段全是「同SHFE.au2612」")
     print("    纯换月复制粘贴，无独立信息；其 review（滚动调仓理由）已拆到 2919/2920 两笔成交。")
 
     if apply:
