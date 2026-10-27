@@ -40,6 +40,7 @@ from server_fast.app.bills.schemas import (
     BillUpdate,
     GroupAccOut,
     GroupOut,
+    GroupSymbolCodeOut,
     GroupSymbolOut,
     GroupSymbolVmUpdate,
     GroupUpdate,
@@ -406,6 +407,63 @@ def count_unmapped_group_symbols(db: Session = Depends(get_db)):
             unmapped_n += 1
     return {"mapped": mapped_n, "unmapped": unmapped_n, "excluded": excluded_n,
             "total": len(rows)}
+
+
+@router.get("/group-symbols/symbol-options", response_model=List[GroupSymbolCodeOut])
+def list_group_symbol_options(
+    category: Optional[str] = Query(
+        default="期权交易",
+        description="交易分类精确匹配；传 * 表示不限（仍只返回三类真交易）"),
+    db: Session = Depends(get_db),
+):
+    """券商码候选：给「期权行情同步清单」的券商码内联下拉当选项源。
+
+    **跨模块调用的唯一正道**：bds 前端直接调本接口，bds 后端一行 import 都不加
+    ——`bds_option_config.broker_symbol` 要选什么值属于账单事实，权威在 bills。
+    写入仍走 `PUT /bds/option-config/{id}`，本接口只读。
+
+    口径（与 `constants.is_attachable` 一致，不在这里另写一份白名单）：
+
+    - 只取三类真交易，且排除资金流水占位码（`RZRQ`/`CRJ`/`SYFY`/`cash`）；
+      理财行（`OTC`/`TTB`）靠 `category` 不在 TRADE_CATS 自动排除；
+    - 按 `symbol` **去重**：本表唯一键是 `(category, symbol)`，同一个码在多个分类下
+      会占多行，不去重会让下拉出现重复项且值相同；
+    - 空串/None 的 symbol 一律剔除（表里实测存在一个空串行）；
+    - 持仓中（`value_total` 非 0）的排前面 —— 81 个候选里真正在用只有几张，
+      不排序的话每次都要滚半天。
+
+    ⚠️ **必须声明在 `/group-symbols/{id_}` 之前**，否则 "symbol-options" 会被当成
+    id 去解析（本文件 `unmapped-count` 已有同样的位置约束）。
+    """
+    if category and category != "*" and category not in TRADE_CATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"category 只能是 {list(TRADE_CATS)} 之一，或传 * 表示不限：{category}")
+
+    value_sum = func.sum(GroupSymbol.value_total)
+    query = db.query(
+        GroupSymbol.symbol.label("symbol"),
+        func.max(GroupSymbol.category).label("category"),
+        func.max(GroupSymbol.p_total).label("p_total"),
+        value_sum.label("value_total"),
+    ).filter(
+        GroupSymbol.symbol.isnot(None),
+        GroupSymbol.symbol != "",
+        GroupSymbol.category.in_(TRADE_CATS),
+        GroupSymbol.symbol.notin_(sorted(VIRTUAL_SYMBOLS)),
+    )
+    if category and category != "*":
+        query = query.filter(GroupSymbol.category == category)
+
+    rows = (query.group_by(GroupSymbol.symbol)
+            # 持仓中优先：市值同号求和后绝对值大的在前；NULL（无市值）自然排最后
+            .order_by(func.abs(value_sum).desc(), GroupSymbol.symbol.asc())
+            .all())
+
+    return [
+        GroupSymbolCodeOut(symbol=sym, category=cat, p_total=p, value_total=v)
+        for sym, cat, p, v in rows
+    ]
 
 
 @router.patch("/group-symbols/{id_}/vm")

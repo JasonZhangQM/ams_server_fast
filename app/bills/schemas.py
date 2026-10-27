@@ -225,6 +225,27 @@ class GroupSymbolOut(BaseModel):
     update_time: datetime  # 更新时间
 
 
+class GroupSymbolCodeOut(BaseModel):
+    """券商码候选（下拉选项）响应 —— `GET /bills/group-symbols/symbol-options`。
+
+    「期权行情同步清单」（`bds_option_config.broker_symbol`）内联编辑时用它做选项源。
+    **只供前端跨模块调用**：bds 后端不 import bills 的任何东西（规则 4.12 依赖只能向下），
+    写入仍走 `PUT /bds/option-config/{id}`，bills 只回答「有哪些合法账单码」这一个事实。
+
+    口径：
+    - 按 `symbol` 去重 —— 本表唯一键是 `(category, symbol)`，同一个码跨分类会占多行；
+    - 排除空码与资金流水占位码（`constants.attachable_sql` 同一口径，不在这里另写白名单）；
+    - `p_total` / `value_total` 只用于在选项里标「持仓中」，不参与任何判断。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    symbol: str  # 账单口径代码（如 SHQQ.10012562 / CFFEX.IO2611-P-4000）
+    category: str  # 交易分类（期权交易 / 期货交易 / 证券交易）
+    p_total: Optional[int] = None  # 持仓量（跨分类取最大）
+    value_total: Optional[Decimal] = None  # 当前市值（跨分类求和）
+
+
 class GroupSymbolVmUpdate(BaseModel):
     """归属标的修改请求（PATCH /bills/group-symbols/{id}/vm）。
 
