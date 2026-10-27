@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
+from typing import Optional
 
 # apps配置
 class Config:
@@ -78,27 +79,86 @@ class Config:
         'BJSE.': 1,
     }
 
-    # ============ 期权品种基础数据（2026-10-27 起**正源在此**，irs 只保留引用）============
-    # 这四项原在 `app/irs/config.py`；10-26 复制到 bds（期权品种、到期日规则、标的映射
-    # 描述的都是市场事实，属基础数据层），10-27 完成切源：**本文件是唯一实现方**，
-    # `irs/config.py` 改为别名引用同一对象（`IrsCfg.OPTIONS_MARCH is Config.OPTIONS_MARCH`）。
-    # 依赖方向自此固定为 **irs → bds**（符合「依赖只能向下」），结构上不可能再有
-    # 「两份可各自被改」的副本。
+    # ============ 期权品种台账（2026-10-27 合并，**唯一正源**）============
+    # 合并缘由：此前「我要同步哪些品种」(`OPTIONS_MARCH`) 与「我们的品种名对应 openctp
+    # 哪个品种」(`MAP_OPTION_LEDGER`) 是两张表，键都是同一个 option_name，字段互补不重叠，
+    # 加一个品种要改两处、漏一处就出「行情能存但查不到中文名」或「info 有行但拉不到行情」。
+    # 现在合成一张 `OPTION_VARIETIES`：**键 = option_name（唯一身份）**，值为该品种的全部属性。
     #
-    # 🔒 加/改品种只改本文件一处（顺序见下方台账的「加品种三步」），不要再动 irs。
+    # 依赖方向固定为 **irs → bds**：`irs/config.py` 已不再持有任何副本，只能通过下面
+    # 五个访问器读，后续本表结构再变也不会波及 irs。
     #
-    # 与 MAP_MULTIPLIER 的关系：OPTIONS_MARCH 每行自带 multiplier，是同一事实的第三处定义
-    # （另两处：本表、`bds_option_info` 的逐合约乘数）。⚠️ 类型仍不一致：这里是**字符串**
-    # '100'，MAP_MULTIPLIER 与 info 表是 int。历史遗留，改动会波及三处消费点，暂不动。
-
-    # akshare 期权品种表。option_name 是**接口入参的中文名**（不是代码），
-    # underlying_symbol 定标的，rule_exercise_date 指向下方 RULE_EXERCISE_DATE 的规则码。
-    # 加品种只改这里 + 各自的数据源分支即可，不用动代码。
-    OPTIONS_MARCH = (
-        {'underlying_symbol':'SHSE.000300','option_type':'股指期权','option_name':'沪深300股指期权','multiplier':'100','rule_exercise_date':'R1'},
-        {'underlying_symbol':'SHSE.510500','option_type':'ETF期权','option_name':'南方中证500ETF期权','multiplier':'10000','rule_exercise_date':'R2'},
-        {'underlying_symbol':'SHFE.au','option_type':'商品期权','option_name':'黄金期权','multiplier':'1000','rule_exercise_date':'R3'},
-        )
+    # 🔒 加/改品种只改本表一处（见下方「加品种三步」）。
+    #
+    # 与 MAP_MULTIPLIER 的关系：本表每行的 multiplier 是**品种默认乘数**（ETF 拼标准码的
+    # 分母），不是逐合约乘数（后者在 `bds_option_info.multiplier`，A 类为 10180）。
+    # 10-27 起两处都用 int（历史上本表是字符串 '100'，已统一）。
+    OPTION_VARIETIES = {
+        # —— 已启用（实测在 sync 链路中跑通）——
+        '沪深300股指期权': dict(
+            option_type='股指期权', und_key='csi300',
+            product_id='IO', ctp_underlying=None,
+            underlying_symbol='SHSE.000300', multiplier=100, rule_exercise_date='R1'),
+        '南方中证500ETF期权': dict(
+            option_type='ETF期权', und_key='csi500etf',
+            product_id='ETF_O', ctp_underlying='510500',
+            underlying_symbol='SHSE.510500', multiplier=10000, rule_exercise_date='R2'),
+        '黄金期权': dict(
+            option_type='商品期权', und_key='au',
+            product_id='au_o', ctp_underlying=None,
+            underlying_symbol='SHFE.au', multiplier=1000, rule_exercise_date='R3'),
+        # —— 字典里有、暂未启用（[待核]：akshare 入参中文名需逐个验证，见方案 §六）——
+        # '上证50股指期权': dict(option_type='股指期权', und_key='csi50',
+        #     product_id='HO', ctp_underlying=None,
+        #     underlying_symbol='SHSE.000016', multiplier=100, rule_exercise_date='R1'),
+        # '中证1000股指期权': dict(option_type='股指期权', und_key='csi1000',
+        #     product_id='MO', ctp_underlying=None,
+        #     underlying_symbol='SHSE.000852', multiplier=100, rule_exercise_date='R1'),
+        # '华泰柏瑞沪深300ETF期权': dict(option_type='ETF期权', und_key='csi300etf',
+        #     product_id='ETF_O', ctp_underlying='510300',
+        #     underlying_symbol='SHSE.510300', multiplier=10000, rule_exercise_date='R2'),
+        # '华夏上证50ETF期权': dict(option_type='ETF期权', und_key='csi50etf',
+        #     product_id='ETF_O', ctp_underlying='510050',
+        #     underlying_symbol='SHSE.510050', multiplier=10000, rule_exercise_date='R2'),
+        # '易方达创业板ETF期权': dict(option_type='ETF期权', und_key='chinextetf',
+        #     product_id='ETF_O', ctp_underlying='159915',
+        #     underlying_symbol='SZSE.159915', multiplier=10000, rule_exercise_date='R2'),
+        # '嘉实沪深300ETF期权': dict(option_type='ETF期权', und_key='csi300etf',
+        #     product_id='ETF_O', ctp_underlying='159919',
+        #     underlying_symbol='SZSE.159919', multiplier=10000, rule_exercise_date='R2'),
+        # '嘉实中证500ETF期权': dict(option_type='ETF期权', und_key='csi500etf',
+        #     product_id='ETF_O', ctp_underlying='159922',
+        #     underlying_symbol='SZSE.159922', multiplier=10000, rule_exercise_date='R2'),
+        # '易方达深证100ETF期权': dict(option_type='ETF期权', und_key='sz100etf',
+        #     product_id='ETF_O', ctp_underlying='159901',
+        #     underlying_symbol='SZSE.159901', multiplier=10000, rule_exercise_date='R2'),
+        # '华夏上证科创板50ETF期权': dict(option_type='ETF期权', und_key='kc50etf',
+        #     product_id='ETF_O', ctp_underlying='588000',
+        #     underlying_symbol='SHSE.588000', multiplier=10000, rule_exercise_date='R2'),
+        # '易方达上证科创板50ETF期权': dict(option_type='ETF期权', und_key='kc50etf',
+        #     product_id='ETF_O', ctp_underlying='588080',
+        #     underlying_symbol='SHSE.588080', multiplier=10000, rule_exercise_date='R2'),
+    }
+    #
+    # 字段口径：
+    #   option_type        股指期权/ETF期权/商品期权 ⇒ 决定走「商品 .dat」还是「akshare 板」，
+    #                      并映射保证金公式族（见 option_market.MARGIN_TYPE_BY_OPTION_TYPE）
+    #   und_key            情景分组键（前端「品种」分组标签、`_sina_code` 分支）
+    #   product_id         openctp 的品种ID。92 个品种只有下面几个有映射，其余照存不映射
+    #   ctp_underlying     标的 6 位码。⚠️ `ETF_O` 一个品种ID覆盖 9 个标的，只按 product_id
+    #                      匹配会把 510050 的合约全部串成 510500 ⇒ ETF 必须靠这一列细分；
+    #                      IO/HO/MO/au_o 的标的由品种唯一确定，填 None
+    #   underlying_symbol  完整标的代码，拼 gm/新浪行情用（`SHFE.au` + 月份 = `SHFE.au2612`）
+    #   multiplier         品种默认乘数（ETF 拼标准码的分母，A 类别用 10180）
+    #   rule_exercise_date 指向下方 RULE_EXERCISE_DATE 的规则码（仅交叉校验用）
+    #
+    # 加一个品种的三步（顺序不能变）：
+    #   1. 先验证行情能拉到：`option_finance_board`／上期所 `.dat` 能返回该品种
+    #      （入参是中文名，很容易写错，写错了只会在同步时才暴露成「接口返回空」）
+    #   2. 在本表加一行（乘数 + 到期规则 + 标的 + 品种ID 一次给全）
+    #   3. 跑一次批量同步的 `option_info` 段（`POST /bds/sync/macro` +
+    #      `{"stages":["option_info"]}`）让字典认到该标的的合约
+    # 只做 1、2 ⇒ 行情能存但字典里查不到中文名；只做 2 不做 1 ⇒ info 有行但拉不到行情。
 
     # 到期日规则：rule -> (第几个星期 1-based, 星期几 0=周一 ... 4=周五)
     # R1 股指期权（IO/HO/MO）＝合约月第三个周五
@@ -112,70 +172,49 @@ class Config:
         'R3': None,
     }
 
-    # ==================== 期权品种台账（bds 自建，2026-10-27）====================
-    # 把「我们的品种名」和「openctp 合约字典的品种」对上，供 `bds_option_info` 反查
-    # 中文品种名、以及 `_sync_group` 取标的代码用。
-    #
-    # 为什么不塞进 OPTIONS_MARCH：两者的**判据不同**——OPTIONS_MARCH 是「我要同步哪些品种」
-    # （行情接口的入参），本台账是「我们的品种名对应 openctp 的哪个品种 ID」（字典反查用）。
-    # 一个品种可能只登记在台账（字典里有、暂不同步），也可能先上 OPTIONS_MARCH 再补台账。
-    #
-    # 三个字段：option_name -> (und_key, ctp_product_id, ctp_underlying)
-    #   und_key        情景分组键，写入 bds_option_market.und_key（历史快照语义，改不回溯）
-    #   ctp_product_id openctp 的品种ID。92 个品种只有下面几个有映射，其余照存不映射
-    #   ctp_underlying 标的 6 位码。⚠️ `ETF_O` 一个品种ID覆盖 9 个标的，
-    #                  只按 product_id 匹配会把 510050 的合约全部串成 510500 ——
-    #                  所以 ETF 必须靠这一列细分；IO/HO/MO/au_o 的标的由品种唯一确定，填 None。
-    MAP_OPTION_LEDGER = {
-        # —— 已启用（实测在 sync 链路中跑通）——
-        '沪深300股指期权':       ('csi300',    'IO',    None),
-        '南方中证500ETF期权':     ('csi500etf', 'ETF_O', '510500'),
-        '黄金期权':              ('au',        'au_o',  None),
-        # —— 字典里有、暂未启用（[待核]：akshare 入参中文名需逐个验证，见方案 §六）——
-        # '上证50股指期权':        ('csi50',      'HO',    None),
-        # '中证1000股指期权':      ('csi1000',    'MO',    None),
-        # '华泰柏瑞沪深300ETF期权': ('csi300etf',  'ETF_O', '510300'),
-        # '华夏上证50ETF期权':      ('csi50etf',   'ETF_O', '510050'),
-        # '易方达创业板ETF期权':    ('chinextetf', 'ETF_O', '159915'),
-        # '嘉实沪深300ETF期权':     ('csi300etf',  'ETF_O', '159919'),
-        # '嘉实中证500ETF期权':     ('csi500etf',  'ETF_O', '159922'),
-        # '易方达深证100ETF期权':   ('sz100etf',   'ETF_O', '159901'),
-        # '华夏上证科创板50ETF期权': ('kc50etf',    'ETF_O', '588000'),
-        # '易方达上证科创板50ETF期权': ('kc50etf',   'ETF_O', '588080'),
-    }
-    #
-    # 加一个品种的三步（顺序不能变）：
-    #   1. 先验证行情能拉到：`option_finance_board`／上期所 `.dat` 能返回该品种
-    #      （入参是中文名，很容易写错，写错了只会在同步时才暴露成「接口返回空」）
-    #   2. 在 OPTIONS_MARCH 加乘数与到期规则（**只改本文件**；irs 已是别名引用，无需同改）
-    #   3. 在本台账加一行
-    # 只做 1、2 不做 3 ⇒ 行情能存但查不到中文名；只做 3 ⇒ info 有行但同步拉不到。
-
-    # 期权标的市场映射：交易所 -> 标的代码列表。
-    # ⚠️ **全仓零消费者**（.py / .ipynb 全局 grep 只有定义、没有任何调用；irs 侧是别名）。
-    #    推测是早期版本直接用它筛标的、后来改为读标的表了。切源后已无副本，可安全评估删除——
-    #    但在确认前保留，不要顺手删（先确认没有「准备接上」的计划）。
-    MAP_OPTIONS_UD_MARKET = {
-        'SHSE': [
-            '000016', '000300', '000852', '510050',
-            '510300', '510500', '588000', '588080',
-        ],
-        'SZSE': ['159901', '159919', '159922', '159915'],
-    }
+    # ---- 品种台账访问器 ----
+    # irs 只准用这五个函数，不准直读 OPTION_VARIETIES（结构再变不影响调用方）。
 
     @classmethod
-    def map_ud_market(cls):
-        """把 MAP_OPTIONS_UD_MARKET 反查成「标的代码 -> 完整 symbol」。
+    def option_varieties(cls) -> list[dict]:
+        """全部品种，按定义顺序，每项**注入 `option_name`**。
 
-        {'SZSE': ['159919']} -> {'159919': 'SZSE.159919'}
-
-        ⚠️ 与 MAP_OPTIONS_UD_MARKET 同为零消费者，复制保真。
+        返回的是**副本**：调用方改了不会污染配置（历史上确有调用点想往 meta 里塞临时字段）。
         """
-        ud_market_dict = {}
-        for k, v in cls.MAP_OPTIONS_UD_MARKET.items():
-            for symbol in v:
-                ud_market_dict[symbol] = f'{k}.{symbol}'
-        return ud_market_dict
+        return [dict(option_name=name, **meta)
+                for name, meta in cls.OPTION_VARIETIES.items()]
+
+    @classmethod
+    def option_names(cls) -> list[str]:
+        """全部品种名（下拉框顺序 = 定义顺序，不是字典序）。"""
+        return list(cls.OPTION_VARIETIES.keys())
+
+    @classmethod
+    def option_meta(cls, option_name: str) -> Optional[dict]:
+        """品种名 → 完整属性（含 `option_name`）。未登记返回 None，**不抛错**。
+
+        不抛错是刻意的：92 个 openctp 品种里只有少量有中文名映射，反查（`option_name_of`）
+        会大量撞到未登记品种，那里抛错等于让字典同步整体失败。
+        """
+        meta = cls.OPTION_VARIETIES.get(option_name)
+        return dict(option_name=option_name, **meta) if meta else None
+
+    @classmethod
+    def und_key_of(cls, option_name: str) -> Optional[str]:
+        """品种名 → 情景分组键。未登记返回 None。"""
+        meta = cls.OPTION_VARIETIES.get(option_name)
+        return meta["und_key"] if meta else None
+
+    @classmethod
+    def option_name_of_und(cls, underlying_symbol: str) -> Optional[str]:
+        """标的完整代码 → 品种名（`SHSE.510500` → `南方中证500ETF期权`）。
+
+        取代此前 router 里手抄的 `_OPT_UND_KEY` 反向硬编码表。
+        """
+        for name, meta in cls.OPTION_VARIETIES.items():
+            if meta["underlying_symbol"] == underlying_symbol:
+                return name
+        return None
 
     INDEX_CODE = { #指数代码映射
         # constituent_count：**成分股只数上限**，供成分同步做伪快照拦截（见 index_constituent._judge_change）。

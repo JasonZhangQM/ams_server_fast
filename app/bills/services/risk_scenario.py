@@ -57,32 +57,6 @@ FUT_UND_KEY = {"IC": "csi500", "IF": "csi300", "IH": "csi300", "IM": "csi500", "
 SEC_UND_KEY = {"513100": "nasdaq", "510500": "csi500etf", "510300": "csi300", "159919": "csi300"}
 
 
-def _pick_info(rows: list, product_id: Optional[str],
-               underlying: Optional[str]) -> Optional[OptionInfo]:
-    """从「同一标准码的多行」里挑出正确的那一行字典记录。
-
-    为什么会有多行：ETF 标准码沿用交易所「合约简称」口径、**不含标的 6 位**，
-    而 9 个 ETF 标的的行权价区间大量重叠（`C2612M01350` 同时属于 588000 科创50
-    与 588080 科创板50，全量实测 422 组同码）。所以必须按（品种ID → 标的）
-    两级消歧，只按 symbol 取会拿到别的标的的乘数与行权价。
-
-    两级都是「有匹配才收窄」：未登记品种没有 product_id 时退回全量候选，
-    最后取最后交易日最新的一条（同一品种同一到期月通常唯一）。
-    """
-    cands = list(rows)
-    if not cands:
-        return None
-    if product_id:
-        narrowed = [r for r in cands if r.product_id == product_id]
-        if narrowed:
-            cands = narrowed
-    if underlying and len(cands) > 1:
-        narrowed = [r for r in cands if r.underlying_contract_id == underlying]
-        if narrowed:
-            cands = narrowed
-    return max(cands, key=lambda r: r.last_trade_date)
-
-
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
@@ -116,9 +90,10 @@ def load_context() -> dict:
     """读全部底数，返回计算上下文。
 
     持仓分类规则：
-    - 期权：卖 put（p_long>0 且成本为负）→ 从 bds_option_config 拿 strike/mult/
-      margin_type/und_key/expiry（用 broker_symbol 匹配账单码）；缺行或规格不全直接
-      raise（宁可算不出，不可算错）
+    - 期权：卖 put（p_long>0 且成本为负）→ 先用 `broker_symbol` 匹配账单码认领配置行，
+      再从 `cfg.contract_id` join `bds_option_info` 取 strike/mult/expiry，从品种台账
+      取 margin_type/und_key。缺行或规格不全直接 raise（宁可算不出，不可算错）。
+      ⚠️ `bds_option_config` 自 2026-10-27 起**不再存任何规格**，只存「认领键 + 同步意图」。
     - 期货：品种前缀映射 und_key；保证金率从 risk_param scope='{交易所}.{品种}' 拿
     - 证券：SEC_UND_KEY 映射，默认 astock
     """
@@ -142,20 +117,26 @@ def load_context() -> dict:
             }
 
         # 同步清单：账单原始码 → 配置行（只用来判断「这张合约要不要算」，不再承载规格）
-        # ⚠️ key 必须用 broker_symbol（账单原始码）而不是 symbol：
-        #    bills_group.symbol 是账单口径（`CFFEX.IO2611-P-4000`），
-        #    而 config.symbol 是交易所标准码（`IO2611-P-4000`），直接比会一个都匹配不上。
-        #    broker_symbol 为空的（手工新增的观察合约）退回 symbol 兜底。
+        # ⚠️ key 必须用 broker_symbol（账单原始码）而不是标准码：
+        #    bills_group.symbol 是账单口径（`CFFEX.IO2611-P-4000` / `SHQQ.10012562`），
+        #    而标准码是 `IO2611-P-4000` / `P2611M06250`，直接比会一个都匹配不上。
+        #    broker_symbol 为空的（手工新增的观察合约）退回字典的标准码兜底。
         cfg_rows = db.query(OptionConfig).all()
-        contracts = {(c.broker_symbol or c.symbol): c for c in cfg_rows}
-        # 合约规格：从 `bds_option_info` 取（乘数 / 行权价 / 到期日的权威源）。
-        # 2026-10-27 起不再读 bds_option_config 的规格列 —— 那是手填/同步回填的副本，
-        # A 类乘数与 2027 到期日都拿不到（详见 docs/bds期权合约字典方案_2026-10-27.md）。
-        info_by_symbol: dict[str, list[OptionInfo]] = {}
+        # 规格一次查全：config.contract_id 已是唯一身份 ⇒ 不需要任何消歧，
+        # 字典行就是那一行（此前按 symbol 取要先按 品种ID→标的 两级收窄，因为 ETF 同码）。
+        cfg_info: dict[str, OptionInfo] = {}
         if cfg_rows:
-            for r in (db.query(OptionInfo)
-                      .filter(OptionInfo.symbol.in_({c.symbol for c in cfg_rows})).all()):
-                info_by_symbol.setdefault(r.symbol, []).append(r)
+            cfg_info = {
+                r.contract_id: r
+                for r in db.query(OptionInfo).filter(
+                    OptionInfo.contract_id.in_({c.contract_id for c in cfg_rows})).all()
+            }
+        contracts: dict[str, OptionConfig] = {}
+        for c in cfg_rows:
+            info_row = cfg_info.get(c.contract_id)
+            key = c.broker_symbol or (info_row.symbol if info_row else None)
+            if key:
+                contracts[key] = c
 
         # 在仓持仓（account='合计' 是聚合行，必须排除）
         pos_rows = (
@@ -180,12 +161,12 @@ def load_context() -> dict:
                         f"期权 {g.symbol} 不在同步清单里（bds_option_config），拒绝估算"
                     )
                 entry = option_info.resolve(c.option_name) or {}
-                spec = _pick_info(info_by_symbol.get(c.symbol, []),
-                                  entry.get("product_id"), entry.get("ctp_underlying"))
+                spec = cfg_info.get(c.contract_id)
                 if spec is None:
                     raise ValueError(
-                        f"期权 {g.symbol} 在合约字典（bds_option_info）里找不到："
-                        f"请先点「刷新字典」（POST /bds/option-info/sync）再重算"
+                        f"期权 {g.symbol}（contract_id={c.contract_id}）在合约字典"
+                        f"（bds_option_info）里找不到："
+                        f"请先刷新合约字典（批量同步勾选「期权合约字典」）再重算"
                     )
                 # 保证金公式族与情景分组键都是**品种级**派生（同品种内所有合约一致），
                 # 不该逐合约存一份 —— 2026-10-27 起 bds_option_config 已物理删掉这两列，
@@ -195,7 +176,7 @@ def load_context() -> dict:
                 if not mtype or not und_key:
                     raise ValueError(
                         f"期权 {g.symbol} 的品种「{c.option_name}」未在品种台账"
-                        f"（Config.MAP_OPTION_LEDGER）登记，无法确定保证金公式族/情景分组"
+                        f"（Config.OPTION_VARIETIES）登记，无法确定保证金公式族/情景分组"
                     )
                 positions.append({
                     "kind": "put", "acct": g.account, "name": g.symbol,

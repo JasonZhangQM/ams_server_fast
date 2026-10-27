@@ -842,7 +842,7 @@ class OptionInfo(Base, BaseModel):
       生成标准码。**乘数与行权价必须成对使用**，混用差 1.8% 市值。
     - `last_trade_date`：权威到期日，取代 `_calc_delisted_date()` 的推算。
       后者降级为交叉校验（au/IO/HO/MO/ETF 全部逐日相同，`fu_o` 差一周）。
-    - `product_id` 有 92 个，只有 5 个在 `MAP_OPTION_LEDGER` 里有中文名映射；
+    - `product_id` 有 92 个，只有 3 个在 `Config.OPTION_VARIETIES` 里有中文名映射；
       其余照存（将来加品种零迁移），`resolve()` 对未知品种返回 `None` 而不报错。
     """
 
@@ -914,31 +914,72 @@ class OptionConfig(Base, BaseModel):
     |---|---|---|---|
     | `bds_option_info` | 合约**是什么**（乘数/到期日/行权价） | 交易所 | 每个合约一行 |
     | `bds_option_config`（本表） | **要不要同步、怎么拉** | 我 | 每个合约一行 |
-    | `bds_option_market` | 这个合约**今天多少价** | 行情接口 | `(symbol, trade_date)` |
+    | `bds_option_market` | 这个合约**今天多少价** | 行情接口 | `(contract_id, trade_date)` |
 
-    - `symbol`：**交易所标准码**，不含交易所前缀（ETF 也不含标的 6 位）。
-      ⚠️ ETF 标准码沿用交易所「合约简称」口径，9 个 ETF 标的的行权价区间重叠
-      ⇒ **跨标的必然同码**（如 `C2612M01350` 同时属于 588000 与 588080）。
-      正确的不变式是 `(option_name, symbol)` 唯一，不是 `symbol` 唯一；
-      又因本表 `option_name` 是列，唯一约束落在 `symbol` 上仍成立（一个清单里
-      同一标准码只登记一次，品种随行带出）。
-    - `broker_symbol`：券商内部码，与标准码**没有可靠的字符串关系**（ETF 只能靠四元组
-      关联），仅供对账与排查，不参与任何计算。
-    - `option_name`：akshare 的入参是中文品种名（"沪深300股指期权"），不是代码。
-      它同时是**品种上下文的唯一来源**——查 `bds_option_info` 必须带上它，
-      否则 ETF 同码会串到别的标的。
-    - `end_month`：股指/ETF 必须指定（`option_finance_board` 按到期月拉）；
-      **商品期权填 `ALL`**——上期所 `.dat` 一次返回当日全部到期月（实测 813~817 行），
-      没有按月筛选的参数，填实际月份反而会造成"以为只拉了一个月"的误解。
-    - `is_enabled` / `note`：人工列（铁律 4.9），同步任务永不写本表。
+    ## 字段分工：本表是**三把钥匙**，每把只对接一个外部系统
+
+    判据是「这个字段跟谁对齐」——三个来源各不相干，所以是三列而不是一列：
+
+    | 字段 | 对齐谁 | 用途 | 缺失后果 |
+    |---|---|---|---|
+    | `contract_id` | `bds_option_info.contract_id` | **查合约详情**（乘数/行权价/到期日/方向） | 建不了行（唯一键）；行情写入被跳过 |
+    | `broker_symbol` | 账单 `bills_group.symbol` | **认领实盘持仓** | 风险情景直接 raise，不是少算 |
+    | `option_name` + `end_month` | akshare / 上期所行情接口 | **拉行情**（分组入参） | 无法发起请求 |
+
+    ⚠️ **三者不可互推**，这是最容易想错的地方：
+    - `contract_id → broker_symbol`：实测 6/6 只是「交易所前缀 + contract_id」
+      （`CFFEX.IO2611-P-4000` / `SHQQ.10012562` / `SHFE.au2612P840`），**看起来能拼**。
+      但前缀因交易所而异、且券商是否有独立编码未经全量验证 ⇒ 账单对账必须用
+      **真实账单码**，绝不能用推导值（拼错了是"对不上"而不是"报错"，最难查）。
+    - `contract_id → option_name/end_month`：理论上可 join 字典反推，但保留为实列
+      才不用每行一次 join，且它是用户新增时**必须表态**的入参
+      （POST 用它与 `contract_id` 的归属做交叉校验）。
+    - `option_name` **不参与唯一键**，唯一身份只有 `contract_id`。
+
+    ### `contract_id`
+    **openctp 的「合约ID」，与 `bds_option_info.contract_id` 1:1**。
+    🔄 2026-10-27 由 `symbol` 改为本列，理由是 `symbol` 做身份有结构性缺陷：
+    ETF 标准码沿用交易所「合约简称」口径、**不含标的 6 位**，9 个 ETF 标的价格区间
+    重叠 ⇒ 跨标的必然同码（`C2612M01350` 同属 588000/588080，全量 422 组）。
+    当时只能把唯一键放宽成 `(option_name, symbol)`，再逼所有消费方用二元组做键。
+    换成 `contract_id` 后同码现象在结构上消失：不同标的的同码合约有不同的
+    `contract_id`（ETF 即券商码数字部分，如 `10012562`），单列唯一即可。
+    ⚠️ **`symbol` 不再是本表字段**，响应体里的 `symbol` 由 `bds_option_info` 派生。
+    ⚠️ 它同时是 `bds_option_market` 的身份（`(contract_id, trade_date)`），
+    所以「配置里有、字典里没有」的合约既写不进行情、也查不到规格。
+
+    ### `broker_symbol`
+    **券商账单口径的原始码，是认领实盘持仓的唯一钥匙**——不是可选的备注列。
+    `risk_scenario.load_context()` 用 `contracts = {broker_symbol: cfg}` 去匹配
+    `bills_group.symbol`，匹配不上**直接 raise**「期权 xxx 不在同步清单里，拒绝估算」
+    ⇒ 一张有持仓的合约漏填它，整个 `/bills/risk-scenario` 返回 500，而不是少算一条。
+    所以：**持有实盘仓位的合约必须填；纯观察合约可以留空**（此时退回字典标准码兜底，
+    但账单码带交易所前缀、标准码不带，实际匹配不上，等于该行不参与情景推演）。
+    保 `broker_symbol` 而不由 `contract_id` 推导的原因见上表下方「三者不可互推」。
+    ⚠️ 目前无唯一约束：两行填同一个券商码会让 `contracts` 字典静默后写覆盖先写。
+
+    ### `option_name`
+    akshare 的入参是中文品种名（"沪深300股指期权"），不是代码。`_sync_group`
+    按 (品种, 到期月) 分组调接口，删了就无法发起请求。
+
+    ### `end_month`
+    股指/ETF 必须指定（`option_finance_board` 按到期月拉）；
+    **商品期权填 `ALL`**——上期所 `.dat` 一次返回当日全部到期月（实测 813~817 行），
+    没有按月筛选的参数，填实际月份反而会造成"以为只拉了一个月"的误解。
+
+    ### `is_enabled` / `source` / `note`
+    人工列（铁律 4.9），同步任务永不写本表。`source` 是历史遗留死列
+    （`import-holding` 已下线，`manual`/`holding` 不再有写入方）。
     """
 
     __tablename__ = "bds_option_config"
 
-    symbol: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="交易所标准期权代码")
+    contract_id: Mapped[str] = mapped_column(
+        String(32), nullable=False,
+        comment="openctp 合约ID（与 bds_option_info.contract_id 1:1，本表唯一身份）")
     broker_symbol: Mapped[Optional[str]] = mapped_column(
-        String(32), nullable=True, comment="券商账单代码（对账用，不参与计算）")
+        String(32), nullable=True,
+        comment="券商账单代码（认领实盘持仓的关键，缺失则风险情景直接报错）")
 
     option_name: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="akshare 品种名")
@@ -951,21 +992,36 @@ class OptionConfig(Base, BaseModel):
     note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="备注")
 
     __table_args__ = (
-        UniqueConstraint("symbol", name="uk_opt_cfg"),
+        # 唯一键只锁 contract_id：它 1:1 对应交易所的一个合约，本身就是唯一身份。
+        # 相比先前的 (option_name, symbol) 二元组，这里不再需要品种上下文做键的一部分
+        # ——「同一标准码登记到两个标的」的消歧工作从数据库约束降级为自然的表结构。
+        UniqueConstraint("contract_id", name="uk_opt_cfg"),
         Index("k_cfg_group", "option_name", "end_month"),
     )
 
-    unique_keys = ["symbol"]
+    unique_keys = ["contract_id"]
 
     def __str__(self) -> str:
-        return f"{self.symbol}({self.option_name})"
+        return f"{self.contract_id}({self.option_name})"
 
 
 class OptionMarket(Base, BaseModel):
     """期权行情日快照（对应表 bds_option_market）。
 
-    **按日累积**：唯一键 `(symbol, trade_date)`，同日重跑幂等覆盖，跨日自然成为时间序列。
+    **按日累积**：唯一键 `(contract_id, trade_date)`，同日重跑幂等覆盖，跨日自然成为时间序列。
     这是相对 `irs_option_monitor`（只存最新一版、一同步历史就没了）的核心收益。
+
+    > **2026-10-27 瘦身：删 9 列、加 1 列。** 删掉 `broker_symbol` / `underlying_symbol` /
+    > `und_key` / `option_type` / `delisted_date` / `days_left` / `multiplier` /
+    > `symbol`（同日第二轮删）与（一并删的）逐行品种副本，全部改为
+    > `join bds_option_info` 现算；新增 `contract_id` 作为**唯一身份**。理由与逐值验收见
+    > `docs/期权台账合并与行情表瘦身方案_2026-10-27.md`。
+    >
+    > 🔴 **只删不加会把表变成「认不出是谁」**：本表没有 `option_name` 列，品种身份原先
+    > 全靠 `und_key` + `underlying_symbol` 承载；而 ETF 标准码不含标的 6 位
+    > （`C2612M01350` 同属 588000/588080），删掉这两列后无法判断该行属于哪个标的，
+    > `uk(symbol, trade_date)` 还会把两个标的判成同一行、后写覆盖先写
+    > ⇒ 唯一键必须是 `(contract_id, trade_date)`。
 
     三列价格必须分开（`irs_option_monitor` 把它们挤在一列是历史缺陷）：
 
@@ -981,28 +1037,27 @@ class OptionMarket(Base, BaseModel):
 
     ⚠️ ETF 接口的「数量」列恒等于返回行数（实测 26 行 → 全部为 26），不是成交量，故
     ETF 的 `volume`/`open_interest` 一律 NULL。
+
+    **为什么 `price_strike` / `value_i` / `value_t` 仍留在本表**：它们记的是「当日事实」。
+    按「可派生即删」的口径它们也能从 info 现算，但 A 类调整合约的 `strike` 在标的除权后
+    会被交易所改写 ⇒ 现算会让**历史行的内在价值跟着变**，这是删列方案里唯一真正的
+    信息损失点。`delisted_date` / `days_left` 则留得没必要（到期日一旦定下就不变），
+    改成按 `info.last_trade_date` 现算。
+
+    **`symbol` 同理删掉**（同日第二轮）：它只是「展示/模糊搜索」用，值和
+    `bds_option_info.symbol` 逐行相同（实测 11 行零差异），存两份只会两头漂移。
+    响应体里 `symbol` 仍在，改为 join 字典现取 ⇒ **字典缺行时为 NULL**，
+    调用方必须容忍空值（前端主表用 `contract_id` 兜底）。
     """
 
     __tablename__ = "bds_option_market"
 
-    symbol: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="交易所标准期权代码")
-    broker_symbol: Mapped[Optional[str]] = mapped_column(
-        String(32), nullable=True, comment="券商账单代码（来自配置）")
+    contract_id: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="openctp 合约ID=唯一身份，join bds_option_info")
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="行情日期（交易日）")
-    underlying_symbol: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="标的代码")
-    und_key: Mapped[str] = mapped_column(String(16), nullable=False, comment="情景分组键")
-    option_type: Mapped[str] = mapped_column(
-        String(8), nullable=False, comment="call / put")
     price_strike: Mapped[Decimal] = mapped_column(
-        Numeric(12, 4), nullable=False, comment="行权价")
-    delisted_date: Mapped[Optional[date]] = mapped_column(
-        Date, nullable=True, comment="到期日（_calc_delisted_date 推算）")
-    days_left: Mapped[Optional[int]] = mapped_column(
-        Integer, nullable=True, comment="剩余自然日")
-    multiplier: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="合约乘数")
+        Numeric(12, 4), nullable=False,
+        comment="行权价（当日接口口径；A 类为名义价，与 info.strike 可能不同）")
     price: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 4), nullable=True, comment="最新价")
     pre_settle: Mapped[Optional[Decimal]] = mapped_column(
@@ -1012,9 +1067,9 @@ class OptionMarket(Base, BaseModel):
     price_ud: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 4), nullable=True, comment="标的价（同标的同交易日唯一）")
     value_i: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, comment="内在价值")
+        Numeric(12, 4), nullable=True, comment="内在价值（当日事实，不随 info 变）")
     value_t: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, comment="时间价值")
+        Numeric(12, 4), nullable=True, comment="时间价值（当日事实，不随 info 变）")
     delta_opt: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(10, 6), nullable=True, comment="delta（仅商品期权，认沽为负）")
     volume: Mapped[Optional[int]] = mapped_column(
@@ -1029,13 +1084,13 @@ class OptionMarket(Base, BaseModel):
         DateTime, nullable=False, comment="本次写入时间")
 
     __table_args__ = (
-        UniqueConstraint("symbol", "trade_date", name="uk_opt_market"),
+        # 唯一身份是 (合约, 交易日)。用 symbol 会在 ETF 跨标的同码时撞车
+        UniqueConstraint("contract_id", "trade_date", name="uk_opt_market"),
         Index("k_opt_trade_date", "trade_date"),
-        Index("k_opt_und", "und_key", "trade_date"),
-        Index("k_opt_strike", "und_key", "delisted_date", "price_strike", "option_type"),
+        Index("k_opt_mkt_contract", "contract_id"),
     )
 
-    unique_keys = ["symbol", "trade_date"]
+    unique_keys = ["contract_id", "trade_date"]
 
     def __str__(self) -> str:
         return f"{self.symbol}@{self.trade_date}"

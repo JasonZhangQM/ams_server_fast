@@ -32,15 +32,17 @@ nominal   = strike × multiplier ÷ 品种默认乘数
 - **行权价必须 5 位零填充**：`C2612M06250`，不是 `C2612M6250`
 - **`A` 不能统一成 `M`**：`C2612A07500`（10180）与 `C2612M07500`（10000）名义价同为
   7.500 且并存，合并即撞码
-- 品种默认乘数优先取 `Config.OPTIONS_MARCH`（权威），缺失时回退「同标的下非 A 类
+- 品种默认乘数优先取 `Config.OPTION_VARIETIES`（权威），缺失时回退「同标的下非 A 类
   合约的乘数」——后者天然排除 A 类污染，实测两者在 510500 上都给 10000
 
 ## 🔴 `symbol` 的唯一性边界（2026-10-27 全量入库实测发现，方案文档未覆盖）
 
 ETF 标准码沿用交易所「**合约简称**」口径、**不含标的 6 位**（`P2611M06250` 而非
-`510500P2611M06250`），这是为了与既有 `bds_option_config.symbol` / `bds_option_market.symbol`
-保持一致。代价是：9 个 ETF 标的的行权价区间大量重叠（`588000` 科创50 与 `588080`
+`510500P2611M06250`），这是为了与 `bds_option_market.symbol` 保持一致
+（`bds_option_config` 已于 10-27 改用 `contract_id` 作身份，不再存 symbol）。
+代价是：9 个 ETF 标的的行权价区间大量重叠（`588000` 科创50 与 `588080`
 科创板50 的 1.350 档位完全一样），全量入库后**跨标的必然撞码**（实测 422 组）。
+⇒ 本表唯一身份是 `contract_id`，`symbol` 只在「(品种, 标的) 已确定」的前提下可当键。
 
 | 重复类型 | 实测 | 性质 | 处理 |
 |---|---|---|---|
@@ -93,16 +95,21 @@ _CP_BY_TYPE = {"1": "C", "2": "P"}
 # ---------------------------------------------------------------------------
 
 def _ledger_entries() -> list[dict]:
-    """把 `MAP_OPTION_LEDGER` 摊平成可检索的行。"""
-    out = []
-    for option_name, (und_key, product_id, ctp_underlying) in dbsCfg.MAP_OPTION_LEDGER.items():
-        out.append({
-            "option_name": option_name,
-            "und_key": und_key,
-            "product_id": product_id,
-            "ctp_underlying": ctp_underlying,
-        })
-    return out
+    """把 `Config.OPTION_VARIETIES` 摊平成可检索的行。
+
+    🔄 2026-10-27：原读 `MAP_OPTION_LEDGER`（`option_name -> (und_key, pid, und)` 三元组），
+    现读合并后的品种台账，字段名保持不变，下游 `resolve` / `option_name_of` /
+    `products` 零改动。
+    """
+    return [
+        {
+            "option_name": e["option_name"],
+            "und_key": e["und_key"],
+            "product_id": e["product_id"],
+            "ctp_underlying": e["ctp_underlying"],
+        }
+        for e in dbsCfg.option_varieties()
+    ]
 
 
 def resolve(option_name: str) -> Optional[dict]:
@@ -176,14 +183,14 @@ def _day(v) -> Optional[date]:
 
 
 def _default_multiplier_of_option(option_name: str) -> Optional[int]:
-    """品种默认乘数：`Config.OPTIONS_MARCH` 里的 multiplier（权威）。
+    """品种默认乘数：`Config.OPTION_VARIETIES[option_name]['multiplier']`（权威）。
 
     只对已登记品种有效；未登记返回 None，由调用方回退到「非 A 类合约乘数」。
+    它是 ETF 标准码拼装的**分母**（`nominal = strike × 合约乘数 ÷ 默认乘数`），
+    缺了 A 类码会全错，不是可选装饰。
     """
-    for item in dbsCfg.OPTIONS_MARCH:
-        if item["option_name"] == option_name:
-            return int(item["multiplier"])
-    return None
+    meta = dbsCfg.option_meta(option_name)
+    return int(meta["multiplier"]) if meta else None
 
 
 def to_standard_code(cp: str, yymm: str, is_a: bool, nominal: Decimal) -> str:
@@ -566,6 +573,20 @@ def lookup_contract(contract_id: str) -> Optional[dict]:
     with SessionLocal() as session:
         r = session.query(OptionInfo).filter(OptionInfo.contract_id == cid).first()
         return _row_to_dict(r) if r is not None else None
+
+
+def lookup_contracts(contract_ids: list[str]) -> dict[str, dict]:
+    """按 `contract_id` 批量取字典行，返回 `{contract_id: info}`。
+
+    这是 10-27 之后 `bds_option_config` 的主查询通道：config 的唯一身份已改成
+    `contract_id`，不再需要先想清楚品种上下文，也不会出现「同码跨标的取错行」。
+    """
+    ids = [c for c in (contract_ids or []) if c]
+    if not ids:
+        return {}
+    with SessionLocal() as session:
+        rows = session.query(OptionInfo).filter(OptionInfo.contract_id.in_(ids)).all()
+        return {r.contract_id: _row_to_dict(r) for r in rows}
 
 
 def lookup_symbols(codes: list[str], option_name: Optional[str] = None) -> dict[str, dict]:

@@ -615,7 +615,7 @@ class OptionInfoOut(BaseModel):
 
 
 class OptionInfoProductOut(BaseModel):
-    """字典品种下拉项（只返回 `MAP_OPTION_LEDGER` 已登记的品种）。"""
+    """字典品种下拉项（只返回 `Config.OPTION_VARIETIES` 已登记的品种）。"""
 
     option_name: str = Field(description="中文品种名（行情接口入参）")
     und_key: str = Field(description="情景分组键 csi300/csi500etf/au")
@@ -632,37 +632,48 @@ class OptionInfoProductOut(BaseModel):
 class OptionConfigOut(BaseModel):
     """同步清单响应 Schema（对应 bds.OptionConfig + `bds_option_info` 的派生规格）。
 
-    ⚠️ **2026-10-27 起，规格字段（`cp`/`strike`/`multiplier`/`margin_type`/
-    `expiry_date`）与品种级字段（`underlying_symbol`/`und_key`）在本表已无物理列**，
-    全部由接口现算后返回，**只读、PUT 改不了**：
+    字段分工（三把钥匙，各对接一个外部系统，详见 `bds.models.OptionConfig` 类文档）：
+
+    | 字段 | 对齐谁 | 用途 |
+    |---|---|---|
+    | `contract_id` | `bds_option_info.contract_id` | 查合约详情 |
+    | `broker_symbol` | 账单 `bills_group.symbol` | 认领实盘持仓（**缺则风险情景报错**） |
+    | `option_name` + `end_month` | 行情接口 | 拉行情 |
+
+    ⚠️ **2026-10-27 起，`symbol` 与品种级字段（`underlying_symbol`/`und_key`）在本表
+    已无物理列**，全部由接口现算后返回，**只读、PUT 改不了**：
 
     | 字段 | 来源 |
     |---|---|
-    | `cp` / `strike` / `multiplier` / `expiry_date` | `bds_option_info`（按 `option_name` 限定范围后 join `symbol`） |
-    | `margin_type` | `option_market.margin_type_of(option_name)`，品种级派生 |
-    | `und_key` | `Config.MAP_OPTION_LEDGER[option_name]`，品种级固定 |
+    | `contract_id` | **本表实列**，唯一身份（与 `bds_option_info` 1:1） |
+    | `symbol` | `bds_option_info`（按 `contract_id` join），仅用于展示/对账 |
+    | `und_key` | `Config.OPTION_VARIETIES[option_name]['und_key']`，品种级固定 |
     | `underlying_symbol` | 品种表 `_opt_meta_by_name(option_name)` |
 
-    值为 None 表示**字典里查不到该合约**（没点「刷新字典」或该合约已退市清空），
-    不是数据错误。要修它只有一条路：`POST /bds/option-info/sync`。
+    🔴 **2026-10-27 三次变更：规格字段全部删除**（原 `cp` / `strike` / `multiplier` /
+    `margin_type` / `expiry_date`）。原先这些字段只为前端「规格（来自合约字典）」那一列
+    服务，而该列有三个问题：①内容只是把合约字典里的值抄过来，要看规格去「合约字典」页即可；
+    ②`margin_type` 根本不是字典字段，是品种级 `margin_type_of(option_name)` 派生，
+    标题「来自合约字典」名不副实；③列表每刷一次都要多一次字典 join。
+    本清单只回答「同步哪些合约、怎么拉」——规格归 `GET /option-info`。
+
+    值为 None 表示**字典里查不到该合约**（字典未刷新或该合约已退市清空），
+    不是数据错误。要修它只有一条路：刷新合约字典（批量同步的 `option_info` 段）。
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int = Field(description="主键")
-    symbol: str = Field(description="交易所标准期权代码")
-    broker_symbol: Optional[str] = Field(default=None, description="券商账单代码（对账用）")
+    contract_id: str = Field(description="openctp 合约ID（唯一身份，与字典表 1:1）")
+    symbol: Optional[str] = Field(
+        default=None, description="交易所标准期权代码【只读派生：bds_option_info】")
+    broker_symbol: Optional[str] = Field(
+        default=None,
+        description="券商账单代码（与 bills_group.symbol 对齐，认领实盘持仓用）")
     underlying_symbol: Optional[str] = Field(
         default=None, description="标的代码【只读派生】")
     und_key: Optional[str] = Field(
         default=None, description="情景分组键 csi300/csi500etf/au【只读派生】")
-    cp: Optional[str] = Field(default=None, description="C=认购 P=认沽【只读派生】")
-    strike: Optional[Decimal] = Field(
-        default=None, description="行权价（统一本位）【只读派生】")
-    multiplier: Optional[int] = Field(default=None, description="合约乘数【只读派生】")
-    margin_type: Optional[str] = Field(
-        default=None, description="保证金公式族 cffex/etf/shex【只读派生】")
-    expiry_date: Optional[date] = Field(default=None, description="到期日【只读派生】")
     option_name: str = Field(description="akshare 品种名")
     end_month: Optional[str] = Field(default=None, description="到期年月 YYYYMM；商品期权为 ALL")
     is_enabled: int = Field(description="1=参与一键同步")
@@ -675,15 +686,16 @@ class OptionConfigOut(BaseModel):
 class OptionConfigCreate(BaseModel):
     """新增同步配置入参。
 
-    🔴 **2026-10-27 起不再接受手工拼码**：`symbol` 必须在 `bds_option_info` 里解析得到，
-    解析不到直接 400「字典中无此合约，请先刷新合约字典」。这样「ETF symbol 多 6 位」
-    （10-26 那次事故）这类拼写错误在结构上不可能再发生。
+    🔴 **2026-10-27 起不再接受手工拼码**：入参里的合约必须能在 `bds_option_info` 里
+    解析到，解析不到直接 400「字典中无此合约，请先刷新合约字典」。这样「ETF symbol
+    多 6 位」（10-26 那次事故）这类拼写错误在结构上不可能再发生。
 
     两种入参写法（二选一，`contract_id` 优先）：
 
     - `{"contract_id": "10012562"}` —— 从合约字典页勾选，最稳
     - `{"symbol": "P2611M06250", "option_name": "南方中证500ETF期权"}`
-      —— ETF 标准码跨标的会撞，**必须**带 `option_name` 做品种限定
+      —— 只是**查询用的入参**，落库时会被兑换成 `contract_id`；因为 ETF 标准码
+      跨标的会撞，**必须**带 `option_name` 限定品种
 
     `end_month` 留空时按字典的 `expire_year_month` 自动推（商品期权恒 `ALL`）。
 
@@ -694,48 +706,82 @@ class OptionConfigCreate(BaseModel):
     contract_id: Optional[str] = Field(
         default=None, description="合约字典主键（openctp 的「合约ID」，ETF 即券商码数字部分）")
     symbol: Optional[str] = Field(
-        default=None, description="交易所标准码（须能在字典中查到；ETF 须同时给 option_name）")
-    option_name: str = Field(description="akshare 品种名，须在 Config.MAP_OPTION_LEDGER 中")
+        default=None,
+        description="交易所标准码，仅作查询入口（落库前兑换成 contract_id）；ETF 须同时给 option_name")
+    option_name: str = Field(description="akshare 品种名，须在 Config.OPTION_VARIETIES 中")
     end_month: Optional[str] = Field(
         default=None, description="到期年月 YYYYMM；留空按字典推导；商品期权恒 ALL")
-    broker_symbol: Optional[str] = Field(default=None, description="券商账单代码（可选）")
+    broker_symbol: Optional[str] = Field(
+        default=None,
+        description="券商账单代码（与 bills_group.symbol 对齐）；有实盘持仓的合约必须填，"
+                    "否则风险情景推演会以「不在同步清单里」报错")
     is_enabled: int = Field(default=1, description="1=参与一键同步")
     note: Optional[str] = Field(default=None, description="备注")
 
 
 class OptionConfigUpdate(BaseModel):
-    """修改配置。**只允许改人工列**（`is_enabled` / `note`）。
+    """修改配置。**只允许改人工列**（`broker_symbol` / `is_enabled` / `note`）。
 
-    身份字段（`symbol` / `option_name` / `end_month`）与规格字段都不可改：
-    前者改了就是另一个合约（应删除后重建），后者物理上已不存在于本表
-    （见 `OptionConfigOut` 的派生来源表）。
+    身份字段 `contract_id` 与「拉行情入参」`option_name` / `end_month` 都不可改：
+    前者改了就是另一个合约（应 DELETE 后 POST 重建），后两者改了会指向另一个品种/到期月
+    （同样应重建）。规格字段（`cp`/`strike`/`multiplier`/`margin_type`/`expiry`）
+    物理上已不存在于本表，权威在 `bds_option_info`。
     **一律 None 视为「不改」**，避免 PUT 全字段覆盖把未传的列清空。
+
+    `broker_symbol` 是例外语义：传空串 `""` 表示**清空**（落库 None）。
+    ⚠️ 清空它会**让该合约退出风险情景推演**（`contracts` 匹配不到账单码，
+    `load_context()` 直接 raise），不是"只是少个备注"。原先它只能新增时写、
+    写错就只能删行重建，所以 2026-10-27 才开放 PUT 修改。
     """
 
+    broker_symbol: Optional[str] = Field(
+        default=None,
+        description="券商账单代码（与 bills_group.symbol 对齐，认领实盘持仓用）；传空串=清空")
     is_enabled: Optional[int] = Field(default=None, description="1=参与一键同步")
     note: Optional[str] = Field(default=None, description="备注")
 
 
 class OptionMarketOut(BaseModel):
-    """期权行情响应 Schema（对应 bds.OptionMarket）。
+    """期权行情响应 Schema（对应 bds.OptionMarket + `bds_option_info` 的派生字段）。
 
     `settle` / `delta_opt` 为 None 表示「该品种接口不提供」，不是数据缺失 ——
     股指与 ETF 期权的 akshare 接口本来就没有这两个字段。
+
+    🔴 **2026-10-27 第四轮：`symbol` 字段彻底删除**（不只是不落库，响应里也不再返回）。
+    本表的唯一身份就是 `contract_id`，交易所标准码一律去「合约字典」页看 —— 行情表既
+    不存它，也不再 join 出来给前端。前端「代码」列因此改为「合约ID」列、搜索框改为
+    按 `contract_id` 模糊匹配。
+
+    ⚠️ 以下字段在库里已无物理列，由接口 `join bds_option_info` 现算：
+
+    | 字段 | 现算来源 |
+    |---|---|
+    | `contract_id` | 本表实列（唯一身份，可直接 join） |
+    | `broker_symbol` | `bds_option_config.broker_symbol`（按 `contract_id` 直取） |
+    | `underlying_symbol` / `und_key` | `Config.OPTION_VARIETIES`（按 `option_name`） |
+    | `option_type` | `bds_option_info.cp`（C→call / P→put） |
+    | `delisted_date` | `bds_option_info.last_trade_date` |
+    | `days_left` | `last_trade_date − trade_date` |
+    | `multiplier` | `bds_option_info.multiplier`（A 类 10180） |
+
+    `info_missing=True` 表示字典里找不到这个 `contract_id`（极端情况：字典被清或该合约
+    从未同步过），此时上述派生字段全部为 None。**正常同步路径不会产生这种行**——
+    字典里没有的合约现在会被直接跳过并计入 `skip_reasons["字典无此合约"]`。
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int = Field(description="主键")
-    symbol: str = Field(description="交易所标准期权代码")
+    contract_id: str = Field(description="openctp 合约ID（唯一身份）")
     broker_symbol: Optional[str] = Field(default=None, description="券商账单代码（ETF 有）")
     trade_date: date = Field(description="行情日期（交易日）")
-    underlying_symbol: str = Field(description="标的代码")
-    und_key: str = Field(description="情景分组键")
-    option_type: str = Field(description="call / put")
-    price_strike: Decimal = Field(description="行权价")
-    delisted_date: Optional[date] = Field(default=None, description="到期日")
-    days_left: Optional[int] = Field(default=None, description="剩余自然日")
-    multiplier: int = Field(description="合约乘数")
+    underlying_symbol: Optional[str] = Field(default=None, description="标的代码【派生】")
+    und_key: Optional[str] = Field(default=None, description="情景分组键【派生】")
+    option_type: Optional[str] = Field(default=None, description="call / put【派生】")
+    price_strike: Decimal = Field(description="行权价（当日接口口径）")
+    delisted_date: Optional[date] = Field(default=None, description="到期日【派生】")
+    days_left: Optional[int] = Field(default=None, description="剩余自然日【派生】")
+    multiplier: Optional[int] = Field(default=None, description="合约乘数【派生】")
     price: Optional[Decimal] = Field(default=None, description="最新价（盘中实时/盘后收盘）")
     pre_settle: Optional[Decimal] = Field(default=None, description="前结算价")
     settle: Optional[Decimal] = Field(default=None, description="结算价（仅商品期权可得）")
@@ -748,6 +794,7 @@ class OptionMarketOut(BaseModel):
     quote_time: Optional[datetime] = Field(default=None, description="接口返回的行情时点")
     source: str = Field(description="shfe_direct / akshare_board")
     sync_time: datetime = Field(description="本次写入时间")
+    info_missing: bool = Field(default=False, description="字典缺该合约 ⇒ 派生字段为空")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
 

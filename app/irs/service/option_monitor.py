@@ -5,8 +5,9 @@
 
 🔄 **2026-10-27 到期日算法已迁出本模块**：`_calc_delisted_date()` 的实现搬到
 `bds.services.market_data.option_market`（基础数据的算法归基础数据层），
-本模块改为**引用**它。同期 `OPTIONS_MARCH` / `RULE_EXERCISE_DATE` 的正源也归
-`bds.config`，本模块只读不再定义 —— 依赖方向自此固定为 irs → bds。
+本模块改为**引用**它。同期品种台账的正源归 `bds.config.Config.OPTION_VARIETIES`
+（`OPTIONS_MARCH` 与 `MAP_OPTION_LEDGER` 已合并为一张表），本模块只经
+`BdsCfg.option_meta()` 读取，不再持有任何副本 —— 依赖方向固定为 irs → bds。
 """
 import re
 from datetime import datetime, time as dtime
@@ -26,16 +27,12 @@ from server_fast.app.irs.service.common import logger
 def option_monitor_sync_orm(option_name: str, end_month: str):
     """通过 akshare + gm 获取期权行情并 upsert 到 OptionMonitor 表。
 
-    :param option_name: 期权品种名称（对应 `bds.config.Config.OPTIONS_MARCH` 的 option_name）
+    :param option_name: 期权品种名称（对应 `bds.config.Config.OPTION_VARIETIES` 的键）
     :param end_month: 到期年月，格式 "YYYYMM"（如 "202608"）
     :return: 插入+更新的总条数
     """
-    # 1. 从配置查找 underlying_symbol、multiplier、rule_exercise_date
-    config_item = None
-    for item in BdsCfg.OPTIONS_MARCH:
-        if item['option_name'] == option_name:
-            config_item = item
-            break
+    # 1. 从品种台账取 underlying_symbol、multiplier、rule_exercise_date
+    config_item = BdsCfg.option_meta(option_name)
     if config_item is None:
         raise ValueError(f"unknown option_name: {option_name}")
     underlying_symbol = config_item['underlying_symbol']

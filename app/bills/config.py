@@ -55,7 +55,7 @@ class Config:
     }
     # ⚠️ 合约乘数（原 MAP_MULTIPLIER）与 AkShare 期货 market 参数（原 MAP_AKSHARE_MARKET）
     #    已上移至 app/bds/config.py —— 二者是「合约/交易所的静态属性」，与账单格式无关，
-    #    同源事实（irs 的 OPTIONS_MARCH 也各自存了乘数）应只有一处定义。
+    #    同源事实（品种默认乘数另见 bds.Config.OPTION_VARIETIES）应只有一处定义。
     #    本模块只保留「账单方言解析」：市场方言(MAP_MARKET) / 股东账号首字母(MAP_ACOUNT_MARKET)
     #    / 交易类型(MAP_CATEGORY) / 代码修正(MAP_SYMBOL)。
 

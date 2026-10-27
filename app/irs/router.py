@@ -797,17 +797,16 @@ def list_option_monitors(
 
 @router.get("/option-underlyings")
 def list_option_underlyings():
-    """返回期权标的下拉选项（数据源 `bds.config.Config.OPTIONS_MARCH`，无数据库查询）。
+    """返回期权标的下拉选项（数据源 `bds.config.Config.OPTION_VARIETIES`，无数据库查询）。
 
-    从配置元组提取 underlying_symbol 列表，供前端 NSelect 使用。
-    label 格式为 `option_name`，value 为 underlying_symbol。
+    label = 品种名（option_name），value = 标的完整代码（underlying_symbol）。
 
-    🔄 2026-10-27 起品种表正源在 bds（此前本文件读 `IrsCfg.OPTIONS_MARCH`，
-    与 bds 各存一份副本）。依赖方向自此固定为 irs → bds。
+    🔄 2026-10-27 品种台账合并后改读访问器 `option_varieties()`：
+    本文件不再知道台账的内部结构（dict/元组/其他），结构再变无需同步改。
     """
     underlying_symbols = [
-        {"label": item['option_name'], "value": item['underlying_symbol']}
-        for item in BdsCfg.OPTIONS_MARCH
+        {"label": item["option_name"], "value": item["underlying_symbol"]}
+        for item in BdsCfg.option_varieties()
     ]
     return {"underlying_symbols": underlying_symbols}
 

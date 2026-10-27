@@ -7,7 +7,8 @@
    没有这张配置表，"一键同步配置的全部期权"无处落地（持仓表是静态属性、监测表是全量铺开）。
 2. **接口只给「品种×到期月」全量**，没有单合约查询 ⇒ 实现上必然是「拉整批 → 按配置过滤」。
    好处是以后往清单加同月合约不用重新请求。
-3. **按日快照**：唯一键 `(symbol, trade_date)`，同日重跑幂等覆盖、跨日自然成为时间序列。
+3. **按日快照**：唯一键 `(contract_id, trade_date)`，同日重跑幂等覆盖、跨日自然成为时间序列。
+   ⚠️ 不能用 `symbol`：ETF 标准码不含标的 6 位，跨标的同码会把两个标的判成同一行。
 4. **三列价格分开**：`price`（最新/收盘）、`pre_settle`（前结）、`settle`（结算价，仅商品期权可得）。
    `irs_option_monitor` 把三者挤在一列，导致 au 存收盘价 11.50 而真实结算价 12.18。
 5. **降级链只在本文件一处**：结算价缺失时下游按 `COALESCE(settle, pre_settle, price)` 降级。
@@ -350,15 +351,17 @@ def _sina_code(und_symbol: str, und_key: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _variety_meta(option_name: str) -> dict:
-    """取品种元信息（乘数 / 到期规则 / 品种类型）。
+    """取品种元信息（乘数 / 到期规则 / 品种类型 / 标的 / und_key）。
 
-    🔄 2026-10-27 起读 **bds 自己的** `Config.OPTIONS_MARCH`（此前读 `IrsCfg` 的副本，
-    造成 bds → irs 的反向依赖）。irs 现在反向引用同一份。
+    🔄 2026-10-27 两张表合并后，正源是 `Config.OPTION_VARIETIES`，经
+    `Config.option_meta()` 读取（含 `option_name` 注入）。未知品种抛 ValueError ——
+    这里与 `option_info.resolve()` 的「返回 None 不抛错」刻意不同：本函数只处理
+    配置清单里出现的品种，出现未知品种说明配置有误，必须暴露。
     """
-    for item in dbsCfg.OPTIONS_MARCH:
-        if item["option_name"] == option_name:
-            return item
-    raise ValueError(f"未知期权品种（不在 Config.OPTIONS_MARCH 中）: {option_name}")
+    meta = dbsCfg.option_meta(option_name)
+    if meta is None:
+        raise ValueError(f"未知期权品种（不在 Config.OPTION_VARIETIES 中）: {option_name}")
+    return meta
 
 
 # 品种类型 → 保证金公式族。三套公式不可互套（MEMORY 铁律），故存「族」不存费率。
@@ -408,18 +411,20 @@ def _sync_group(session, option_name: str, end_month: str,
     | A 类调整合约 | 用品种乘数 10000，市值差 1.8% | 用字典的 10180 |
     | 2027 年合约 | `_calc_delisted_date()` 抛 `日历数据不足` | 用字典的 `last_trade_date`，不碰日历 |
 
-    字典缺失时回退旧逻辑（品种乘数 + 算法），并记 `info_miss` 告警——
-    宁可降级也不让整组同步失败。
+    字典缺失时**整行跳过**（记 `skip_reasons["字典无此合约"]`），不再回退品种乘数
+    + 自研到期日 —— 10-27 瘦身后行情表已无这些列，回退无处可写。
+
+    **配置清单按 `contract_id` 定位**（10-27 二次变更）：`cfgs` 里的 `contract_id`
+    先批量换成字典行，再由字典给出交易所标准码去匹配行情返回值。配置里有、字典里
+    没有的合约记 `skip_reasons["配置合约在字典中缺失"]` —— 它们匹配不上 `wanted`，
+    不记一笔就会变成"少了几行却不知道为什么"。
     """
     meta = _variety_meta(option_name)
     is_commodity = meta["option_type"] == "商品期权"
-    variety_multiplier = int(meta["multiplier"])
     rule = meta["rule_exercise_date"]
     underlying_symbol = meta["underlying_symbol"]
-
-    # und_key 从台账取（P3 后配置表不再存这一列），台账缺失才回退配置行
-    ledger = option_info.resolve(option_name) or {}
-    und_key = ledger.get("und_key") or (cfgs[0].und_key if cfgs else None)
+    # und_key 也是品种属性，10-27 合并后与乘数/到期规则同处一处，不再跨表取
+    und_key = meta["und_key"]
 
     trade_date = _resolve_trade_date(session, closed_only=is_commodity)
 
@@ -451,15 +456,18 @@ def _sync_group(session, option_name: str, end_month: str,
     # 此时标的现价与派生列无意义（见下方 ud 处的说明）。
     is_today_snapshot = trade_date == datetime.now().date()
 
-    # 配置清单：交易所标准码 → 配置行（过滤用，同时提供 broker_symbol）
-    wanted: dict[str, OptionConfig] = {}
-    for c in cfgs:
-        wanted[normalize_symbol(c.symbol)] = c
-
-    # 逐合约规格：从字典取乘数与权威到期日。
-    # ⚠️ 必须传 option_name 做品种过滤：ETF 标准码不含标的 6 位，9 个 ETF 标的会拼出
-    # 同码（`C2612M01350` 同时属于 588000 与 588080），不过滤就会串到别的标的。
-    info_map = option_info.lookup_symbols(list(wanted.keys()), option_name=option_name)
+    # 配置清单：本次要同步哪些合约，**按 contract_id 取字典行**（唯一身份，无歧义）。
+    # 再由字典给出交易所标准码 —— 行情接口返回的是标准码，过滤只能靠它。
+    # 10-27 前这里是 `{normalize_symbol(c.symbol)}`，需要靠 `option_name` 限定品种
+    # 才不会把 ETF 的同码合约串到别的标的；换成 contract_id 后这一步天然消失。
+    cfg_info = option_info.lookup_contracts([c.contract_id for c in cfgs])
+    lost_cfg = [c.contract_id for c in cfgs if c.contract_id not in cfg_info]
+    # 逐合约规格：{标准码: info}。同一品种内标准码唯一（= 同一标的），不会互相覆盖。
+    info_map: dict[str, dict] = {
+        normalize_symbol(i["symbol"]): i
+        for i in cfg_info.values() if i.get("symbol")
+    }
+    wanted: set[str] = set(info_map)
     spec_warnings: list[str] = []
 
     # 标的价：同 und_key 只取一次（au 按合约月份各取一次）
@@ -479,6 +487,11 @@ def _sync_group(session, option_name: str, end_month: str,
         计数只按原因累计，总数在收尾时求和——避免两处各数一次导致对不上。
         """
         skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
+    # 配置里有、字典里查不到的合约：行情行匹配不上 wanted，会静默消失。
+    # 这里先按合约数记一笔，让「少了几行」在结果的 skip_reasons 里能看见。
+    for _ in lost_cfg:
+        _bump("配置合约在字典中缺失")
 
     for row in records:
         try:
@@ -550,23 +563,25 @@ def _sync_group(session, option_name: str, end_month: str,
                 _bump("行权价为空或<=0")
                 continue
 
-            cfg = wanted[code]
+            # 方向只用于算内在价值（本表已不存 option_type，出参由 info.cp 派生）
             option_type = "call" if cp.upper() == "C" else "put"
-            # 规格（乘数 / 到期日）优先取字典：它是这两个事实的权威源。
-            # 字典缺失才回退旧逻辑，且回退必须留痕 —— 「静默用品种乘数」正是
-            # A 类合约差 1.8% 市值的成因。
+
+            # 规格（乘数 / 到期日 / 合约身份）**只能**取字典：10-27 瘦身后
+            # `bds_option_market` 不再存 `multiplier` / `delisted_date` / `und_key` 等副本，
+            # **没有可回退的落点** ⇒ 字典缺行就整行跳过（并计入 skip_reasons），
+            # 不再"回退品种乘数 + 算法到期日"。宁可少一行且说清原因，也不要写一行
+            # 乘数可能差 1.8%（A 类）的行情。
             spec = info_map.get(code)
-            if spec:
-                multiplier = int(spec["multiplier"])
-                delisted = spec["last_trade_date"]
-                warn = _cross_check_delisted(code, em, rule, delisted)
-                if warn:
-                    spec_warnings.append(warn)
-            else:
-                multiplier = variety_multiplier
-                delisted = _calc_delisted_date(em, rule)
-                spec_warnings.append(
-                    f"{code}: 字典无此合约，回退品种乘数 {variety_multiplier} + 算法到期日")
+            if spec is None:
+                _bump("字典无此合约")
+                continue
+            contract_id = spec["contract_id"]
+            multiplier = int(spec["multiplier"])
+            delisted = spec["last_trade_date"]
+            # 算法到期日已降级为**纯交叉校验**：结果不写库，只作为 warning 暴露
+            warn = _cross_check_delisted(code, em, rule, delisted)
+            if warn:
+                spec_warnings.append(warn)
             # 标的现价是**同步那一刻**的值，只对「当日快照」成立。
             # 盘前跑同步拿到的是上一交易日的收盘快照（trade_date=昨天），此时再取现价
             # 就是把今天的价贴到昨天那一行上——实测 10-27 08:04 把 10-26 的
@@ -587,16 +602,11 @@ def _sync_group(session, option_name: str, end_month: str,
                 value_t = tv if tv > 0 else Decimal("0")
 
             parsed.append(dict(
-                symbol=code,
-                broker_symbol=cfg.broker_symbol,
+                # 唯一身份：contract_id。标准码**不入库**（与 bds_option_info.symbol 完全重复，
+                # 实测 11 行零差异），展示/搜索时 join 字典现取。
+                contract_id=contract_id,
                 trade_date=trade_date,
-                underlying_symbol=underlying_symbol,
-                und_key=und_key,
-                option_type=option_type,
                 price_strike=strike,
-                delisted_date=delisted,
-                days_left=(delisted - trade_date).days,
-                multiplier=multiplier,
                 price=price,
                 pre_settle=pre_settle,
                 settle=settle,
@@ -614,17 +624,19 @@ def _sync_group(session, option_name: str, end_month: str,
             _bump("解析异常")
             logger.warning("[option_market] 单行解析失败 %s: %s", option_name, e)
 
-    # ---- UPSERT（唯一键 symbol + trade_date）----
+    # ---- UPSERT（唯一键 contract_id + trade_date）----
+    # 用 contract_id 而不是 symbol：ETF 标准码不含标的 6 位，`C2612M01350` 同属
+    # 588000 与 588080，按 symbol 查已有行会把两个标的判成同一行、后写覆盖先写。
     insert = update = 0
     if parsed:
-        symbols = [p["symbol"] for p in parsed]
+        cids = [p["contract_id"] for p in parsed]
         exist = {
-            r.symbol: r for r in session.query(OptionMarket).filter(
+            r.contract_id: r for r in session.query(OptionMarket).filter(
                 OptionMarket.trade_date == trade_date,
-                OptionMarket.symbol.in_(symbols)).all()
+                OptionMarket.contract_id.in_(cids)).all()
         }
         for p in parsed:
-            cur = exist.get(p["symbol"])
+            cur = exist.get(p["contract_id"])
             if cur is None:
                 session.add(OptionMarket(**p))
                 insert += 1
@@ -672,7 +684,11 @@ def _parse_quote_time(v) -> Optional[datetime]:
 # ---------------------------------------------------------------------------
 
 def build_sync_plan() -> dict:
-    """同步前置信息：启用张数、品种×到期月组合数、涉及品种。"""
+    """同步前置信息：启用张数、品种×到期月组合数、涉及品种。
+
+    ⚠️ `symbol_count` 键名保留（前端在用），语义是**合约张数**，10-27 起表的身份
+    是 `contract_id`，不再有 `symbol` 列。
+    """
     with SessionLocal() as session:
         rows = session.query(OptionConfig).filter(OptionConfig.is_enabled == 1).all()
         groups = {(r.option_name, r.end_month or "") for r in rows}
