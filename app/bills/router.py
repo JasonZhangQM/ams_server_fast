@@ -15,7 +15,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from server_fast.app.bills.config import Config
 from server_fast.app.bills.constants import (
@@ -128,7 +128,9 @@ def list_groups(
     account: Optional[str] = Query(default=None),
     category: Optional[str] = Query(default=None),
     symbol: Optional[str] = None,
-    value_only: Optional[bool] = Query(default=None),
+    keyword: Optional[str] = None,
+    value_filter: Optional[str] = Query(default=None, pattern="^(gt|lt|eq|ne)$",
+                                        description="市值筛选：gt=>0；lt=<0；eq==0；ne!=0"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -136,7 +138,8 @@ def list_groups(
     """返回非 cash 类别的 Group 列表。
 
     account/category 单值精确匹配，symbol 为 search_fields（模糊）。
-    value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录。
+    keyword 为合并搜索：代码模糊命中，或名称模糊命中对应代码（OR）。
+    value_filter 按当前市值（value_total）与 0 比较筛选。
     """
     # 过滤掉 cash 类别
     # query = db.query(Group).filter(Group.category != "cash")
@@ -144,13 +147,24 @@ def list_groups(
     query = _filter_query(
         query,
         [
-            (Group.account, account, "=="),
-            (Group.category, category, "=="),
+            (Group.account, account, "eq"),
+            (Group.category, category, "eq"),
             (Group.symbol, symbol, "contains"),
         ],
     )
-    # 仅保留当前市值不为 0 的记录
-    if value_only:
+    # 合并搜索：Group 表没有名称列，名称走 bills_bill 的 (symbol, name) 反查代码集合，
+    # 再与代码模糊匹配取并集（OR）
+    if keyword:
+        name_symbols = db.query(Bill.symbol).filter(Bill.name.contains(keyword))
+        query = query.filter(or_(Group.symbol.contains(keyword), Group.symbol.in_(name_symbols)))
+    # 市值筛选：value_total 与 0 比较（NULL 不满足任何比较，与原 value_only!=0 语义一致）
+    if value_filter == "gt":
+        query = query.filter(Group.value_total > 0)
+    elif value_filter == "lt":
+        query = query.filter(Group.value_total < 0)
+    elif value_filter == "eq":
+        query = query.filter(Group.value_total == 0)
+    elif value_filter == "ne":
         query = query.filter(Group.value_total != 0)
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
@@ -166,6 +180,7 @@ def list_bills(
     category: Optional[str] = Query(default=None),
     symbol: Optional[str] = None,
     name: Optional[str] = None,
+    keyword: Optional[str] = None,
     vm_symbol: Optional[str] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -174,6 +189,7 @@ def list_bills(
     """返回 Bill 列表。
 
     account/category 单值精确匹配，symbol 模糊，name 模糊（标的中文名 / 合约简称）。
+    keyword 为合并搜索：代码或名称任一模糊命中即可（OR），供前端单输入框使用。
     vm_symbol 按归属标的精确筛选（经 bills_group_symbol 的 (category, symbol) 关联）。
 
     v3 起每行额外带：`vm_symbol`（经 bills_group_symbol 归属，融资融券恒为 None）
@@ -187,12 +203,15 @@ def list_bills(
     query = _filter_query(
         query,
         [
-            (Bill.account, account, "=="),
-            (Bill.category, category, "=="),
+            (Bill.account, account, "eq"),
+            (Bill.category, category, "eq"),
             (Bill.symbol, symbol, "contains"),
             (Bill.name, name, "contains"),
         ],
     )
+    # 合并搜索：一个输入框同时匹配代码与名称，命中任一即可（AND 在这里是错的）
+    if keyword:
+        query = query.filter(or_(Bill.symbol.contains(keyword), Bill.name.contains(keyword)))
     # 归属标的筛选：vm_symbol 不是 bills_bill 的列，来自 bills_group_symbol
     # （两表以 (category, symbol) 关联，同一组在 group_symbol 里唯一）。
     # 用 EXISTS 而不是 JOIN：JOIN 在关联逻辑万一不唯一时会放大行数，让 count 与分页全错。
@@ -242,9 +261,9 @@ def list_bills(
 # Profit 列表
 @router.get("/profits", response_model=PageResponse[ProfitOut])
 def list_profits(
-    account: Optional[List[str]] = Query(default=None),
-    category: Optional[List[str]] = Query(default=None),
-    symbol: Optional[str] = None,
+    account: Optional[str] = Query(default=None),
+    category: Optional[str] = Query(default=None),
+    keyword: Optional[str] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -253,7 +272,8 @@ def list_profits(
 
     Profit 通过 bill_id 外键关联 Bill。原 Admin 的
     search_fields=bill__symbol、list_filter=bill__account
-    均作用于关联 Bill；account/category 支持多值 IN 匹配，
+    均作用于关联 Bill；account/category 为单值精确匹配，
+    keyword 为代码/名称合并模糊搜索（OR），
     故此处通过 JOIN Bill 实现过滤，并在结果中补充关联字段。
 
     COUNT 与数据查询共享同一 query 对象（含 JOIN 与过滤条件），
@@ -261,21 +281,33 @@ def list_profits(
     """
     query = db.query(Profit)
     # 仅在存在关联过滤参数时才 JOIN，避免无谓联表
-    if any(v is not None for v in (account, category, symbol)):
+    if account or category or keyword:
         query = query.join(Bill, Profit.bill_id == Bill.id)
         query = _filter_query(
             query,
             [
-                (Bill.account, account, "in"),
-                (Bill.category, category, "in"),
-                (Bill.symbol, symbol, "contains"),
+                (Bill.account, account, "eq"),
+                (Bill.category, category, "eq"),
             ],
         )
-    # COUNT 与数据查询过滤条件一致（JOIN 已包含在内），在 offset/limit 之前计算
-    total = query.count()
+        # 代码/名称合并模糊匹配：任一字段包含关键词即可
+        if keyword:
+            query = query.filter(or_(Bill.symbol.contains(keyword), Bill.name.contains(keyword)))
+    # COUNT 与数据查询过滤条件一致（JOIN 已包含在内），在 offset/limit 之前计算。
+    # 用 count(Profit.id) 直查而非 query.count()：后者会包一层 SELECT 全列的子查询。
+    # ⚠️ 必须带列名（count(Profit.id)），写 count(*)/func.count() 会因 with_entities
+    #    丢掉隐式 FROM，实际执行 "SELECT count(*)"（无 FROM）恒返回 1。
+    total = query.with_entities(func.count(Profit.id)).scalar() or 0
     # 必须显式排序：MySQL 对无 ORDER BY 的查询不保证顺序，服务端分页会跳行/重行。
     # bill_id 在 bills_profit 上是 unique（一对一），单列倒序即确定性排序，无需加 id 兜底。
-    items = query.order_by(Profit.bill_id.desc()).offset(offset).limit(limit).all()
+    # joinedload：一次 JOIN 取回关联 Bill，替代逐行懒加载（原实现每行 1 条 SELECT）。
+    items = (
+        query.options(joinedload(Profit.bill))
+        .order_by(Profit.bill_id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     result = []
     for p in items:
         d = p.to_dict()
@@ -293,24 +325,31 @@ def list_profits(
 @router.get("/group-accs", response_model=PageResponse[GroupAccOut])
 def list_group_accs(
     account: Optional[str] = Query(default=None),
-    acc_aset_only: Optional[bool] = Query(default=None),
+    acc_aset_filter: Optional[str] = Query(default=None, pattern="^(gt|lt|eq|ne)$",
+                                           description="账户价值筛选：gt=>0；lt=<0；eq==0；ne!=0"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
     """返回 GroupAcc 列表。
 
-    account 单值精确匹配，acc_aset_only 为 True 时仅返回账户价值不为 0 的记录。
+    account 单值精确匹配；acc_aset_filter 按账户价值（acc_aset）与 0 比较筛选。
     """
     query = db.query(GroupAcc)
     query = _filter_query(
         query,
         [
-            (GroupAcc.account, account, "=="),
+            (GroupAcc.account, account, "eq"),
         ],
     )
-    # 仅保留账户价值不为 0 的记录
-    if acc_aset_only:
+    # 账户价值筛选（NULL 不满足任何比较）
+    if acc_aset_filter == "gt":
+        query = query.filter(GroupAcc.acc_aset > 0)
+    elif acc_aset_filter == "lt":
+        query = query.filter(GroupAcc.acc_aset < 0)
+    elif acc_aset_filter == "eq":
+        query = query.filter(GroupAcc.acc_aset == 0)
+    elif acc_aset_filter == "ne":
         query = query.filter(GroupAcc.acc_aset != 0)
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
@@ -349,7 +388,7 @@ def list_group_symbols(
     query = _filter_query(
         query,
         [
-            (GroupSymbol.category, category, "=="),
+            (GroupSymbol.category, category, "eq"),
             (GroupSymbol.symbol, symbol, "contains"),
             # 归属标的是受控代码值，必须精确；_filter_query 只认 'eq'，
             # 写成 '==' 会落进 else 分支做 contains，把 SHSE.000300 串成前缀匹配

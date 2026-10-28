@@ -497,19 +497,19 @@ def sync_index_history():
 
 @router.get("/index-histories", response_model=PageResponse[IndexHistoryOut])
 def list_index_histories(
-    symbol: Optional[List[str]] = Query(None, description="代码多选精确匹配"),
+    symbol: Optional[str] = Query(None, description="代码精确匹配"),
     start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询指数历史行情，支持代码多选和日期范围筛选。
+    """查询指数历史行情，支持代码单选精确匹配和日期范围筛选。
 
     响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
     """
     query = db.query(IndexHistory)
     if symbol:
-        query = query.filter(IndexHistory.symbol.in_(symbol))
+        query = query.filter(IndexHistory.symbol == symbol)
     if start_date:
         query = query.filter(IndexHistory.trade_date >= start_date)
     total = query.count()
