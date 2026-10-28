@@ -28,17 +28,29 @@ def _is_fatal_gm_error(message: str) -> bool:
     return any(h.lower() in msg_lower for h in _FATAL_ERROR_HINTS)
 
 
-def sync_one(symbol, table):
+# 财务四张表：都走 gm 接口，且后端端点支持 force=true 绕过「已是最新报告期」预判
+FUND_TABLES = frozenset({
+    'fund-balance', 'fund-income', 'fund-cashflow', 'finance-deriv',
+})
+
+
+def sync_one(symbol, table, force_fund=False):
     '''调用单只同步接口，返回 {status, message}。
 
     status: success | no_data | error | fatal
     fatal 表示 gm 终端连接断开等致命错误——本笔不重试；是否中止整批由 executor 判定。
+
+    force_fund=True 时，财务四张表带 force=true 参数：跳过库内 MAX(rpt_date) 与
+    bds_symbol_info.latest_rpt_date 的比对，强制调 gm 接口。其余表不受影响。
     '''
     url = f'{API_BASE}/bds/sync/{table}'
+    params = {'symbol': symbol}
+    if force_fund and table in FUND_TABLES:
+        params['force'] = 'true'
     last_err = ''
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            r = SESSION.post(url, params={'symbol': symbol}, timeout=REQUEST_TIMEOUT)
+            r = SESSION.post(url, params=params, timeout=REQUEST_TIMEOUT)
             if r.status_code == 200:
                 body = r.json()
                 # 后端明确标记 fatal=true → gm 终端断连，立即返回不重试

@@ -436,6 +436,12 @@ class BatchSyncRequest(BaseModel):
                     "仅作用于 all/industry/index，explicit 手写清单不做退市过滤",
     )
     max_symbols: int = Field(default=0, ge=0, description="最多处理几只 symbol: 0=不限")
+    skip_latest_rpt_check: bool = Field(
+        default=False,
+        description="是否跳过「已是最新报告期」预判（仅影响财务四张表 fund-balance/fund-income/"
+                    "fund-cashflow/finance-deriv）。True=不比对 bds_symbol_info.latest_rpt_date，"
+                    "强制调用 gm 接口；False=库内 MAX(rpt_date) 已追平则直接跳过，省 gm 请求",
+    )
 
 
 class MacroSyncRequest(BaseModel):

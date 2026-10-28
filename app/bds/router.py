@@ -1756,6 +1756,8 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
             mark_synced_when_done=req.mark_synced,
             on_progress=on_progress,
             stop_event=stop_event,
+            # 跳过报告期校验：财务四张表不再比对 latest_rpt_date，强制调 gm 接口
+            force_fund=req.skip_latest_rpt_check,
         )
 
         # 5. 收集失败明细（error + fatal 都收）
@@ -2108,6 +2110,9 @@ def run_batch_sync(req: BatchSyncRequest):
             scope_params["industry_name"] = req.industry
         elif req.scope == "explicit":
             scope_params["symbols"] = req.symbols
+        # 行为参数存进 JSON 而不是新增表列：历史任务缺该键 ⇒ 一律按 False（不跳过）解读，
+        # 无需 DDL、无需回填历史行；前端「运行中回填」也从这里还原开关状态
+        scope_params["skip_latest_rpt_check"] = bool(req.skip_latest_rpt_check)
 
         task = BdsSyncTask(
             scope=req.scope,

@@ -14,11 +14,13 @@ from .config import (SLEEP_MIN, SLEEP_MAX, FAIL_STREAK_LIMIT, FAIL_STREAK_SLEEP,
 from .sync import sync_one, mark_synced
 
 
-def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=None):
+def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=None,
+              force_fund=False):
     '''执行 (symbol, table) 任务列表，返回结果记录列表。
 
     on_progress: 可选回调，签名 fn(symbol, table, status, done_count, total_count)
     stop_event: 可选 threading.Event，set 后提前中止（最后一次 sync_one 返回后跳出）
+    force_fund: True 时财务四张表跳过「已是最新报告期」预判，强制调 gm 接口
 
     结果契约（fatal 语义，2026-10-18 起）：
       - status='fatal'：单笔疑似 gm 断连，未达熔断阈值，**不代表整批失败**；
@@ -48,7 +50,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
         sym_statuses = []
         for table in tables:
             i += 1
-            res = sync_one(sym, table)
+            res = sync_one(sym, table, force_fund=force_fund)
             results.append({'symbol': sym, 'table': table, **res})
             sym_statuses.append(res['status'])
 
