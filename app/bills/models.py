@@ -198,9 +198,8 @@ class Profit(Base, BaseModel):
         'cost_u_long', 'cost_u_short',
     ]
 
-    __table_args__ = (
-        Index('idx_bills_profit_bill_id', 'bill_id'),
-    )
+    # 不额外建 bill_id 索引：bill_id 上的 unique=True 已生成唯一索引，
+    # 冗余索引只会放大写入开销（原 idx_bills_profit_bill_id 已删除）。
 
     def __str__(self) -> str:
         return f'账单收益-{self.bill_id or self.id}'
