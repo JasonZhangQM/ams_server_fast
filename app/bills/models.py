@@ -437,14 +437,16 @@ class ProfitYear(Base, BaseModel):
 
 
 class RiskParam(Base, BaseModel):
-    """风险参数（保证金率/波动率/报价覆盖），人工维护 + 日结单反解。"""
+    """风险参数（v2.0 起只保留保证金率），人工维护 + 日结单反解。"""
 
     __tablename__ = "bills_risk_param"
 
     scope: Mapped[str] = mapped_column(String(16), comment="品种或账户")
-    param_key: Mapped[str] = mapped_column(String(32), comment="margin_rate/vol/quote")
+    param_key: Mapped[str] = mapped_column(String(32), comment="margin_rate/underlying_price")
+    # margin_rate:保证金率
     param_value: Mapped[Decimal] = mapped_column(Numeric(12, 6), comment="参数值")
     source: Mapped[str] = mapped_column(String(16), comment="manual/statement/calc")
+    # manual:人工按交易所公式常量录入；statement:从券商日结单反解；calc:预留（程序计算回写，目前无代码写入）
     effective_on: Mapped[date] = mapped_column(Date, comment="生效日")
     note: Mapped[Optional[str]] = mapped_column(String(200), comment="备注")
 
@@ -471,7 +473,8 @@ class ScenarioGrid(Base, BaseModel):
     # 原先 String(8) 装不下，`run_and_persist` 一写就 `Data too long for column 'mode'`。
     # 只因 category 精确匹配缺陷让 compute() 从未产出过有效 grid，这条路径没被走到。
     mode: Mapped[str] = mapped_column(String(16), comment="sync/astock_only/index_only")
-    drop_pct: Mapped[Decimal] = mapped_column(Numeric(6, 4), comment="跌幅")
+    drop_pct: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), comment="跌幅；负数=涨幅（v2.0 起含上行情景档）")
     account: Mapped[str] = mapped_column(String(16), comment="账户；ALL=组合")
     loss_amt: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="亏损额（负=亏）")
     net_after: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="情景后净值")

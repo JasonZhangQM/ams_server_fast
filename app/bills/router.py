@@ -46,6 +46,7 @@ from server_fast.app.bills.schemas import (
     GroupUpdate,
     ProfitOut,
     ProfitYearOut,
+    RiskBoardOut,
 )
 from server_fast.app.irs.models import ValueMonitor
 from server_fast.common.db import get_db
@@ -792,3 +793,57 @@ def save_bill_note(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"保存失败：{str(e)}")
+
+
+# =========================================================================
+# 风险看板（L3）：实时只读 + 日终落库
+# =========================================================================
+@router.get("/risk-board", response_model=RiskBoardOut)
+def get_risk_board(
+    horizon: str = Query("now", pattern="^(now|expiry)$",
+                         description="时点口径：now=即期 / expiry=到期"),
+    iv_mult: float = Query(1.0, ge=0.5, le=3.0,
+                           description="IV 冲击倍数"),
+    detail: bool = Query(False, description="是否返回逐仓情景明细（保证金结构图用）"),
+):
+    """风险看板实时计算（只读）。
+
+    不调 `expire_configs()`：GET 不得产生写操作，过期合约由引擎在计算时兜底剔除。
+    行情过期/混日/缺字典等 ValueError 统一转 409，前端据此展示修复指引。
+    """
+    from server_fast.app.bills.services import risk_scenario
+    try:
+        return risk_scenario.compute(horizon=horizon, iv_mult=iv_mult,
+                                     include_detail=detail)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"风险看板计算失败：{str(e)}")
+
+
+@router.post("/run/risk-board")
+def run_risk_board():
+    """日终重算：停用过期合约 → 计算 → UPSERT bills_scenario_grid。
+
+    与 `/sync/group` 一样同步执行（bills 模块暂无任务表），前端按钮需防重复点击。
+    """
+    from server_fast.app.bills.services import risk_scenario
+    try:
+        out = risk_scenario.run_and_persist()
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"风险看板重算失败：{str(e)}")
+    b = out["board"]
+    return {
+        "status": "ok",
+        "engine_ver": b["engine_ver"],
+        "calc_date": b["calc_date"],
+        "rows_upserted": out["rows_upserted"],
+        "disabled_contracts": out["disabled_contracts"],
+        "net_total": b["net_total"],
+        "margin_total": b["margin_total"],
+        "real_total": b["real_total"],
+        "first_call": b["first_call"],
+        "warnings": b["warnings"],
+    }
