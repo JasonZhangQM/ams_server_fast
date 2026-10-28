@@ -474,12 +474,14 @@ class ScenarioGrid(Base, BaseModel):
     # 只因 category 精确匹配缺陷让 compute() 从未产出过有效 grid，这条路径没被走到。
     mode: Mapped[str] = mapped_column(String(16), comment="sync/astock_only/index_only")
     drop_pct: Mapped[Decimal] = mapped_column(
-        Numeric(6, 4), comment="跌幅；负数=涨幅（v2.0 起含上行情景档）")
+        Numeric(6, 4), comment="情景档位,跌幅；负数=涨幅（v2.0 起含上行情景档）")
     account: Mapped[str] = mapped_column(String(16), comment="账户；ALL=组合")
-    loss_amt: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="亏损额（负=亏）")
+    loss_amt: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="亏损额（正=亏，负=盈）")
     net_after: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="情景后净值")
     margin_req: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="保证金需求")
+    # 真实风险度 = 保证金 / 情景后净值。净值为 0/负时算不出来，写 9999 兜底（DECIMAL 存不了 inf/None）
     risk_ratio_real: Mapped[Decimal] = mapped_column(Numeric(10, 4), comment="真实口径风险度")
+    # 交易所风险度 = 保证金 / (情景后净值 + 融资余额)。 追保判定只用这个口径 ；同样 9999 兜底
     risk_ratio_exch: Mapped[Decimal] = mapped_column(Numeric(10, 4), comment="交易所口径风险度")
     breached: Mapped[int] = mapped_column(Integer, default=0, comment="1=已追保/穿仓")
     engine_ver: Mapped[str] = mapped_column(String(16), comment="公式版本")
