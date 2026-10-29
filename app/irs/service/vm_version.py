@@ -18,9 +18,6 @@ from sqlalchemy.orm import Session
 
 from server_fast.app.irs.models import ValueMonitor, VmVersion
 
-# 能取到估值分位的指数标的（与 vm_today.INDEX_PCT_SYMBOLS 同口径）
-_INDEX_PCT_SYMBOLS = {"SHSE.000300", "SHSE.000905", "SPX"}
-
 PP_FIELDS = ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")
 PP_LABELS = {"pp_el": "极低", "pp_l": "低", "pp_m": "中", "pp_h": "高", "pp_eh": "极高"}
 
@@ -135,7 +132,8 @@ def _check_percentile_warnings(symbol: str, pp: dict) -> list[dict]:
     非指数标的直接返回空数组（没有分位数据可纠偏）。**只提示、绝不自动改档位**。
     """
     out: list[dict] = []
-    if symbol not in _INDEX_PCT_SYMBOLS:
+    # 复用 vm_today.INDEX_PCT_SYMBOLS —— SPX 不在其中时 percentiles() 内部会过滤
+    if symbol not in {"SHSE.000300", "SHSE.000905"}:
         return out
     # 延迟 import 避免顶层循环依赖（vm_today 会 import vm_version）
     from server_fast.app.irs.service import vm_today

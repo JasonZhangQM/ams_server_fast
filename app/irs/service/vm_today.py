@@ -43,13 +43,20 @@ def percentiles() -> dict:
     """{(index_code, metric): pct_10y}，失败返回空 dict（分位是纠偏，不是今日页主链）。
 
     列表页 / 详情抽屉同样复用本函数补 pe_pct/pb_pct（口径唯一，铁律 4.5）。
+
+    ⚠️ SPX（标普500）在 irs_value_monitor 里有一条，但 index_valuation 体系
+    只覆盖国内 A 股宽基指数 —— 这里按 dbsCfg.INDEX_CODE 白名单过滤，避免
+    get_percentiles("未知指数代码：SPX") 抛 ValueError 被吞掉。
     """
     try:
         from server_fast.app.bds.services import index_valuation
+        from server_fast.app.bds.config import Config as dbsCfg
+        known = set(dbsCfg.INDEX_CODE.keys())
+        # 只向 bds 层传递它认识的指数代码（SPX 不在其中，跳过不报错）
+        valid = [c for c in INDEX_PCT_SYMBOLS if c in known]
         out = {}
         for metric in ("pe_ttm", "pb_mrq"):
-            data = index_valuation.get_percentiles(
-                index_codes=list(INDEX_PCT_SYMBOLS), metric=metric)
+            data = index_valuation.get_percentiles(index_codes=valid, metric=metric)
             for item in data.get("items", []):
                 p10 = item.get("pct_10y") or {}
                 out[(item["index_code"], metric)] = p10.get("pct")
