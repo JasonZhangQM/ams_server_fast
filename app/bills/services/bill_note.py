@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """成交笔记（bills_bill_note）业务函数。
 
+只承载「想法」（下单当时的决策笔记）。复盘自 2026-10-29 起上移到标的层
+（irs_vm_review），不再逐笔记。
+
 两条硬约束：
 
 1. **biz_key 必须与导入去重同一把尺子**（`Bill.unique_keys`）：
@@ -58,8 +61,8 @@ def upsert_note(db: Session, bill: Bill, kind: str,
     source 首次插入时自动判定（不可由调用方决定）；plan_id 为执行剧本后回填的
     irs_vm_plan.id（裸 ID，无外键），仅首次写入时落库、更新时不覆盖已回填值。
     """
-    if kind not in (BillNote.KIND_IDEA, BillNote.KIND_REVIEW):
-        raise ValueError(f"kind 只能是 {BillNote.KIND_IDEA}/{BillNote.KIND_REVIEW}")
+    if kind != BillNote.KIND_IDEA:
+        raise ValueError(f"成交笔记只支持「{BillNote.KIND_IDEA}」；复盘请到标的层")
     row = (db.query(BillNote)
            .filter(BillNote.bill_id == bill.id, BillNote.kind == kind)
            .one_or_none())

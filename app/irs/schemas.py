@@ -271,6 +271,28 @@ class VmPlanSave(BaseModel):
 
 
 # =========================================================================
+# v3：标的复盘（锚定研究版本，同一版本可多次）
+# =========================================================================
+class VmReviewOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    symbol: str
+    research_id: int
+    content: str
+    review_date: date
+    create_time: datetime
+    update_time: datetime
+
+
+class VmReviewSave(BaseModel):
+    """复盘保存请求：锚定研究版本；review_date 由后端填，前端不可传。"""
+
+    research_id: int
+    content: str
+
+
+# =========================================================================
 # v3：投资逻辑 / 证伪条件（批次二的功能，接口先通）
 # =========================================================================
 class VmLogicOut(BaseModel):

@@ -194,7 +194,7 @@ def list_bills(
     vm_symbol 按归属标的精确筛选（经 bills_group_symbol 的 (category, symbol) 关联）。
 
     v3 起每行额外带：`vm_symbol`（经 bills_group_symbol 归属，融资融券恒为 None）
-    与两条笔记摘要（想法 / 复盘）。笔记只做一次 IN 查询补齐，不让账单表承担 JOIN。
+    与一条笔记摘要（想法）。笔记只做一次 IN 查询补齐，不让账单表承担 JOIN。
 
     排序：固定 `id DESC`。id 为自增主键、等于入库顺序，倒序即最新一笔在前。
     必须显式排序——MySQL 对无 ORDER BY 的查询不保证返回顺序，
@@ -243,19 +243,15 @@ def list_bills(
         for cat, sym, vm in gs_rows:
             if (cat, sym) in keys:
                 vm_map[(cat, sym)] = vm
-        # 笔记：一次取完，Python 侧分流
+        # 笔记：一次取完（只含想法）
         notes = {}
         for n in (db.query(BillNote).filter(BillNote.bill_id.in_(bill_ids)).all()):
             notes.setdefault(n.bill_id, {})[n.kind] = n
         for d in dicts:
             d["vm_symbol"] = vm_map.get((d["category"], d["symbol"]))
-            pair = notes.get(d["id"], {})
-            idea = pair.get(BillNote.KIND_IDEA)
-            review = pair.get(BillNote.KIND_REVIEW)
+            idea = notes.get(d["id"], {}).get(BillNote.KIND_IDEA)
             d["note_idea"] = idea.content if idea else None
             d["note_idea_at"] = idea.content_at if idea else None
-            d["note_review"] = review.content if review else None
-            d["note_review_at"] = review.content_at if review else None
     return {"items": dicts, "total": total, "limit": limit, "offset": offset}
 
 
@@ -798,7 +794,7 @@ def list_unplanned_bills(
 
 @router.get("/{id_}/note", response_model=List[BillNoteOut])
 def list_bill_notes(id_: int, db: Session = Depends(get_db)):
-    """某笔成交的全部笔记（想法/复盘，最多两条）。"""
+    """某笔成交的笔记（只有「想法」；复盘在标的层）。"""
     if db.get(Bill, id_) is None:
         raise HTTPException(status_code=404, detail=f"成交不存在：{id_}")
     return db.query(BillNote).filter(BillNote.bill_id == id_).order_by(BillNote.kind).all()
@@ -811,7 +807,7 @@ def save_bill_note(
     payload: BillNoteSave,
     db: Session = Depends(get_db),
 ):
-    """写一笔成交的笔记（kind = 想法 / 复盘）。
+    """写一笔成交的「想法」（kind 只接受「想法」；复盘在标的层）。
 
     - 独立端点，不混进 PATCH /bills/{id_} —— 那是 36 字段的宽口子，
       一旦有人给它加"回写全列"，笔记会被静默冲成 NULL；
@@ -840,9 +836,9 @@ def attribution_by_plan(db: Session = Depends(get_db)):
     """剧本盈亏归因（P3-3）。
 
     读 bills_bill_note.plan_id 按剧本聚合；每笔成交只取一条带 plan_id 的决策笔记
-    （MIN 去重，避免「想法 + 复盘」两条都带 plan_id 时重复计盈亏）。
+    （每笔成交只有一条「想法」，bill_id 天然唯一；MIN 仅作防御性兜底）。
     pl = pl_long + pl_short（平仓盈亏 l/s，正=盈利）；未归因成交单列残差，不静默丢弃。
-    剧本名/标的不在此处返回，由前端按 plan_id 与 irs 计划列表映射（bills 不依赖 irs）。
+    剧本名/标的不在此处返回，由前端按 plan_id 与 irs 剧本列表映射（bills 不依赖 irs）。
     """
     assigned_sql = text("""
         SELECT a.plan_id,

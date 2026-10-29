@@ -25,6 +25,7 @@ from server_fast.app.irs.models import (
     VmLogic,
     VmPlan,
     VmResearch,
+    VmReview,
     VmStateLog,
     VmTarget,
     VmVersion,
@@ -42,6 +43,8 @@ from server_fast.app.irs.schemas import (
     VmPlanSave,
     VmResearchOut,
     VmResearchSave,
+    VmReviewOut,
+    VmReviewSave,
     VmVersionOut,
     VmVersionSave,
     TodayItem,
@@ -478,6 +481,70 @@ def delete_value_monitor_plan(id_: int, seq: int, db: Session = Depends(get_db))
     db.commit()
     if not ok:
         raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的剧本")
+    return {"status": "success", "message": "已删除"}
+
+
+# ---------------------------------------------------------------- 标的复盘
+@router.get("/value-monitors/{id_}/reviews", response_model=List[VmReviewOut])
+def list_value_monitor_reviews(id_: int, db: Session = Depends(get_db)):
+    """该标的的全部复盘（按落笔日期倒序），同一研究版本不限条数。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    return service.vm_review.list_by_symbol(db, vm.symbol)
+
+
+@router.post("/value-monitors/{id_}/reviews", response_model=VmReviewOut)
+def create_value_monitor_review(
+    id_: int, payload: VmReviewSave, db: Session = Depends(get_db)
+):
+    """新增一条复盘；review_date 由后端填当天，锚定研究版本。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        row = service.vm_review.create(db, vm.symbol, payload.research_id,
+                                      payload.content)
+        db.commit()
+        db.refresh(row)
+        return row
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+
+
+@router.put("/reviews/{review_id}", response_model=VmReviewOut)
+def update_vm_review(review_id: int, payload: VmReviewSave,
+                     db: Session = Depends(get_db)):
+    """修改复盘正文与所属研究版本；落笔日期保持首次写入值不变。"""
+    try:
+        row = service.vm_review.update(db, review_id, payload.research_id,
+                                       payload.content)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"复盘不存在：{review_id}")
+        db.commit()
+        db.refresh(row)
+        return row
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+
+
+@router.delete("/reviews/{review_id}")
+def delete_vm_review(review_id: int, db: Session = Depends(get_db)):
+    ok = service.vm_review.delete(db, review_id)
+    db.commit()
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"复盘不存在：{review_id}")
     return {"status": "success", "message": "已删除"}
 
 

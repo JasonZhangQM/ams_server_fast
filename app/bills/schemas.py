@@ -120,8 +120,6 @@ class BillOut(BaseModel):
     vm_symbol: Optional[str] = None  # 归属标的（来自 bills_group_symbol.vm_symbol；融资融券恒为 None）
     note_idea: Optional[str] = None  # 「想法」正文
     note_idea_at: Optional[datetime] = None  # 「想法」落笔时间（晚于成交 = 事后补写）
-    note_review: Optional[str] = None  # 「复盘」正文
-    note_review_at: Optional[datetime] = None  # 「复盘」落笔时间
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
@@ -267,7 +265,7 @@ class BillNoteOut(BaseModel):
     id: int
     bill_id: Optional[int] = None
     biz_key: str
-    kind: str
+    kind: str  # 固定为「想法」
     content: str
     content_at: datetime
     source: str
@@ -279,6 +277,7 @@ class BillNoteOut(BaseModel):
 class BillNoteSave(BaseModel):
     """成交笔记保存请求（PUT /bills/bills/{id}/note/{kind}）。
 
+    kind 只接受「想法」；复盘走标的层 irs_vm_review。
     content_at 由后端写，前端不可传——否则"当时写的"可以被伪造，反自欺就失效了。
     source 由后端按「落笔时间 vs 成交时间」自动判定，前端不可传。
     plan_id 可选：执行剧本后回填的 irs_vm_plan.id（裸 ID，无外键）。

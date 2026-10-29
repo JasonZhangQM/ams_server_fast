@@ -19,18 +19,15 @@ from server_fast.app.bills.constants import attachable_sql, non_attachable_sql
 def trades_of(db: Session, vm_symbol: str, limit: int = 500) -> list[dict]:
     """标的页看全部成交：一次 JOIN，没有 OR、没有名称匹配。
 
-    ⚠️ 笔记是 1:N（同一笔成交最多 2 条：想法 / 复盘）。若直接 `LEFT JOIN bills_bill_note`
-    再 LIMIT，带两条笔记的成交会出现两行、且把别的成交挤出上限。所以用条件聚合
-    把两条笔记压成四列，保证「一行 = 一笔成交」。
+    ⚠️ 笔记按 bill_id 左连（只含「想法」一条）。若直接 JOIN 再 LIMIT，
+    多笔记成交可能挤出别的成交上限；这里条件聚合压成两列，保证「一行 = 一笔成交」。
     """
     sql = text(f"""
         SELECT b.id, b.trade_time, b.account, b.category, b.symbol, b.name,
                b.b_s, b.o_c, b.price, b.vol, b.amount,
                g.vm_symbol,
                MAX(CASE WHEN n.kind = '想法' THEN n.content END) AS note_idea,
-               MAX(CASE WHEN n.kind = '想法' THEN n.content_at END) AS note_idea_at,
-               MAX(CASE WHEN n.kind = '复盘' THEN n.content END) AS note_review,
-               MAX(CASE WHEN n.kind = '复盘' THEN n.content_at END) AS note_review_at
+               MAX(CASE WHEN n.kind = '想法' THEN n.content_at END) AS note_idea_at
         FROM bills_bill b
         JOIN bills_group_symbol g
           ON g.category = b.category AND g.symbol = b.symbol

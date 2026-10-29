@@ -380,7 +380,8 @@ class GroupSymbol(Base, BaseModel):
 class BillNote(Base, BaseModel):
     """成交笔记（1:N，挂 bills_bill.id）。
 
-    - kind 只有「想法 / 复盘」，同 kind 只有一份（UK bill_id+kind）；
+    - kind 只有「想法」，同笔成交只有一份（UK bill_id+kind）；
+      复盘自 2026-10-29 起上移到标的层（irs_vm_review），不再逐笔记。
     - ON DELETE SET NULL + biz_key：既有"删账户末笔 -> 重导"会换新 id，
       CASCADE 会让笔记静默蒸发，SET NULL 留孤儿等 relink 找回；
     - content_at 一律后端写，前端不可传（否则"当时写的"可以伪造）。
@@ -389,14 +390,13 @@ class BillNote(Base, BaseModel):
     __tablename__ = "bills_bill_note"
 
     KIND_IDEA = "想法"
-    KIND_REVIEW = "复盘"
 
     bill_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("bills_bill.id", ondelete="SET NULL"),
         nullable=True, comment="关联 bills_bill.id；成交被删时置 NULL，靠 biz_key 找回")
     biz_key: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="成交自然键 md5（与 uk_bills_bill 同口径）")
-    kind: Mapped[str] = mapped_column(String(8), nullable=False, comment="类型：想法/复盘")
+    kind: Mapped[str] = mapped_column(String(8), nullable=False, comment="类型：想法")
     content: Mapped[str] = mapped_column(Text, nullable=False, comment="正文")
     content_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now(),

@@ -27,7 +27,14 @@ from server_fast.app.irs.service.discount_monitor import (
     update_is_main_em_sql,
     discount_yield_em_orm,
 )
-from server_fast.app.irs.service import vm_version, vm_research, vm_plan, vm_map, vm_today
+from server_fast.app.irs.service import (
+    vm_version,
+    vm_research,
+    vm_plan,
+    vm_review,
+    vm_map,
+    vm_today,
+)
 
 __all__ = [
     # common
@@ -48,6 +55,7 @@ __all__ = [
     'vm_version',
     'vm_research',
     'vm_plan',
+    'vm_review',
     'vm_map',
     'vm_today',
 ]

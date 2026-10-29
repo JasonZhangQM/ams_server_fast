@@ -15,6 +15,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    BigInteger,
     Index,
     Integer,
     Numeric,
@@ -394,6 +395,37 @@ class VmPlan(Base, BaseModel):
 
     def __str__(self):
         return f"{self.vm_symbol}#{self.seq}({self.b_s}{self.o_c or ''})"
+
+
+class VmReview(Base, BaseModel):
+    """标的复盘 —— 锚定「研究版本」，同一版本可多次复盘。
+
+    与「投研」同层：研究是事前假设，复盘是事后成绩单。
+    一次复盘回答「这版研究的结论兑现了没有」，因此必须挂到具体版本；
+    同一版本可反复复盘（持仓中、平仓后、季度末），故不设唯一键。
+    执行合规（有没有按剧本做）由机器判定，不在这里写；本表只记判断。
+    盈亏归因走 `bills_bill_note.plan_id`，本表不参与计算。
+    """
+
+    __tablename__ = "irs_vm_review"
+    __table_args__ = (
+        Index("k_vmr_symbol_date", "symbol", "review_date"),
+        Index("k_vmr_research_date", "research_id", "review_date"),
+        {"comment": "标的复盘（锚定研究版本）"},
+    )
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="CASCADE"),
+        nullable=False, comment="标的代码")
+    research_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("irs_vm_research.id", ondelete="CASCADE"),
+        nullable=False, comment="被复盘的研究版本 irs_vm_research.id")
+    content: Mapped[str] = mapped_column(Text, nullable=False, comment="复盘正文")
+    review_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="落笔日期（后端填，前端不可传）")
+
+    def __str__(self):
+        return f"{self.symbol}复盘(research={self.research_id})"
 
 
 class VmStateLog(Base, BaseModel):
