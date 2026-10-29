@@ -16,31 +16,138 @@ from sqlalchemy.orm import Session
 from server_fast.app.bills.constants import attachable_sql, non_attachable_sql
 
 
-def trades_of(db: Session, vm_symbol: str, limit: int = 500) -> list[dict]:
-    """标的页看全部成交：一次 JOIN，没有 OR、没有名称匹配。
+def _trade_filters(
+    plan_id: int | None = None,
+    account: str | None = None,
+    symbol: str | None = None,
+) -> tuple[str, dict]:
+    """剧本 / 账户 / 合约三个筛选条件的公共拼装（列表与计数必须共用，避免口径漂移）。"""
+    conds = ""
+    params: dict = {}
+    if plan_id is not None:
+        conds += " AND n.kind = '想法' AND n.plan_id = :plan"
+        params["plan"] = plan_id
+    if account:
+        conds += " AND b.account = :acc"
+        params["acc"] = account
+    if symbol:
+        conds += " AND b.symbol LIKE :sym"
+        params["sym"] = f"%{symbol}%"
+    return conds, params
+
+
+def trades_of(
+    db: Session,
+    vm_symbol: str,
+    limit: int = 500,
+    plan_id: int | None = None,
+    account: str | None = None,
+    symbol: str | None = None,
+    offset: int = 0,
+) -> list[dict]:
+    """标的页成交分页：一次 JOIN，没有 OR、没有名称匹配。
 
     ⚠️ 笔记按 bill_id 左连（只含「想法」一条）。若直接 JOIN 再 LIMIT，
     多笔记成交可能挤出别的成交上限；这里条件聚合压成两列，保证「一行 = 一笔成交」。
+    plan_id / account / symbol 为前端筛选用：剧本精确、账户精确、合约模糊。
     """
+    conds, params = _trade_filters(plan_id, account, symbol)
+    params["vm"] = vm_symbol
+    params["lim"] = limit
+    params["off"] = offset
     sql = text(f"""
         SELECT b.id, b.trade_time, b.account, b.category, b.symbol, b.name,
                b.b_s, b.o_c, b.price, b.vol, b.amount,
                g.vm_symbol,
                MAX(CASE WHEN n.kind = '想法' THEN n.content END) AS note_idea,
-               MAX(CASE WHEN n.kind = '想法' THEN n.content_at END) AS note_idea_at
+               MAX(CASE WHEN n.kind = '想法' THEN n.content_at END) AS note_idea_at,
+               MAX(CASE WHEN n.kind = '想法' THEN n.plan_id END) AS plan_id
         FROM bills_bill b
         JOIN bills_group_symbol g
           ON g.category = b.category AND g.symbol = b.symbol
         LEFT JOIN bills_bill_note n ON n.bill_id = b.id
         WHERE g.vm_symbol = :vm
-          AND {attachable_sql('b')}
+          AND {attachable_sql('b')}{conds}
         GROUP BY b.id, b.trade_time, b.account, b.category, b.symbol, b.name,
                  b.b_s, b.o_c, b.price, b.vol, b.amount, g.vm_symbol
         ORDER BY b.trade_time DESC, b.id DESC
-        LIMIT :lim
+        LIMIT :lim OFFSET :off
     """)
-    rows = db.execute(sql, {"vm": vm_symbol, "lim": limit}).mappings().all()
+    rows = db.execute(sql, params).mappings().all()
     return [dict(r) for r in rows]
+
+
+def count_trades(
+    db: Session,
+    vm_symbol: str,
+    plan_id: int | None = None,
+    account: str | None = None,
+    symbol: str | None = None,
+) -> int:
+    """与 trades_of 同口径的总数，供分页器算页数。"""
+    conds, params = _trade_filters(plan_id, account, symbol)
+    params["vm"] = vm_symbol
+    sql = text(f"""
+        SELECT COUNT(DISTINCT b.id)
+        FROM bills_bill b
+        JOIN bills_group_symbol g
+          ON g.category = b.category AND g.symbol = b.symbol
+        LEFT JOIN bills_bill_note n ON n.bill_id = b.id
+        WHERE g.vm_symbol = :vm
+          AND {attachable_sql('b')}{conds}
+    """)
+    return int(db.execute(sql, params).scalar_one())
+
+
+def _group_filters(category: str | None, symbol: str | None) -> tuple[str, dict]:
+    conds = ""
+    params: dict = {}
+    if category:
+        conds += " AND g.category = :cat"
+        params["cat"] = category
+    if symbol:
+        conds += " AND g.symbol LIKE :sym"
+        params["sym"] = f"%{symbol}%"
+    return conds, params
+
+
+def groups_of(
+    db: Session,
+    vm_symbol: str,
+    limit: int = 10,
+    offset: int = 0,
+    category: str | None = None,
+    symbol: str | None = None,
+) -> list[dict]:
+    """该标的的合约行分页（id 倒序）；分类精确、合约模糊。"""
+    conds, params = _group_filters(category, symbol)
+    params.update({"s": vm_symbol, "lim": limit, "off": offset})
+    sql = text(f"""
+        SELECT g.id, g.category, g.symbol, g.count, g.pf_total,
+               (SELECT COUNT(*) FROM bills_bill b
+                 WHERE b.category = g.category AND b.symbol = g.symbol) AS bill_rows
+        FROM bills_group_symbol g
+        WHERE g.vm_symbol = :s{conds}
+        ORDER BY g.id DESC
+        LIMIT :lim OFFSET :off
+    """)
+    return [dict(r) for r in db.execute(sql, params).mappings().all()]
+
+
+def count_groups(
+    db: Session,
+    vm_symbol: str,
+    category: str | None = None,
+    symbol: str | None = None,
+) -> int:
+    """与 groups_of 同口径的合约行总数。"""
+    conds, params = _group_filters(category, symbol)
+    params["s"] = vm_symbol
+    sql = text(f"""
+        SELECT COUNT(*) FROM bills_group_symbol g
+        WHERE g.vm_symbol = :s{conds}
+    """)
+    return int(db.execute(sql, params).scalar_one())
 
 
 def coverage(db: Session) -> list[dict]:

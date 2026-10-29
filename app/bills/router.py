@@ -183,6 +183,7 @@ def list_bills(
     name: Optional[str] = None,
     keyword: Optional[str] = None,
     vm_symbol: Optional[str] = None,
+    plan_id: Optional[int] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -226,6 +227,17 @@ def list_bills(
             )
             .exists()
         )
+    # 剧本筛选：笔记与账单是 1:1 的「想法」行，用 EXISTS 避免 JOIN 放大行数
+    if plan_id is not None:
+        query = query.filter(
+            db.query(BillNote.id)
+            .filter(
+                BillNote.bill_id == Bill.id,
+                BillNote.kind == '想法',
+                BillNote.plan_id == plan_id,
+            )
+            .exists()
+        )
     # 过滤后总数（在 offset/limit 之前计算；count 不吃 order_by，先算再排）
     total = query.count()
     # 按交易日倒序；trade_time 同一天大量重复（日内只到日或分钟精度），
@@ -252,6 +264,7 @@ def list_bills(
             idea = notes.get(d["id"], {}).get(BillNote.KIND_IDEA)
             d["note_idea"] = idea.content if idea else None
             d["note_idea_at"] = idea.content_at if idea else None
+            d["plan_id"] = idea.plan_id if idea else None
     return {"items": dicts, "total": total, "limit": limit, "offset": offset}
 
 
@@ -807,12 +820,12 @@ def save_bill_note(
     payload: BillNoteSave,
     db: Session = Depends(get_db),
 ):
-    """写一笔成交的「想法」（kind 只接受「想法」；复盘在标的层）。
+    """整体保存一笔成交的「想法」与剧本关联（kind 只接受「想法」；复盘在标的层）。
 
     - 独立端点，不混进 PATCH /bills/{id_} —— 那是 36 字段的宽口子，
       一旦有人给它加"回写全列"，笔记会被静默冲成 NULL；
     - content_at 由后端在首次写入时打，前端不可传；
-    - 传空串 = 删除该条（不留空壳）。
+    - 正文与剧本都为空 = 删除该条；只选剧本时允许正文为空。
     """
     bill = db.get(Bill, id_)
     if bill is None:

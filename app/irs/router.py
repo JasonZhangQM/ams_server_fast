@@ -279,11 +279,11 @@ def get_value_monitor_detail(id_: int, db: Session = Depends(get_db)):
     plans = service.vm_plan.list_by_symbol(db, sym)
     cur_ver = service.vm_version.effective_version(db, sym)
     rows = db.execute(text("""
-        SELECT g.category, g.symbol, g.count, g.pf_total,
+        SELECT g.id, g.category, g.symbol, g.count, g.pf_total,
                (SELECT COUNT(*) FROM bills_bill b
                  WHERE b.category=g.category AND b.symbol=g.symbol) AS bill_rows
         FROM bills_group_symbol g WHERE g.vm_symbol = :s
-        ORDER BY bill_rows DESC
+        ORDER BY g.id DESC
     """), {"s": sym}).mappings().all()
     trades = service.vm_map.trades_of(db, sym, limit=50)
     vm_dict = vm.to_dict()
@@ -313,17 +313,52 @@ def get_value_monitor_detail(id_: int, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/value-monitors/{id_}/trades")
-def list_value_monitor_trades(
+@router.get("/value-monitors/{id_}/groups")
+def list_value_monitor_groups(
     id_: int,
-    limit: int = Query(500, ge=1, le=2000),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=200),
+    category: str | None = Query(None),
+    symbol: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    """标的页看全部成交（含两条交易笔记）。融资融券不在其中（规则一）。"""
+    """对应交易代码分页（id 倒序）：分类精确、合约模糊。"""
     vm = db.get(ValueMonitor, id_)
     if vm is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
-    return {"items": service.vm_map.trades_of(db, vm.symbol, limit)}
+    return {
+        "items": service.vm_map.groups_of(
+            db, vm.symbol, page_size, (page - 1) * page_size, category, symbol
+        ),
+        "total": service.vm_map.count_groups(db, vm.symbol, category, symbol),
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/value-monitors/{id_}/trades")
+def list_value_monitor_trades(
+    id_: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    plan_id: int | None = Query(None),
+    account: str | None = Query(None),
+    symbol: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """标的页成交分页（含「想法」与关联剧本）。融资融券不在其中（规则一）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    offset = (page - 1) * page_size
+    return {
+        "items": service.vm_map.trades_of(
+            db, vm.symbol, page_size, plan_id, account, symbol, offset
+        ),
+        "total": service.vm_map.count_trades(db, vm.symbol, plan_id, account, symbol),
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 # ---------------------------------------------------------------- 档位版本

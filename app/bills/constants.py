@@ -3,32 +3,45 @@
 
 router / irs.vm_map / 前端列渲染都从这里取，避免三处各写一份白名单然后慢慢漂移。
 
-为什么需要「不可归属」这个概念（2026-10-23 用户定）：
-`bills_group_symbol` 一行不等于一个标的。资金流水行的 symbol 只是流水占位代码
-（`CRJ`=出入金、`SYFY`=收益费用、`cash`=现金、`RZRQ`=融资融券），给它挂一个估值标的
-毫无意义：既不会产生「该标的的成交」，还会让「还有多少行没选」永久挂着十几行
-永远选不完的东西，反而淹掉真正漏配的那几行。
+核心规则（2026-10-29 定稿）：
+纯粹按交易类别（category）判断是否可归属。只有三类真交易的行才谈得上
+「这笔交易围绕哪个标的」：证券交易、期货交易、期权交易。
 
-「理财」行（国债逆回购 204001 / TTB 等）同理不归属，靠 `category not in TRADE_CATS`
-一并排除，不必单列代码。
+不可归属的类别（共 6 类）：
+- 理财：国债逆回购 / OTC / TTB 等，靠 category 直接排除
+- 融资融券：融资行为本身，不归属任何标的
+- 收益费用：利息/手续费流水
+- 出入金：资金进出流水
+- '-'：配股权证/申购配号等无代码操作
+- cash：现金行，资金头寸
+
+之前版本用 category + symbol 双重判断（VIRTUAL_SYMBOLS），但实际数据中
+这些不可归属类别的 symbol 不会出现在 TRADE_CATS 里，symbol 检查是冗余的。
+简化为纯 category 判断后逻辑更清晰、不易漂移。
 """
 
 # 三类真交易：只有这些行才谈得上「这笔交易围绕哪个标的」
 TRADE_CATS = ('证券交易', '期货交易', '期权交易')
 
-# 资金流水占位代码：不是证券，永不参与归属。
-# 即便某天它们被误分类进 TRADE_CATS，这里也拦住。
-VIRTUAL_SYMBOLS = frozenset({'RZRQ', 'SYFY', 'CRJ', 'cash'})
+# 不可归属的类别 —— 与 TRADE_CATS 互补（所有非 TRADE_CATS 均不可归属）
+NON_ATTACHABLE_CATS = frozenset({
+    '理财', '融资融券', '收益费用', '出入金', '-', 'cash'
+})
 
-# 融资融券分类：唯一会被误当交易的非交易分类，单独留个名字给报错文案用
+# 旧常量兼容保留（下游有引用），但不再参与 is_attachable 判断
+VIRTUAL_SYMBOLS = frozenset({'RZRQ', 'SYFY', 'CRJ', 'cash'})
 RZRQ_CATEGORY = '融资融券'
 
 
-def is_attachable(category, symbol) -> bool:
-    """该行能否归属到一个估值标的（category/symbol 任一为 None 都返回 False）。"""
-    if not category or not symbol:
+def is_attachable(category, symbol=None) -> bool:
+    """该行能否归属到一个估值标的。
+
+    口径：纯粹按 category 判断，只有 TRADE_CATS 三个交易类别行才参与归属。
+    symbol 参数保留用于调用方签名兼容，实际不参与判断。
+    """
+    if not category:
         return False
-    return category in TRADE_CATS and symbol not in VIRTUAL_SYMBOLS
+    return category in TRADE_CATS
 
 
 def attachable_sql(alias: str = "") -> str:
@@ -39,8 +52,7 @@ def attachable_sql(alias: str = "") -> str:
     """
     p = f"{alias}." if alias else ""
     cats = ",".join(f"'{c}'" for c in TRADE_CATS)
-    syms = ",".join(f"'{s}'" for s in sorted(VIRTUAL_SYMBOLS))
-    return f"{p}category IN ({cats}) AND {p}symbol NOT IN ({syms})"
+    return f"{p}category IN ({cats})"
 
 
 def non_attachable_sql(alias: str = "") -> str:
@@ -52,10 +64,12 @@ def non_attachable_sql(alias: str = "") -> str:
 ATTACHABLE_SQL = attachable_sql()
 NON_ATTACHABLE_SQL = non_attachable_sql()
 
-# 不可归属的成因（给前端 tooltip / 计数说明用，顺序即展示顺序）
+# 不可归属的成因（给前端 tooltip / 计数说明用，按 category 展示）
 NON_ATTACHABLE_REASONS = {
-    '融资融券': 'RZRQ',          # 融资只是融资行为，name 不承担归属含义
-    '出入金': 'CRJ',
-    '收益费用': 'SYFY',
-    'cash': 'cash',
+    '理财': '理财类（国债逆回购/OTC/TTB 等），不是证券交易',
+    '融资融券': '融资融券：融资行为本身，不归属任何标的',
+    '收益费用': '收益费用流水：利息/手续费，不归属任何标的',
+    '出入金': '出入金流水：资金进出，不归属任何标的',
+    '-': '无代码操作（配股权证/申购配号等），不参与归属',
+    'cash': '现金行：资金头寸，不归属任何标的',
 }

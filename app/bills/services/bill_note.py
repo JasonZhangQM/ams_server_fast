@@ -56,10 +56,12 @@ def _derive_source(bill: Bill) -> str:
 
 def upsert_note(db: Session, bill: Bill, kind: str,
                 content: Optional[str], plan_id: Optional[int] = None) -> dict:
-    """写一条笔记。content 为空串 = 删除该条（不留空壳）。
+    """整体保存一条笔记（想法 + 剧本关联）。
 
-    source 首次插入时自动判定（不可由调用方决定）；plan_id 为执行剧本后回填的
-    irs_vm_plan.id（裸 ID，无外键），仅首次写入时落库、更新时不覆盖已回填值。
+    语义（前端「记一笔」弹窗一次性提交两项字段）：
+    - 正文与剧本都为空 → 删除该条（不留空壳）；
+    - 正文为空但选了剧本 → 允许落库（content=''），只记「执行了哪条剧本」；
+    - 正文非空 → 同时覆盖 plan_id（含传 None=解除关联，这是唯一的手动修改入口）。
     """
     if kind != BillNote.KIND_IDEA:
         raise ValueError(f"成交笔记只支持「{BillNote.KIND_IDEA}」；复盘请到标的层")
@@ -68,7 +70,8 @@ def upsert_note(db: Session, bill: Bill, kind: str,
            .one_or_none())
     text = (content or "").strip()
 
-    if not text:
+    # 两项都空 = 这条笔记没有存在意义
+    if not text and plan_id is None:
         if row is None:
             return {"action": "noop", "kind": kind}
         db.delete(row)
@@ -86,9 +89,7 @@ def upsert_note(db: Session, bill: Bill, kind: str,
 
     row.content = text
     row.biz_key = bill_biz_key(bill)  # 成交行若被修正过，顺手对齐
-    # 仅在显式传入 plan_id 时回填，避免普通改笔记把已回填值抹掉
-    if plan_id is not None:
-        row.plan_id = plan_id
+    row.plan_id = plan_id  # 整体保存：允许清空关联，不保留旧值
     db.flush()
     return {"action": "updated", "kind": kind, "id": row.id, "content_at": row.content_at,
             "source": row.source, "plan_id": row.plan_id}
