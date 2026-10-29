@@ -147,14 +147,11 @@ def _enrich_value_monitors(db: Session, items: list) -> list:
     # 最新研究（<=today）
     research = service.vm_research.latest_map(db, symbols)
 
-    # 计划计数（状态在 Python 侧派生：8 个标的、计划行数很少）
-    plan_pending: Dict[str, int] = {}
-    plan_done: Dict[str, int] = {}
+    # 剧本计数（状态在 Python 侧派生：8 个标的、剧本行数很少）
+    plan_active: Dict[str, int] = {}
     for p in db.query(VmPlan).filter(VmPlan.vm_symbol.in_(symbols)).all():
-        if p.bill_id is not None:
-            plan_done[p.vm_symbol] = plan_done.get(p.vm_symbol, 0) + 1
-        elif not p.is_cancelled:
-            plan_pending[p.vm_symbol] = plan_pending.get(p.vm_symbol, 0) + 1
+        if not p.is_cancelled:
+            plan_active[p.vm_symbol] = plan_active.get(p.vm_symbol, 0) + 1
 
     # 指数估值分位（P0-4/P2-1 纠偏，失败返回空——分位是纠偏不是列表主链）
     try:
@@ -171,8 +168,7 @@ def _enrich_value_monitors(db: Session, items: list) -> list:
         it["research_date"] = r.get("research_date")
         it["research_conclusion"] = r.get("conclusion")
         it["next_review"] = r.get("next_review")
-        it["plan_pending"] = plan_pending.get(s, 0)
-        it["plan_done"] = plan_done.get(s, 0)
+        it["plan_active"] = plan_active.get(s, 0)
         # 当前价所在档位带（纯派生，口径唯一在 service，不在前端各算一套）
         it["zone"] = service.vm_version.compute_zone(
             {f: it.get(f) for f in ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")},
@@ -195,7 +191,7 @@ def get_today(db: Session = Depends(get_db)):
 
 @router.get("/plans", response_model=List[VmPlanOut])
 def list_all_plans(db: Session = Depends(get_db)):
-    """全量计划（跨标的），供前端归因表 plan_id → 剧本名/标的映射。
+    """全量剧本（跨标的），供前端归因表 plan_id → 剧本名/标的映射。
 
     bills 侧归因只返回裸 plan_id（bills 不依赖 irs，铁律 4.0），
     名字在这里补；前端把两边只读结果拼起来，不在后端新增跨模块调用。
@@ -217,7 +213,7 @@ def list_value_monitors(
     """估值监测（对应 ValueMonitor 独立表，支持代码精确/主题多选/研究状态）。
 
     返回体除主表全字段外，还带 v3 派生：当前生效档位日期、版本数、待生效日期、
-    最新研究结论/复核日、计划待执行/已执行数。
+    最新研究结论/复核日、生效剧本数。
 
     `theme` 走多值直通（铁律 4.5：`arrayFormat:'repeat'`），不降级成前端过滤。
     """
@@ -269,7 +265,7 @@ def value_monitor_unmapped(
 
 @router.get("/value-monitors/{id_}/detail")
 def get_value_monitor_detail(id_: int, db: Session = Depends(get_db)):
-    """详情抽屉首屏：主表 + 当前档位 + 最新研究 + 计划 + 归属合约 + 覆盖数。
+    """详情抽屉首屏：主表 + 当前档位 + 最新研究 + 剧本 + 归属合约 + 覆盖数。
 
     一次给全，避免前端开抽屉连打 5 个请求；各 Tab 的明细仍走各自端点。
     """
@@ -441,10 +437,10 @@ def delete_value_monitor_research(
     return {"status": "success", "message": "已删除"}
 
 
-# ---------------------------------------------------------------- 计划委托
+# ---------------------------------------------------------------- 剧本
 @router.get("/value-monitors/{id_}/plans", response_model=List[VmPlanOut])
 def list_value_monitor_plans(id_: int, db: Session = Depends(get_db)):
-    """该标的的计划委托（含派生状态与有效触发价）。"""
+    """该标的的剧本（含派生状态与有效触发价）。"""
     vm = db.get(ValueMonitor, id_)
     if vm is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
@@ -457,7 +453,7 @@ def save_value_monitor_plan(
     payload: VmPlanSave,
     db: Session = Depends(get_db),
 ):
-    """按 seq upsert 一条计划（同标的同 seq 覆盖）。"""
+    """按 seq upsert 一条剧本（同标的同 seq 覆盖）。"""
     vm = db.get(ValueMonitor, id_)
     if vm is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
@@ -481,15 +477,15 @@ def delete_value_monitor_plan(id_: int, seq: int, db: Session = Depends(get_db))
     ok = service.vm_plan.delete(db, vm.symbol, seq)
     db.commit()
     if not ok:
-        raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的计划")
+        raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的剧本")
     return {"status": "success", "message": "已删除"}
 
 
 @router.get("/value-monitors/{id_}/unplanned")
 def list_value_monitor_unplanned(id_: int, db: Session = Depends(get_db)):
-    """无计划成交：成交时间早于该标的任何计划建立时间。
+    """无剧本成交：成交时间早于该标的任何剧本建立时间。
 
-    这是"先斩后奏 / 事后补计划"的唯一可算证据，文本永远算不出来。
+    这是"先斩后奏 / 事后补剧本"的唯一可算证据，文本永远算不出来。
     """
     vm = db.get(ValueMonitor, id_)
     if vm is None:
@@ -497,38 +493,6 @@ def list_value_monitor_unplanned(id_: int, db: Session = Depends(get_db)):
     rows = db.execute(text(service.vm_plan.unplanned_bills_sql(vm.symbol)),
                       {"symbol": vm.symbol}).mappings().all()
     return {"items": [dict(r) for r in rows], "count": len(rows)}
-
-
-@router.get("/value-monitors/{id_}/plans/{seq}/bill-candidates")
-def list_value_monitor_plan_bill_candidates(id_: int, seq: int, db: Session = Depends(get_db)):
-    """「标记已执行」候选成交：自计划建立以来的归属成交（trade_symbol 相同优先）。"""
-    vm = db.get(ValueMonitor, id_)
-    if vm is None:
-        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
-    items = service.vm_plan.bill_candidates(db, vm.symbol, seq)
-    return {"items": items, "count": len(items)}
-
-
-@router.put("/value-monitors/{id_}/plans/{seq}/execute")
-def execute_value_monitor_plan(
-    id_: int,
-    seq: int,
-    bill_id: int = Query(..., description="回填的成交 id（bills_bill.id）"),
-    db: Session = Depends(get_db),
-):
-    """回填 bill_id 标记「已执行」。回填后派生状态自动变「已执行」（委托）或不受影响的剧本状态。"""
-    vm = db.get(ValueMonitor, id_)
-    if vm is None:
-        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
-    plan = (db.query(VmPlan)
-            .filter(VmPlan.vm_symbol == vm.symbol, VmPlan.seq == seq)
-            .one_or_none())
-    if plan is None:
-        raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的计划")
-    plan.bill_id = bill_id
-    db.commit()
-    return {"status": "success", "message": "已标记已执行",
-            "plan_status": service.vm_plan.derive_status(plan)}
 
 
 # ---------------------------------------------------------------- 逻辑 / 证伪
@@ -840,7 +804,7 @@ def update_value_monitor(
 @router.delete("/value-monitors/{id_}")
 def delete_value_monitor(
     id_: int,
-    cascade: bool = Query(False, description="true = 连同研究/档位/逻辑/证伪/计划一起删"),
+    cascade: bool = Query(False, description="true = 连同研究/档位/逻辑/证伪/剧本一起删"),
     db: Session = Depends(get_db),
 ):
     """删除估值监测记录。

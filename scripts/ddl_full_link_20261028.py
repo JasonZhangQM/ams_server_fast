@@ -48,9 +48,8 @@ def connect():
 
 
 ADD_COLUMNS = [
-    ("irs_vm_plan", "kind",
-     "ALTER TABLE `irs_vm_plan` ADD COLUMN `kind` VARCHAR(8) NOT NULL DEFAULT '剧本' "
-     "COMMENT '剧本=长期有效；委托=一次性' AFTER `seq`"),
+    # 注：irs_vm_plan.kind 已于 2026-10-29 随「只保留剧本」决策删除
+    # （见 ddl_drop_plan_order_20261029.py），此处不再回加。
     ("bills_bill_note", "source",
      "ALTER TABLE `bills_bill_note` ADD COLUMN `source` VARCHAR(8) NOT NULL DEFAULT 'manual' "
      "COMMENT 'manual=成交当日或次日写；backfill=事后补录（>3 天）' AFTER `content_at`"),

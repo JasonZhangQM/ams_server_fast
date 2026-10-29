@@ -89,8 +89,7 @@ class ValueMonitorOut(BaseModel):
     research_date: Optional[date] = None       # 最新研究定稿日
     research_conclusion: Optional[str] = None  # 最新研究结论
     next_review: Optional[date] = None         # 下次复核
-    plan_pending: Optional[int] = None         # 待执行计划数
-    plan_done: Optional[int] = None            # 已执行计划数
+    plan_active: Optional[int] = None          # 生效剧本数
     id: int                                    # 主键
     create_time: datetime                      # 创建时间
     update_time: datetime                      # 更新时间
@@ -229,7 +228,7 @@ class VmResearchSave(BaseModel):
 
 
 # =========================================================================
-# v3：计划委托（irs_vm_plan）
+# v3：剧本（irs_vm_plan）
 # =========================================================================
 class VmPlanOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -238,7 +237,6 @@ class VmPlanOut(BaseModel):
     vm_symbol: str
     trade_symbol: str
     seq: int
-    kind: str
     b_s: str
     o_c: Optional[str] = None
     trigger_op: str
@@ -246,11 +244,9 @@ class VmPlanOut(BaseModel):
     trigger_ref: Optional[str] = None
     trigger_price2: Optional[Decimal] = None
     qty: Optional[int] = None
-    valid_until: Optional[date] = None
     reason: Optional[str] = None
-    bill_id: Optional[int] = None
     is_cancelled: bool = False
-    # 派生：已放弃 > 已执行 > 已过期 > 待执行
+    # 派生：暂停 / 生效
     status: str
     effective_trigger: Optional[float] = None   # trigger_price ?? 当前档位值
     trigger_ref_value: Optional[float] = None   # 引用档位的当前值
@@ -259,10 +255,9 @@ class VmPlanOut(BaseModel):
 
 
 class VmPlanSave(BaseModel):
-    """计划保存请求：seq 定位（同标的同 seq 覆盖）。"""
+    """剧本保存请求：seq 定位（同标的同 seq 覆盖）。"""
 
     seq: int
-    kind: str = "剧本"
     trade_symbol: str
     b_s: str
     o_c: Optional[str] = None
@@ -271,9 +266,7 @@ class VmPlanSave(BaseModel):
     trigger_ref: Optional[str] = None
     trigger_price2: Optional[Decimal] = None
     qty: Optional[int] = None
-    valid_until: Optional[date] = None
     reason: Optional[str] = None
-    bill_id: Optional[int] = None
     is_cancelled: bool = False
 
 
@@ -385,7 +378,6 @@ class VmTargetSave(BaseModel):
 # =========================================================================
 class TodayPlanHit(BaseModel):
     seq: int
-    kind: str
     trade_symbol: str
     b_s: str
     o_c: Optional[str] = None

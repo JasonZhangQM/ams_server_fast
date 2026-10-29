@@ -6,7 +6,7 @@
 
 口径只在后端这一处算（铁律 4.5）：
 - zone：`vm_version.compute_zone`（带语义、左闭右开）
-- 命中：现价满足剧本/委托的 trigger_op（`effective_trigger` 现算，不落库）
+- 命中：现价满足剧本的 trigger_op（`effective_trigger` 现算，不落库）
 - 裸仓：有归属持仓 且（logic=0 或 research=0）
 - 漂移：target_pct（irs 决策层）− current_pct（bills 事实层），前端派生不落库
 
@@ -98,24 +98,10 @@ def _nearest_level_pct(vm: ValueMonitor) -> Optional[float]:
     return min(vals, key=lambda x: x[0])[1] if vals else None
 
 
-def _unfinished_plans(db: Session, symbol: str, pp: dict) -> list[VmPlan]:
-    """未作废、且「值得今日关注」的计划行：剧本全部（长期有效）、委托未执行未过期。"""
-    today = date.today()
+def _unfinished_plans(db: Session, symbol: str) -> list[VmPlan]:
+    """未暂停的剧本（长期有效，全部纳入今日命中判定）。"""
     rows = db.query(VmPlan).filter(VmPlan.vm_symbol == symbol).order_by(VmPlan.seq).all()
-    out = []
-    for p in rows:
-        if p.is_cancelled:
-            continue
-        if p.kind == "剧本":
-            out.append(p)
-            continue
-        # 委托：已执行（bill_id 有值）或已过期的不再是「今日待办」
-        if p.bill_id is not None:
-            continue
-        if p.valid_until is not None and p.valid_until < today:
-            continue
-        out.append(p)
-    return out
+    return [p for p in rows if not p.is_cancelled]
 
 
 def today_items(db: Session) -> list[dict]:
@@ -156,9 +142,9 @@ def today_items(db: Session) -> list[dict]:
             pp = {"pp_el": ver.pp_el, "pp_l": ver.pp_l, "pp_m": ver.pp_m,
                   "pp_h": ver.pp_h, "pp_eh": ver.pp_eh}
 
-        plans = _unfinished_plans(db, sym, pp)
+        plans = _unfinished_plans(db, sym)
         hit_plans = [{
-            "seq": p.seq, "kind": p.kind, "trade_symbol": p.trade_symbol,
+            "seq": p.seq, "trade_symbol": p.trade_symbol,
             "b_s": p.b_s, "o_c": p.o_c, "reason": p.reason,
             "effective_trigger": effective_trigger(p, pp),
         } for p in plans if _is_hit(p, pp, vm.price)]

@@ -138,19 +138,16 @@ CREATE TABLE IF NOT EXISTS `irs_vm_plan` (
   `trigger_price`   decimal(12,4) NULL COMMENT '触发点位（与 trigger_ref 二选一）',
   `trigger_ref`     varchar(8)    NULL COMMENT '触发价引用档位：pp_el/pp_l/pp_m/pp_h/pp_eh',
   `trigger_price2`  decimal(12,4) NULL COMMENT '区间上沿（trigger_op=range 时必填）',
-  `qty`             int           NULL COMMENT '计划数量（可空=到价再定量）',
-  `valid_until`     date          NULL COMMENT '有效期至（空=长期有效）',
+  `qty`             int           NULL COMMENT '每次执行手数（空=到价再定量）',
   `reason`          varchar(200)  NULL COMMENT '为什么这么做（对应哪条逻辑）',
-  `bill_id`         bigint        NULL COMMENT '执行的成交（bills_bill.id，空=未执行）',
   `is_cancelled`    tinyint(1)    NOT NULL DEFAULT 0 COMMENT '手动作废',
   `create_time`     datetime      NOT NULL DEFAULT (now()),
   `update_time`     datetime      NOT NULL DEFAULT (now()),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_vmp_symbol_seq` (`vm_symbol`,`seq`),
   KEY `k_vmp_trade` (`trade_symbol`),
-  KEY `k_vmp_bill` (`bill_id`),
   CONSTRAINT `fk_vmp_vm` FOREIGN KEY (`vm_symbol`) REFERENCES `irs_value_monitor` (`symbol`) ON DELETE RESTRICT
-) {TAIL} COMMENT='标的计划委托';
+) {TAIL} COMMENT='标的剧本';
 """,
     "bills_bill_note": f"""
 CREATE TABLE IF NOT EXISTS `bills_bill_note` (

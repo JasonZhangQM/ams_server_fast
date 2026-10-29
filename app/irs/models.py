@@ -206,7 +206,7 @@ def _compute_discount_monitor(mapper, connection, target):
 
 
 # =========================================================================
-# v3 新增：标的层档案（档位版本 / 研究定稿 / 逻辑 / 证伪 / 计划委托）
+# v3 新增：标的层档案（档位版本 / 研究定稿 / 逻辑 / 证伪 / 剧本）
 #
 # 外键一律 ON DELETE RESTRICT：主表历史上被删过约 47 次（AUTO_INCREMENT=56 只有 8 行），
 # 用 CASCADE 会让"随手删一行"变成"静默清空该标的的全部研究与档位档案"。
@@ -351,18 +351,18 @@ class VmInvalidate(Base, BaseModel):
 
 
 class VmPlan(Base, BaseModel):
-    """计划委托 —— "我打算怎么办"的唯一载体（必须写真实代码和点位）。
+    """剧本 —— "到什么价、做什么"的唯一载体（必须写真实代码和点位）。
 
-    状态**不落库**、派生（存了必然漂移）：cancelled > executed > expired > pending。
+    剧本长期有效、可反复执行；执行次数与盈亏归因走 `bills_bill_note.plan_id`，
+    本表不记「做没做」。状态**不落库**、派生：暂停 / 生效。
     trigger_price 与 trigger_ref 二选一：后者引用档位（pp_el/pp_l/pp_m/pp_h/pp_eh），
-    改档位后计划自动跟随，不用手改 8 条计划。
+    改档位后剧本自动跟随，不用手改 8 条剧本。
     """
 
     __tablename__ = "irs_vm_plan"
     __table_args__ = (
         UniqueConstraint("vm_symbol", "seq", name="uk_vmp_symbol_seq"),
         Index("k_vmp_trade", "trade_symbol"),
-        Index("k_vmp_bill", "bill_id"),
     )
 
     TRIGGER_REFS = ["pp_el", "pp_l", "pp_m", "pp_h", "pp_eh"]
@@ -373,8 +373,6 @@ class VmPlan(Base, BaseModel):
     trade_symbol: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="交易代码（真实合约）")
     seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号")
-    kind: Mapped[str] = mapped_column(
-        String(8), nullable=False, default="剧本", comment="剧本=长期有效；委托=一次性")
     b_s: Mapped[str] = mapped_column(String(4), nullable=False, comment="买/卖")
     o_c: Mapped[Optional[str]] = mapped_column(String(4), nullable=True, comment="开/平")
     trigger_op: Mapped[str] = mapped_column(
@@ -385,11 +383,10 @@ class VmPlan(Base, BaseModel):
         String(8), nullable=True, comment="触发价引用档位：pp_el/pp_l/pp_m/pp_h/pp_eh")
     trigger_price2: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 4), nullable=True, comment="区间上沿（trigger_op=range 时必填）")
-    qty: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="计划数量（空=到价再定量）")
-    valid_until: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="有效期至")
+    qty: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="每次执行手数（空=到价再定量）")
     reason: Mapped[Optional[str]] = mapped_column(
         String(200), nullable=True, comment="为什么这么做（对应哪条逻辑）")
-    bill_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="执行的成交（空=未执行）")
     is_cancelled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="手动作废")
 
