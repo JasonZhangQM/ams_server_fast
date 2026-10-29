@@ -11,7 +11,7 @@ Group / Bill / Profit / GroupAcc / GroupSymbol。
 """
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -270,6 +270,8 @@ class BillNoteOut(BaseModel):
     kind: str
     content: str
     content_at: datetime
+    source: str
+    plan_id: Optional[int] = None
     create_time: datetime
     update_time: datetime
 
@@ -278,9 +280,12 @@ class BillNoteSave(BaseModel):
     """成交笔记保存请求（PUT /bills/bills/{id}/note/{kind}）。
 
     content_at 由后端写，前端不可传——否则"当时写的"可以被伪造，反自欺就失效了。
+    source 由后端按「落笔时间 vs 成交时间」自动判定，前端不可传。
+    plan_id 可选：执行剧本后回填的 irs_vm_plan.id（裸 ID，无外键）。
     """
 
     content: str
+    plan_id: Optional[int] = None
 
 
 class ProfitYearOut(BaseModel):
@@ -473,3 +478,34 @@ class RiskBoardOut(BaseModel):
     steps: list[float]  # 情景档位（负数=涨幅）
     upside_steps: list[float]  # 上行情景档位（负数=涨幅）
     warnings: list[str]  # 数据降级/兜底提示
+
+
+class AttributionPlanOut(BaseModel):
+    """剧本盈亏归因（读 bills_bill_note.plan_id，group by 剧本）。
+
+    归因粒度选剧本而非逻辑：逻辑是标的级、一笔成交常体现多条逻辑，硬归因会造伪精度。
+    剧本名/标的不在此处返回，由前端按 plan_id 与 irs 计划列表映射（bills 不依赖 irs）。
+    total_pl = Σ(pl_long + pl_short)，正=盈利；win_rate = 盈利笔数 / 执行笔数。
+    """
+
+    plan_id: int  # irs_vm_plan.id（裸 ID）
+    exec_count: int  # 执行笔数（每笔成交只取一条带 plan_id 的笔记，去重）
+    total_pl: float  # 累计平仓盈亏（正=盈利）
+    win_count: int  # 盈利笔数（pl > 0）
+    win_rate: float  # 胜率 0~1
+    avg_pl: float  # 平均盈亏 = total_pl / exec_count
+    last_trade_time: Optional[datetime] = None  # 最近一次成交日
+
+
+class AttributionUnattributedOut(BaseModel):
+    """未归因残差：没有带 plan_id 决策笔记的成交合计。"""
+
+    exec_count: int  # 未归因成交笔数
+    total_pl: float  # 未归因累计平仓盈亏
+
+
+class AttributionByPlanOut(BaseModel):
+    """剧本归因完整响应。"""
+
+    items: List[AttributionPlanOut]  # 各剧本归因（按 total_pl 降序）
+    unattributed: AttributionUnattributedOut  # 未归因残差（显式标注，不静默丢弃）

@@ -401,6 +401,12 @@ class BillNote(Base, BaseModel):
     content_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now(),
         comment="落笔时间（后端填，前端不可传）")
+    source: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="manual",
+        comment="manual=成交当日或次日写；backfill=事后补录（>3 天）")
+    # 裸 ID 无外键：bills 不能依赖 irs（依赖只能向下 irs → bills）；执行哪条剧本由 irs 侧聚合
+    plan_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="irs_vm_plan.id（裸 ID，无外键）")
 
     __table_args__ = (
         UniqueConstraint('bill_id', 'kind', name='uk_bbn_bill_kind'),

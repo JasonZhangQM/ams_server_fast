@@ -18,8 +18,54 @@ from sqlalchemy.orm import Session
 
 from server_fast.app.irs.models import ValueMonitor, VmVersion
 
+# 能取到估值分位的指数标的（与 vm_today.INDEX_PCT_SYMBOLS 同口径）
+_INDEX_PCT_SYMBOLS = {"SHSE.000300", "SHSE.000905", "SPX"}
+
 PP_FIELDS = ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")
 PP_LABELS = {"pp_el": "极低", "pp_l": "低", "pp_m": "中", "pp_h": "高", "pp_eh": "极高"}
+
+# zone 档位带：label 跟着 value 一起排序，防手填乱序导致带名错位
+ZONE_ORDER = (("pp_el", "极低"), ("pp_l", "低"), ("pp_m", "中"),
+              ("pp_h", "高"), ("pp_eh", "极高"))
+
+
+def compute_zone(pp: dict, price) -> Optional[str]:
+    """当前价落在哪个档位带（纯派生字段，不落库）。
+
+    带语义（区间统一左闭右开）：低于极低 / 极低~低 / 低~中 / 中~高 / 高~极高 / 高于极高。
+    现价恰等于档位值（正是「到价」那一档）归属右边界带 —— 左闭右开让该情形唯一定义。
+    """
+    if price is None:
+        return None
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return None
+    levels = []
+    for field, label in ZONE_ORDER:
+        v = pp.get(field)
+        if v is None:
+            continue
+        try:
+            levels.append((float(v), label))
+        except (TypeError, ValueError):
+            continue
+    if len(levels) < 2:
+        return None
+    levels.sort(key=lambda x: x[0])
+    if p < levels[0][0]:
+        return f"低于{levels[0][1]}"
+    if p >= levels[-1][0]:
+        return f"高于{levels[-1][1]}"
+    for i in range(len(levels) - 1):
+        if levels[i][0] <= p < levels[i + 1][0]:
+            return f"{levels[i][1]}~{levels[i + 1][1]}"
+    return None
+
+
+def pp_dict_of(obj) -> dict:
+    """从任意带 pp_* 属性的对象抽出五档 dict（ValueMonitor / VmVersion 通用）。"""
+    return {f: getattr(obj, f, None) for f in PP_FIELDS}
 
 
 def calc_pv(pp: Optional[Decimal], price: Optional[Decimal],
@@ -74,11 +120,64 @@ def refresh_current_pp(db: Session, symbol: str) -> Optional[VmVersion]:
     return ver
 
 
+def _check_percentile_warnings(symbol: str, pp: dict) -> list[dict]:
+    """档位分位校验提示（方案 P2-4）。
+
+    ⚠️ 范围说明：档位（手填价格锚）和 PB 分位（统计位置）口径不同，**档位价格 → 对应 PB
+    分位的精确映射需要研究报告人工完成**（如中证500 6500 → PB 分位 59.7%），系统无法自动算。
+
+    本函数做的是**粗粒度的极端值提示**：
+    - 当前 PB 10y 分位 ≥ 70% → 提醒"低档可能偏贵，买点设太高"
+    - 当前 PB 10y 分位 ≥ 99.9% → 提醒"极高档可能形同虚设"（整体极度低估，上方几乎没有空间）
+    - 当前 PB 10y 分位偏离 50% 中枢 > ±20% → 提醒"档位不对称"
+
+    方向与方案一致（给用户一个分位视角的红标），但**不替代人工判断**。
+    非指数标的直接返回空数组（没有分位数据可纠偏）。**只提示、绝不自动改档位**。
+    """
+    out: list[dict] = []
+    if symbol not in _INDEX_PCT_SYMBOLS:
+        return out
+    # 延迟 import 避免顶层循环依赖（vm_today 会 import vm_version）
+    from server_fast.app.irs.service import vm_today
+    pct_map = vm_today.percentiles()
+    pb = pct_map.get((symbol, "pb_mrq"))
+    if pb is None:
+        return out
+    pb_pct = float(pb)  # 0~1 的分位值
+
+    # 低档偏贵提示：整体 PB 分位已经 ≥ 70%，低档买入价可能在相对高位
+    if pb_pct >= 0.70:
+        out.append({
+            "level": "low",
+            "pb_pct": pb_pct,
+            "message": f"当前 PB 10y 分位 {pb_pct:.1%}（偏高）——低档买点可能设得太靠近当前价，建议确认是否需要下移",
+        })
+    # 极高档形同虚设提示：整体 PB 分位接近 100%
+    if pb_pct >= 0.999:
+        out.append({
+            "level": "eh",
+            "pb_pct": pb_pct,
+            "message": f"当前 PB 10y 分位 ≈100%（极度低估）——极高档可能永不触发，形同虚设",
+        })
+    # 中档漂移提示
+    if abs(pb_pct - 0.50) > 0.20:
+        dev = (pb_pct - 0.50) * 100
+        direction = "偏贵" if dev > 0 else "偏便宜"
+        out.append({
+            "level": "mid",
+            "pb_pct": pb_pct,
+            "message": f"当前 PB 10y 分位 {pb_pct:.1%}（偏离 50% 中枢 {dev:+.0f}pct，{direction}）——档位可能不对称",
+        })
+
+    return out
+
+
 def save_version(db: Session, symbol: str, effective_date: date,
                  pp: dict, note: Optional[str] = None) -> dict:
     """按 (symbol, effective_date) upsert 一版，并回写主表。
 
-    返回 {action: created|updated|unchanged, ...}——前端据此提示"将新建 X 日"还是"将覆盖 X 日"。
+    返回 {action: created|updated|unchanged, warnings: [...], ...}——前端据此提示"将新建 X 日"
+    还是"将覆盖 X 日"，并在有分位校验告警时渲染红标。
     """
     if db.query(ValueMonitor.symbol).filter(ValueMonitor.symbol == symbol).first() is None:
         raise ValueError(f"标的 {symbol} 不在估值监测里，请先新增标的")
@@ -111,6 +210,8 @@ def save_version(db: Session, symbol: str, effective_date: date,
     ver = refresh_current_pp(db, symbol)
     is_current = (ver is not None and ver.effective_date == effective_date
                   and effective_date <= date.today())
+    # P2-4：档位分位校验（**只做提示，绝不自动改档位**）
+    warnings = _check_percentile_warnings(symbol, pp)
     return {
         "action": action,
         "version_id": row.id,
@@ -118,6 +219,7 @@ def save_version(db: Session, symbol: str, effective_date: date,
         "is_current": bool(is_current),
         "is_future": effective_date > date.today(),
         "changed": changed,
+        "warnings": warnings,
     }
 
 

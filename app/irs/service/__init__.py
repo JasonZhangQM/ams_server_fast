@@ -5,7 +5,7 @@
 - common：日志器、通用 session 封装
 - value_monitor：估值监测（ValueMonitor）
 - discount_monitor：贴水监测（DiscountMonitor）
-- option_monitor：期权监测（OptionMonitor）
+（期权监测 option_monitor 已于 2026-10-29 下线，行情统一走 bds_option_market）
 
 router.py 通过 `from server_fast.app.irs import service` + `service.xxx` 调用，
 本 __init__ re-export 所有公开函数以保持该调用方式不变。
@@ -27,10 +27,7 @@ from server_fast.app.irs.service.discount_monitor import (
     update_is_main_em_sql,
     discount_yield_em_orm,
 )
-from server_fast.app.irs.service.option_monitor import (
-    option_monitor_sync_orm,
-)
-from server_fast.app.irs.service import vm_version, vm_research, vm_plan, vm_map
+from server_fast.app.irs.service import vm_version, vm_research, vm_plan, vm_map, vm_today
 
 __all__ = [
     # common
@@ -47,11 +44,10 @@ __all__ = [
     'upsert_discount_monitor_em_sql',
     'update_is_main_em_sql',
     'discount_yield_em_orm',
-    # option_monitor
-    'option_monitor_sync_orm',
     # v3：标的层档案
     'vm_version',
     'vm_research',
     'vm_plan',
     'vm_map',
+    'vm_today',
 ]

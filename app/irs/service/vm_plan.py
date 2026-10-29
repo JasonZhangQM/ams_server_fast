@@ -15,19 +15,29 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from server_fast.app.bills.constants import attachable_sql
 from server_fast.app.irs.models import ValueMonitor, VmPlan
 from server_fast.app.irs.service.vm_version import effective_version
 
-FIELDS = ("trade_symbol", "seq", "b_s", "o_c", "trigger_op", "trigger_price",
+FIELDS = ("trade_symbol", "seq", "kind", "b_s", "o_c", "trigger_op", "trigger_price",
           "trigger_ref", "trigger_price2", "qty", "valid_until", "reason",
           "bill_id", "is_cancelled")
 
 
 def derive_status(p: VmPlan, today: Optional[date] = None) -> str:
+    """按 kind 分流状态（P1-1）。
+
+    - 剧本（长期有效）：只用「生效 / 暂停」（is_cancelled = 暂停）；
+    - 委托（一次性）：已放弃 > 已执行 > 已过期 > 待执行。
+
+    剧本可反复执行，挂多少次成交走 note.plan_id 计数，不靠单值 bill_id 判「已执行」。
+    """
     today = today or date.today()
+    if p.kind == "剧本":
+        return "暂停" if p.is_cancelled else "生效"
     if p.is_cancelled:
         return "已放弃"
     if p.bill_id is not None:
@@ -63,12 +73,34 @@ def list_by_symbol(db: Session, symbol: str) -> list[dict]:
     return [_to_dict(r, pp, today) for r in rows]
 
 
+def list_all(db: Session) -> list[dict]:
+    """全量计划（跨标的），供前端归因表 plan_id → 剧本名/标的映射。
+
+    bills 侧归因只返回 plan_id（铁律 4.0：bills 不依赖 irs），
+    由本接口补 plan_id 对应的 (symbol, kind, trigger_ref, trade_symbol)，
+    前端据此把「剧本盈亏归因」的行名拼出来。8 个标的规模下逐标的缓存档位即可。
+    """
+    today = date.today()
+    rows = db.query(VmPlan).order_by(VmPlan.vm_symbol.asc(), VmPlan.seq.asc()).all()
+    pp_cache: dict = {}
+    out = []
+    for p in rows:
+        if p.vm_symbol not in pp_cache:
+            pp_cache[p.vm_symbol] = _pp_of(db, p.vm_symbol)
+        out.append(_to_dict(p, pp_cache[p.vm_symbol], today))
+    return out
+
+
 def upsert(db: Session, symbol: str, payload: dict) -> dict:
     if db.query(ValueMonitor.symbol).filter(ValueMonitor.symbol == symbol).first() is None:
         raise ValueError(f"标的 {symbol} 不在估值监测里")
     seq = payload.get("seq")
     if seq is None:
         raise ValueError("seq 必填")
+    kind = payload.get("kind") or "剧本"
+    if kind not in ("剧本", "委托"):
+        raise ValueError(f"kind 只能是「剧本」或「委托」：{kind}")
+    payload["kind"] = kind
     if payload.get("trigger_price") is None and not payload.get("trigger_ref"):
         raise ValueError("trigger_price 与 trigger_ref 必须至少填一个")
     if payload.get("trigger_op") == "range" and payload.get("trigger_price2") is None:
@@ -131,3 +163,29 @@ def _to_dict(p: VmPlan, pp: dict, today: date) -> dict:
                               if p.trigger_ref and pp.get(p.trigger_ref) is not None else None),
     })
     return d
+
+
+def bill_candidates(db: Session, symbol: str, seq: int, limit: int = 100) -> list[dict]:
+    """「标记已执行」候选成交：该标的自计划建立以来、归属成交的可回填清单。
+
+    排序：trade_symbol 相同优先，其次方向（b_s）相同，再按成交时间倒序。
+    复用 attachable_sql 排除资金流水行 —— 这是「该标的的成交」唯一口径来源。
+    """
+    plan = (db.query(VmPlan)
+            .filter(VmPlan.vm_symbol == symbol, VmPlan.seq == seq)
+            .one_or_none())
+    if plan is None:
+        return []
+    sql = text(f"""
+        SELECT b.id, b.trade_time, b.category, b.symbol, b.name, b.b_s, b.o_c, b.price, b.vol
+        FROM bills_bill b
+        JOIN bills_group_symbol g ON g.category = b.category AND g.symbol = b.symbol
+        WHERE g.vm_symbol = :symbol
+          AND {attachable_sql('b')}
+          AND b.trade_time >= :created_at
+        ORDER BY (b.symbol = :ts) DESC, (b.b_s = :bs) DESC, b.trade_time DESC
+        LIMIT :lim
+    """)
+    rows = db.execute(sql, {"symbol": symbol, "ts": plan.trade_symbol, "bs": plan.b_s,
+                            "created_at": plan.create_time, "lim": limit}).mappings().all()
+    return [dict(r) for r in rows]

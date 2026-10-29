@@ -2665,6 +2665,9 @@ def list_option_market(
     trade_date: Optional[date] = Query(
         default=None,
         description="**起始**行情日期（含当日，筛到最新）；不传=全部历史，按交易日倒序"),
+    latest_only: bool = Query(
+        default=False,
+        description="只取当前筛选范围内最新交易日的快照（T 型报价页用，品种级最新）"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -2673,7 +2676,9 @@ def list_option_market(
 
     **日期口径（2026-10-27 改）**：
     - 不传 `trade_date` ⇒ 返回**全部历史**（按 `trade_date` 倒序，最新日在前）；
-    - 传 `trade_date` ⇒ 它是**起始日**（`>=`），从该日起一直筛到最新。
+    - 传 `trade_date` ⇒ 它是**起始日**（`>=`），从该日起一直筛到最新；
+    - `latest_only=true` ⇒ 在上述筛选之上只保留**当前筛选范围内最新交易日**的快照
+      （供 T 型报价页取「各品种自己的最新」，与全局最新日解耦）。
 
     旧口径（同日 13:00 前）是「不传=只给最新交易日」+「传了=精确某一天」，两个方向都
     和核账需求相反：默认看不到历史，选日期又只能看单日。新口径下「最近 N 天」只需选
@@ -2732,6 +2737,15 @@ def list_option_market(
     #    —— 兜底会让「全部历史」永远无法通过接口表达（日期为空即被强制收窄）。
     if trade_date is not None:
         query = query.filter(OptionMarket.trade_date >= trade_date)
+
+    # latest_only：只取「当前筛选范围内」最新交易日的快照（2026-10-29 加，供 T 型报价页）。
+    # 为什么不用全局 latest-date 端点：某品种当日漏同步时（如 au 已同步、ETF 停在昨日），
+    # 全局最新日会让该品种查询直接空 —— 品种内 MAX 才是「各品种自己最新」的正确口径。
+    if latest_only:
+        latest = query.with_entities(func.max(OptionMarket.trade_date)).scalar()
+        if latest is None:
+            return {"items": [], "total": 0, "limit": limit, "offset": offset}
+        query = query.filter(OptionMarket.trade_date == latest)
 
     total = query.count()
     rows = (

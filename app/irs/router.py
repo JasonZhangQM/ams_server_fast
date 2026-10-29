@@ -4,10 +4,9 @@
 提供查询路由与同步路由：
 - GET  /irs/value-monitors              估值监测
 - GET  /irs/discounts-monitor           贴水监测
-- GET  /irs/option-monitors             期权监测
 - POST /irs/sync/{target}               按 target 触发对应 service 函数链（4 种 target）
 """
-from datetime import date
+from datetime import date, datetime
 import re
 from typing import Callable, Dict, List, Optional
 
@@ -21,17 +20,17 @@ from server_fast.app.bds.config import Config as BdsCfg
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
-    OptionMonitor,
     ValueMonitor,
     VmInvalidate,
     VmLogic,
     VmPlan,
     VmResearch,
+    VmStateLog,
+    VmTarget,
     VmVersion,
 )
 from server_fast.app.irs.schemas import (
     DiscountMonitorOut,
-    OptionMonitorOut,
     ValueMonitorCreate,
     ValueMonitorOut,
     ValueMonitorUpdate,
@@ -45,6 +44,10 @@ from server_fast.app.irs.schemas import (
     VmResearchSave,
     VmVersionOut,
     VmVersionSave,
+    TodayItem,
+    VmStateLogOut,
+    VmTargetOut,
+    VmTargetSave,
 )
 from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
@@ -153,6 +156,12 @@ def _enrich_value_monitors(db: Session, items: list) -> list:
         elif not p.is_cancelled:
             plan_pending[p.vm_symbol] = plan_pending.get(p.vm_symbol, 0) + 1
 
+    # 指数估值分位（P0-4/P2-1 纠偏，失败返回空——分位是纠偏不是列表主链）
+    try:
+        pct_map = service.vm_today.percentiles()
+    except Exception:
+        pct_map = {}
+
     for it in items:
         s = it["symbol"]
         it["pp_effective_date"] = cur_date.get(s)
@@ -164,7 +173,34 @@ def _enrich_value_monitors(db: Session, items: list) -> list:
         it["next_review"] = r.get("next_review")
         it["plan_pending"] = plan_pending.get(s, 0)
         it["plan_done"] = plan_done.get(s, 0)
+        # 当前价所在档位带（纯派生，口径唯一在 service，不在前端各算一套）
+        it["zone"] = service.vm_version.compute_zone(
+            {f: it.get(f) for f in ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")},
+            it.get("price"))
+        # 档位对照的 PE/PB 分位（bds 只读，非指数标的为 None）
+        it["pe_pct"] = pct_map.get((s, "pe_ttm"))
+        it["pb_pct"] = pct_map.get((s, "pb_mrq"))
     return items
+
+
+@router.get("/today", response_model=List[TodayItem])
+def get_today(db: Session = Depends(get_db)):
+    """今日页：跨标的到价清单（按「需要动作」排序）。
+
+    纯聚合、不落库：8 标的 zone / 命中剧本 / 逻辑减弱 / 证伪触发 / 复核到期 / 裸仓 /
+    目标仓位与漂移，全部在 service 里算好，前端只展示不重算（铁律 4.5）。
+    """
+    return service.vm_today.today_items(db)
+
+
+@router.get("/plans", response_model=List[VmPlanOut])
+def list_all_plans(db: Session = Depends(get_db)):
+    """全量计划（跨标的），供前端归因表 plan_id → 剧本名/标的映射。
+
+    bills 侧归因只返回裸 plan_id（bills 不依赖 irs，铁律 4.0），
+    名字在这里补；前端把两边只读结果拼起来，不在后端新增跨模块调用。
+    """
+    return service.vm_plan.list_all(db)
 
 
 @router.get("/value-monitors", response_model=PageResponse[ValueMonitorOut])
@@ -251,8 +287,19 @@ def get_value_monitor_detail(id_: int, db: Session = Depends(get_db)):
         ORDER BY bill_rows DESC
     """), {"s": sym}).mappings().all()
     trades = service.vm_map.trades_of(db, sym, limit=50)
+    vm_dict = vm.to_dict()
+    vm_dict["zone"] = service.vm_version.compute_zone(
+        {f: getattr(vm, f) for f in ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")}, vm.price)
+    # 档位对照的 PE/PB 分位（bds 只读，非指数标的 None）
+    try:
+        pct_map = service.vm_today.percentiles()
+        vm_dict["pe_pct"] = pct_map.get((sym, "pe_ttm"))
+        vm_dict["pb_pct"] = pct_map.get((sym, "pb_mrq"))
+    except Exception:
+        vm_dict["pe_pct"] = None
+        vm_dict["pb_pct"] = None
     return {
-        "vm": vm.to_dict(),
+        "vm": vm_dict,
         "current_version": ({"effective_date": cur_ver.effective_date, "note": cur_ver.note}
                             if cur_ver else None),
         "versions": service.vm_version.list_versions(db, sym),
@@ -452,7 +499,58 @@ def list_value_monitor_unplanned(id_: int, db: Session = Depends(get_db)):
     return {"items": [dict(r) for r in rows], "count": len(rows)}
 
 
+@router.get("/value-monitors/{id_}/plans/{seq}/bill-candidates")
+def list_value_monitor_plan_bill_candidates(id_: int, seq: int, db: Session = Depends(get_db)):
+    """「标记已执行」候选成交：自计划建立以来的归属成交（trade_symbol 相同优先）。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    items = service.vm_plan.bill_candidates(db, vm.symbol, seq)
+    return {"items": items, "count": len(items)}
+
+
+@router.put("/value-monitors/{id_}/plans/{seq}/execute")
+def execute_value_monitor_plan(
+    id_: int,
+    seq: int,
+    bill_id: int = Query(..., description="回填的成交 id（bills_bill.id）"),
+    db: Session = Depends(get_db),
+):
+    """回填 bill_id 标记「已执行」。回填后派生状态自动变「已执行」（委托）或不受影响的剧本状态。"""
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    plan = (db.query(VmPlan)
+            .filter(VmPlan.vm_symbol == vm.symbol, VmPlan.seq == seq)
+            .one_or_none())
+    if plan is None:
+        raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的计划")
+    plan.bill_id = bill_id
+    db.commit()
+    return {"status": "success", "message": "已标记已执行",
+            "plan_status": service.vm_plan.derive_status(plan)}
+
+
 # ---------------------------------------------------------------- 逻辑 / 证伪
+def _append_state_log(db: Session, subject_type: str, subject_id: int, symbol: str,
+                      from_state: Optional[str], to_state: str,
+                      note: Optional[str] = None) -> None:
+    """追加一条状态变更审计日志（append-only，复盘用）。
+
+    仅在主表 state/status **真正变化**时调用（值变了才写，保存同值不写）。
+    首次登记（新建）时 from_state=None，表示「历史从今天起完整」。
+    """
+    db.add(VmStateLog(
+        subject_type=subject_type,
+        subject_id=subject_id,
+        symbol=symbol,
+        from_state=from_state,
+        to_state=to_state,
+        changed_at=datetime.now(),
+        note=note,
+    ))
+
+
 @router.get("/value-monitors/{id_}/logic", response_model=List[VmLogicOut])
 def list_value_monitor_logic(id_: int, db: Session = Depends(get_db)):
     vm = db.get(ValueMonitor, id_)
@@ -477,16 +575,22 @@ def save_value_monitor_logic(id_: int, payload: VmLogicSave, db: Session = Depen
     row = (db.query(VmLogic).filter(VmLogic.symbol == vm.symbol, VmLogic.seq == payload.seq)
            .one_or_none())
     action = "created" if row is None else "updated"
+    from_state = None if row is None else row.state
     try:
         if row is None:
             row = VmLogic(symbol=vm.symbol, seq=payload.seq)
             db.add(row)
+            db.flush()  # 拿 row.id，供状态日志使用
         elif row.state != payload.state:
             row.state_at = _dt.now()
         row.content = payload.content
         row.pricing = payload.pricing
         row.state = payload.state
         row.evidence = payload.evidence
+        # 状态历史化：仅 state 真变时追加（新建首次登记 from_state=NULL）
+        if from_state != payload.state:
+            _append_state_log(db, VmStateLog.LOGIC, row.id, vm.symbol,
+                              from_state, payload.state)
         db.commit()
     except Exception as e:
         db.rollback()
@@ -534,11 +638,16 @@ def list_value_monitor_invalidate(id_: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
     rows = db.query(VmInvalidate).filter(VmInvalidate.symbol == vm.symbol) \
         .order_by(VmInvalidate.seq).all()
+    # P2-2 批量判定候选触发（只读，不改 status）
+    from server_fast.app.irs.service.vm_today import judge_list
+    judged_map = judge_list(db, vm.symbol)
     out = []
     for r in rows:
         d = VmInvalidateOut.model_validate(r).model_dump()
         # 判据是否可量化：必须出现"比较符 + 数字"或"数字 + %"，只有数字不算
         d["quantified"] = bool(re.search(r"[><≥≤=]\s*\d|\d+\s*%", r.signal or ""))
+        # P2-2 自动判定候选触发结果（可算 → candidate true/false；不可算 → null）
+        d["auto_judged"] = judged_map.get(r.id)
         out.append(d)
     return out
 
@@ -554,12 +663,19 @@ def save_value_monitor_invalidate(id_: int, payload: VmInvalidateSave,
            .filter(VmInvalidate.symbol == vm.symbol, VmInvalidate.seq == payload.seq)
            .one_or_none())
     action = "created" if row is None else "updated"
+    from_status = None if row is None else row.status
     try:
         if row is None:
             row = VmInvalidate(symbol=vm.symbol, seq=payload.seq)
             db.add(row)
-        for f in ("proposition", "signal", "logic_id", "source", "action", "status", "triggered_at"):
+            db.flush()  # 拿 row.id，供状态日志使用
+        for f in ("proposition", "signal", "logic_id", "source", "action",
+                  "judge", "judge_expr", "status", "triggered_at"):
             setattr(row, f, getattr(payload, f))
+        # 状态历史化：仅 status 真变时追加（新建首次登记 from_state=NULL）
+        if from_status != payload.status:
+            _append_state_log(db, VmStateLog.INVALIDATE, row.id, vm.symbol,
+                              from_status, payload.status)
         db.commit()
     except Exception as e:
         db.rollback()
@@ -584,6 +700,63 @@ def delete_value_monitor_invalidate(id_: int, seq: int, db: Session = Depends(ge
     db.commit()
     if not n:
         raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的证伪条件")
+    return {"status": "success", "message": "已删除"}
+
+
+@router.get("/value-monitors/{id_}/state-log", response_model=List[VmStateLogOut])
+def list_value_monitor_state_log(id_: int, db: Session = Depends(get_db)):
+    """某标的状态演化时间轴（逻辑 state + 证伪 status 的 append-only 日志）。
+
+    按 changed_at 正序回放「完好 → 减弱 → 破坏」「未触发 → 已触发」的完整路径。
+    只读消费，供复盘视图（研究 Tab）使用；主表仍只存当前态，历史靠本表回放。
+    """
+    vm = db.get(ValueMonitor, id_)
+    if vm is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    return (db.query(VmStateLog)
+            .filter(VmStateLog.symbol == vm.symbol)
+            .order_by(VmStateLog.changed_at.asc(), VmStateLog.id.asc())
+            .all())
+
+
+# ---------------------------------------------------------------- 目标仓位（P3-2）
+@router.get("/targets", response_model=List[VmTargetOut])
+def list_targets(db: Session = Depends(get_db)):
+    """全部标的的目标仓位（决策层）。漂移 = 当前 − 目标由前端今日页派生。"""
+    return db.query(VmTarget).order_by(VmTarget.symbol.asc()).all()
+
+
+@router.put("/targets")
+def save_target(payload: VmTargetSave, db: Session = Depends(get_db)):
+    """按 symbol upsert 一个目标仓位（占总资产比例 %）。target_pct=None 表示未设定。"""
+    if not (payload.symbol or "").strip():
+        raise HTTPException(status_code=400, detail="标的代码不能为空")
+    row = (db.query(VmTarget).filter(VmTarget.symbol == payload.symbol).one_or_none())
+    action = "created" if row is None else "updated"
+    try:
+        if row is None:
+            row = VmTarget(symbol=payload.symbol)
+            db.add(row)
+        row.target_pct = payload.target_pct
+        row.note = payload.note
+        db.commit()
+        return {"status": "success", "action": action, "id": row.id}
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"目标仓位已存在：{payload.symbol}")
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
+
+
+@router.delete("/targets/{symbol}")
+def delete_target(symbol: str, db: Session = Depends(get_db)):
+    """删除一个标的的目标仓位。"""
+    n = (db.query(VmTarget).filter(VmTarget.symbol == symbol)
+         .delete(synchronize_session=False))
+    db.commit()
+    if not n:
+        raise HTTPException(status_code=404, detail=f"没有标的 {symbol} 的目标仓位")
     return {"status": "success", "message": "已删除"}
 
 
@@ -752,98 +925,9 @@ def list_discount_options():
     return {"symbol_types": symbol_types, "con_names": con_names}
 
 
-@router.get("/option-monitors", response_model=PageResponse[OptionMonitorOut])
-def list_option_monitors(
-    underlying_symbol: Optional[str] = Query(None, description="标的代码精确匹配"),
-    option_type: Optional[str] = Query(None, description="期权类型(call/put)精确匹配"),
-    symbol: Optional[str] = Query(None, description="期权代码模糊匹配"),
-    end_month: Optional[str] = Query(None, description="到期月(YYYYMM)，按 delisted_date 所在月范围筛选"),
-    limit: int = Query(100, ge=1),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
-):
-    """期权监测合并（对应 OptionMonitor，合并配置+监测单表）。
-
-    过滤条件直接作用于 OptionMonitor 字段（无 JOIN，因 underlying_symbol 已是本表字符串字段）。
-    end_month 按 delisted_date 所在月范围筛选（含顺延至下月初的情况，取该月第1天至下月第1天前）。
-    按标的代码、行权价升序排列。
-    """
-    query = db.query(OptionMonitor)
-    if underlying_symbol:
-        query = query.filter(OptionMonitor.underlying_symbol == underlying_symbol)
-    if option_type:
-        query = query.filter(OptionMonitor.option_type == option_type)
-    if symbol:
-        query = query.filter(OptionMonitor.symbol.like(f"%{symbol}%"))
-    if end_month:
-        # end_month 格式 "YYYYMM"，转为 delisted_date 所在月范围
-        year = int(end_month[:4])
-        month = int(end_month[4:])
-        month_start = date(year, month, 1)
-        # 下月第1天（12月则跨年至次年1月）
-        month_end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
-        query = query.filter(
-            OptionMonitor.delisted_date >= month_start,
-            OptionMonitor.delisted_date < month_end,
-        )
-    total = query.count()
-    items = query.order_by(
-        OptionMonitor.underlying_symbol.asc(),
-        OptionMonitor.price_strike.desc(),
-        OptionMonitor.option_type.asc(),
-    ).offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
-
-
-@router.get("/option-underlyings")
-def list_option_underlyings():
-    """返回期权标的下拉选项（数据源 `bds.config.Config.OPTION_VARIETIES`，无数据库查询）。
-
-    label = 品种名（option_name），value = 标的完整代码（underlying_symbol）。
-
-    🔄 2026-10-27 品种台账合并后改读访问器 `option_varieties()`：
-    本文件不再知道台账的内部结构（dict/元组/其他），结构再变无需同步改。
-    """
-    underlying_symbols = [
-        {"label": item["option_name"], "value": item["underlying_symbol"]}
-        for item in BdsCfg.option_varieties()
-    ]
-    return {"underlying_symbols": underlying_symbols}
-
-
 # =========================================================================
 # POST 同步路由
 # =========================================================================
-
-@router.post("/sync/option-monitor")
-def sync_option_monitor(
-    option_name: str = Query(..., description="期权品种名称（如 沪深300股指期权）"),
-    end_month: str = Query(..., description="到期年月，格式 YYYYMM（如 202608）"),
-):
-    """同步期权行情（akshare 获取期权行情 + gm 获取标的现价）。
-
-    需放在 /sync/{target} 之前注册：FastAPI 按注册顺序匹配，具体路径优先于路径参数。
-    不加入 SYNC_MAP（需额外参数，与其他无参数 target 不同）。
-    """
-    try:
-        result = service.option_monitor_sync_orm(option_name, end_month)
-        return {"status": "success", "message": f"同步完成：option-monitor，{result} 条"}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"同步失败：{str(e)}")
-
-
-@router.post("/clean/option-monitor")
-def clean_option_monitor(db: Session = Depends(get_db)):
-    """清理已到期期权数据：删除剩余天数 days_left <= 0 的记录。
-
-    返回删除条数。days_left 由模型钩子按 delisted_date 实时计算，已到期合约保留无意义。
-    """
-    deleted = db.query(OptionMonitor).filter(OptionMonitor.days_left <= 0).delete(synchronize_session=False)
-    db.commit()
-    return {"status": "success", "message": f"清理完成：option-monitor，删除{deleted}条"}
-
 
 @router.post("/sync/{target}")
 def sync_data(target: str):

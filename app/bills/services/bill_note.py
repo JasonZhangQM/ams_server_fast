@@ -41,9 +41,23 @@ def get_notes(db: Session, bill_id: int) -> dict[str, BillNote]:
     return {n.kind: n for n in db.query(BillNote).filter(BillNote.bill_id == bill_id).all()}
 
 
+def _derive_source(bill: Bill) -> str:
+    """按「落笔时间 vs 成交时间」判定笔记来源。
+
+    > 3 天 = 事后补录（backfill），否则 = 成交当日或次日写（manual）。
+    """
+    if bill.trade_time is None:
+        return "manual"
+    return "backfill" if (datetime.now() - bill.trade_time).days > 3 else "manual"
+
+
 def upsert_note(db: Session, bill: Bill, kind: str,
-                content: Optional[str]) -> dict:
-    """写一条笔记。content 为空串 = 删除该条（不留空壳）。"""
+                content: Optional[str], plan_id: Optional[int] = None) -> dict:
+    """写一条笔记。content 为空串 = 删除该条（不留空壳）。
+
+    source 首次插入时自动判定（不可由调用方决定）；plan_id 为执行剧本后回填的
+    irs_vm_plan.id（裸 ID，无外键），仅首次写入时落库、更新时不覆盖已回填值。
+    """
     if kind not in (BillNote.KIND_IDEA, BillNote.KIND_REVIEW):
         raise ValueError(f"kind 只能是 {BillNote.KIND_IDEA}/{BillNote.KIND_REVIEW}")
     row = (db.query(BillNote)
@@ -60,12 +74,18 @@ def upsert_note(db: Session, bill: Bill, kind: str,
 
     if row is None:
         row = BillNote(bill_id=bill.id, biz_key=bill_biz_key(bill),
-                       kind=kind, content=text, content_at=datetime.now())
+                       kind=kind, content=text, content_at=datetime.now(),
+                       source=_derive_source(bill), plan_id=plan_id)
         db.add(row)
         db.flush()
-        return {"action": "created", "kind": kind, "id": row.id, "content_at": row.content_at}
+        return {"action": "created", "kind": kind, "id": row.id, "content_at": row.content_at,
+                "source": row.source, "plan_id": row.plan_id}
 
     row.content = text
     row.biz_key = bill_biz_key(bill)  # 成交行若被修正过，顺手对齐
+    # 仅在显式传入 plan_id 时回填，避免普通改笔记把已回填值抹掉
+    if plan_id is not None:
+        row.plan_id = plan_id
     db.flush()
-    return {"action": "updated", "kind": kind, "id": row.id, "content_at": row.content_at}
+    return {"action": "updated", "kind": kind, "id": row.id, "content_at": row.content_at,
+            "source": row.source, "plan_id": row.plan_id}

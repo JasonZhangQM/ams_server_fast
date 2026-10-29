@@ -34,6 +34,7 @@ from server_fast.app.bills.models import (
     ProfitYear,
 )
 from server_fast.app.bills.schemas import (
+    AttributionByPlanOut,
     BillNoteOut,
     BillNoteSave,
     BillOut,
@@ -823,7 +824,7 @@ def save_bill_note(
     # 延迟导入：services/__init__ 会拉起多个子模块，顶层导入易与 models 形成环
     from server_fast.app.bills.services.bill_note import upsert_note
     try:
-        result = upsert_note(db, bill, kind, payload.content)
+        result = upsert_note(db, bill, kind, payload.content, plan_id=payload.plan_id)
         db.commit()
         return {"status": "success", **result}
     except ValueError as e:
@@ -832,6 +833,67 @@ def save_bill_note(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"保存失败：{str(e)}")
+
+
+@router.get("/attribution/by-plan", response_model=AttributionByPlanOut)
+def attribution_by_plan(db: Session = Depends(get_db)):
+    """剧本盈亏归因（P3-3）。
+
+    读 bills_bill_note.plan_id 按剧本聚合；每笔成交只取一条带 plan_id 的决策笔记
+    （MIN 去重，避免「想法 + 复盘」两条都带 plan_id 时重复计盈亏）。
+    pl = pl_long + pl_short（平仓盈亏 l/s，正=盈利）；未归因成交单列残差，不静默丢弃。
+    剧本名/标的不在此处返回，由前端按 plan_id 与 irs 计划列表映射（bills 不依赖 irs）。
+    """
+    assigned_sql = text("""
+        SELECT a.plan_id,
+               COUNT(*) AS exec_count,
+               COALESCE(SUM(p.pl_long), 0) + COALESCE(SUM(p.pl_short), 0) AS total_pl,
+               SUM(CASE WHEN COALESCE(p.pl_long, 0) + COALESCE(p.pl_short, 0) > 0
+                        THEN 1 ELSE 0 END) AS win_count,
+               MAX(b.trade_time) AS last_trade_time
+        FROM (
+            SELECT bill_id, MIN(plan_id) AS plan_id
+            FROM bills_bill_note
+            WHERE plan_id IS NOT NULL
+            GROUP BY bill_id
+        ) a
+        JOIN bills_bill b ON b.id = a.bill_id
+        JOIN bills_profit p ON p.bill_id = a.bill_id
+        GROUP BY a.plan_id
+        ORDER BY total_pl DESC
+    """)
+    items = []
+    for r in db.execute(assigned_sql).mappings().all():
+        total = float(r["total_pl"] or 0)
+        n = int(r["exec_count"])
+        w = int(r["win_count"] or 0)
+        items.append({
+            "plan_id": int(r["plan_id"]),
+            "exec_count": n,
+            "total_pl": total,
+            "win_count": w,
+            "win_rate": round(w / n, 4) if n else 0.0,
+            "avg_pl": round(total / n, 2) if n else 0.0,
+            "last_trade_time": r["last_trade_time"],
+        })
+    unassigned_sql = text("""
+        SELECT COUNT(*) AS exec_count,
+               COALESCE(SUM(p.pl_long), 0) + COALESCE(SUM(p.pl_short), 0) AS total_pl
+        FROM bills_bill b
+        JOIN bills_profit p ON p.bill_id = b.id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM bills_bill_note n
+            WHERE n.bill_id = b.id AND n.plan_id IS NOT NULL
+        )
+    """)
+    u = db.execute(unassigned_sql).mappings().first()
+    return {
+        "items": items,
+        "unattributed": {
+            "exec_count": int(u["exec_count"] or 0),
+            "total_pl": float(u["total_pl"] or 0),
+        },
+    }
 
 
 # =========================================================================

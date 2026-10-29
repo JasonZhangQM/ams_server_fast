@@ -4,13 +4,12 @@
 对应 router.py 中 GET 路由的返回结构：
 - DiscountMonitorOut  /irs/discounts-monitor    贴水监测全字段（合并配置+监测）
 - ValueMonitorOut     /irs/value-monitors       估值监测全字段
-- OptionMonitorOut    /irs/option-monitors      期权监测全字段
 
 所有 Schema 均启用 from_attributes=True 以支持从 ORM 实例直接构造。
 """
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -81,6 +80,9 @@ class ValueMonitorOut(BaseModel):
     pv_h_y: Optional[Decimal] = None           # 高(y%)
     pv_eh_y: Optional[Decimal] = None          # 极高(y%)
     # ---- v3 派生字段（列表页用，不落库；不声明会被 response_model 裁掉，铁律 4.10）----
+    zone: Optional[str] = None                 # 当前价所在档位带（低于极低/极低~低/…/高于极高）
+    pe_pct: Optional[float] = None             # 当前价对应 PE 分位（bds 只读；非指数标的为 None）
+    pb_pct: Optional[float] = None             # 当前价对应 PB 分位（bds 只读；非指数标的为 None）
     pp_effective_date: Optional[date] = None   # 当前生效版日期
     pp_version_count: Optional[int] = None     # 版本数
     pp_pending_date: Optional[date] = None     # 最早的未来版日期（"待生效 X-XX"）
@@ -138,32 +140,6 @@ class ValueMonitorUpdate(BaseModel):
     y_high: Optional[Decimal] = None           # 年高
     y_low: Optional[Decimal] = None            # 年低
     price: Optional[Decimal] = None            # 最新价
-
-
-# =========================================================================
-# 期权监测合并：对应 OptionMonitor 模型全字段（19 字段，合并配置+监测单表）
-# =========================================================================
-class OptionMonitorOut(BaseModel):
-    """期权监测合并响应（对应 /irs/option-monitors，合并配置+监测全字段）。"""
-
-    model_config = ConfigDict(from_attributes=True)
-
-    underlying_symbol: str                           # 标的代码
-    price_strike: Decimal                            # 行权价
-    delisted_date: date                              # 到期日
-    days_left: Optional[int] = None                  # 剩余天数
-    multiplier: int                                  # 期权乘数
-    symbol: str                                      # 期权代码
-    option_type: str                                 # 期权类型
-    price_ud: Optional[Decimal] = None               # 标的现价
-    price: Optional[Decimal] = None                  # 期权现价
-    value_t: Optional[Decimal] = None                # 时间价值
-    value_i: Optional[Decimal] = None                # 内在价值
-    atm_i: Optional[Decimal] = None                  # 平值(%)
-    ratio_t: Optional[Decimal] = None                # 时间(%)
-    ratio_i: Optional[Decimal] = None                # 内在(%)
-    ratio_t_y: Optional[Decimal] = None              # 时间(%Y)
-    ratio_i_y: Optional[Decimal] = None              # 内在(%Y)
 
 
 # =========================================================================
@@ -262,6 +238,7 @@ class VmPlanOut(BaseModel):
     vm_symbol: str
     trade_symbol: str
     seq: int
+    kind: str
     b_s: str
     o_c: Optional[str] = None
     trigger_op: str
@@ -285,6 +262,7 @@ class VmPlanSave(BaseModel):
     """计划保存请求：seq 定位（同标的同 seq 覆盖）。"""
 
     seq: int
+    kind: str = "剧本"
     trade_symbol: str
     b_s: str
     o_c: Optional[str] = None
@@ -336,12 +314,16 @@ class VmInvalidateOut(BaseModel):
     signal: str
     source: Optional[str] = None
     action: Optional[str] = None
+    judge: Optional[str] = None
+    judge_expr: Optional[str] = None
     status: str
     triggered_at: Optional[date] = None
     create_time: datetime
     update_time: datetime
     # 派生：signal 里没有数字阈值 -> 前端标红（模板要求"阈值不可量化者视为未填"）
     quantified: bool = True
+    # P2-2 自动判定候选触发（只读，不改 status）：可算时返回 dict{candidate, current_value, threshold, op, metric}，不可算返回 None
+    auto_judged: Optional[dict] = None
 
 
 class VmInvalidateSave(BaseModel):
@@ -358,5 +340,76 @@ class VmInvalidateSave(BaseModel):
     logic_id: Optional[int] = None
     source: Optional[str] = None
     action: Optional[str] = None
+    judge: Optional[str] = None
+    judge_expr: Optional[str] = None
     status: str = "未触发"
     triggered_at: Optional[date] = None
+
+
+# =========================================================================
+# 状态审计日志（irs_vm_state_log，append-only）
+# =========================================================================
+class VmStateLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    subject_type: str
+    subject_id: int
+    symbol: str
+    from_state: Optional[str] = None
+    to_state: str
+    changed_at: datetime
+    note: Optional[str] = None
+
+
+# =========================================================================
+# 目标仓位（irs_vm_target，决策层）
+# =========================================================================
+class VmTargetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    symbol: str
+    target_pct: Optional[Decimal] = None
+    note: Optional[str] = None
+
+
+class VmTargetSave(BaseModel):
+    symbol: str
+    target_pct: Optional[Decimal] = None
+    note: Optional[str] = None
+
+
+# =========================================================================
+# 今日页（GET /irs/today）：跨标的到价清单，纯聚合、不落库
+# =========================================================================
+class TodayPlanHit(BaseModel):
+    seq: int
+    kind: str
+    trade_symbol: str
+    b_s: str
+    o_c: Optional[str] = None
+    reason: Optional[str] = None
+    effective_trigger: Optional[float] = None
+
+
+class TodayItem(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    theme: Optional[str] = None
+    price: Optional[float] = None
+    zone: Optional[str] = None
+    nearest_level_pct: Optional[float] = None   # 距最近档位 %
+    pe_pct: Optional[float] = None              # 当前价对应 PE 分位（指数标的）
+    pb_pct: Optional[float] = None              # 当前价对应 PB 分位（指数标的）
+    hit_plans: List[TodayPlanHit] = Field(default_factory=list)
+    logic_total: int = 0
+    logic_weak: int = 0
+    invalidate_triggered: int = 0              # 已触发证伪条数
+    has_position: bool = False                 # 是否有归属持仓
+    review_due: bool = False                   # 复核已到期
+    naked: bool = False                        # 裸仓（有持仓但 logic=0 或 research=0）
+    target_pct: Optional[float] = None
+    current_pct: Optional[float] = None
+    drift: Optional[float] = None              # 当前 − 目标
+    priority: int = 5                          # 1 证伪置顶 / 2 剧本命中 / 3 裸仓 / 4 复核 / 5 其余

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """irs 业务公共辅助：日志器、通用 session 封装。
 
-被 value_monitor / discount_monitor / option_monitor 子模块共享。
+被 value_monitor / discount_monitor 子模块共享。
 """
 import logging
 

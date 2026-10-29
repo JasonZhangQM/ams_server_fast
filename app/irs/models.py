@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """irs 应用 SQLAlchemy 2.0 模型定义。
 
-- 3 个 ORM 模型继承 (Base, BaseModel)
+- 2 个 ORM 模型继承 (Base, BaseModel)：DiscountMonitor、ValueMonitor
+  （期权监测 OptionMonitor 已于 2026-10-29 下线，行情统一走 bds_option_market）
 - 衍生字段计算逻辑通过 SQLAlchemy before_insert / before_update 事件钩子实现
 - 保留所有自定义类属性（cols_map_fields / unique_keys / fields_request 等）
 """
@@ -26,8 +27,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from server_fast.common.db import Base
 from server_fast.common.models import BaseModel
-# 期权衍生字段唯一实现（bds 侧；irs → bds 是允许的依赖方向）
-from server_fast.app.bds.services.market_data.option_derived import compute_option_derived
 
 
 def _on_insert_update(model):
@@ -96,66 +95,6 @@ class ValueMonitor(Base, BaseModel):
 
     def __str__(self):
         return f"{self.name}"
-
-
-class OptionMonitor(Base, BaseModel):
-    """期权监测合并表（合并原 SymbolOption 配置 + MonitorOption 监测为单表）。
-
-    表名 irs_option_monitor，兼具配置与监测功能：
-    - 配置字段：underlying_symbol/price_strike/delisted_date/days_left/multiplier
-    - 监测字段：symbol/option_type/price_ud/price/value_t/value_i/atm_i/ratio_t/ratio_i/ratio_t_y/ratio_i_y
-    - underlying_symbol 直存标的代码（原 underlying_id 外键改为字符串），multiplier 直存期权乘数（原 value_per 计算字段改为直存）
-    """
-
-    __tablename__ = "irs_option_monitor"
-    __table_args__ = (
-        UniqueConstraint(
-            "underlying_symbol", "price_strike", "delisted_date", "option_type",
-            name="uk_irs_option_monitor",
-        ),
-    )
-
-    # 期权类型常量（保留原 MonitorOption 类属性）
-    OPTION_TYPE_CALL = "call"  # 认购
-    OPTION_TYPE_PUT = "put"    # 认沽
-
-    # ---- 原 SymbolOption 配置字段 ----
-    underlying_symbol: Mapped[str] = mapped_column(String(16), nullable=False, comment="标的代码")
-    price_strike: Mapped[Decimal] = mapped_column(Numeric(9, 4), nullable=False, comment="行权价")
-    delisted_date: Mapped[date] = mapped_column(Date, nullable=False, comment="到期日")
-    days_left: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="剩余天数")
-    multiplier: Mapped[int] = mapped_column(Integer, nullable=False, comment="期权乘数")
-
-    # ---- 原 MonitorOption 监测字段 ----
-    symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, comment="期权代码")
-    option_type: Mapped[str] = mapped_column(
-        String(8), nullable=False, default=OPTION_TYPE_CALL, comment="期权类型"
-    )
-    price_ud: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, default=Decimal("1"), comment="标的现价"
-    )
-    price: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(9, 4), nullable=True, default=Decimal("1"), comment="期权现价"
-    )
-    value_t: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="时间价值")
-    value_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 4), nullable=True, comment="内在价值")
-    atm_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="平值(%)")
-    ratio_t: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%)")
-    ratio_i: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%)")
-    ratio_t_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="时间(%Y)")
-    ratio_i_y: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="内在(%Y)")
-
-    # ---- 保留的自定义类属性（合并自 MonitorOption）----
-    cols_map_fields = {
-        "symbol": ["代码"],
-        "price": ["最新"],
-    }
-
-    def __str__(self):
-        return (
-            f"{self.underlying_symbol}-{self.price_strike}-{self.delisted_date.year}"
-            f"{self.delisted_date.month}-{self.option_type}"
-        )
 
 
 class DiscountMonitor(Base, BaseModel):
@@ -241,21 +180,6 @@ def _compute_value_monitor(mapper, connection, target):
     target.pv_m_y = (target.pp_m / target.py_close - Decimal("1")) * Decimal("100")
     target.pv_h_y = (target.pp_h / target.py_close - Decimal("1")) * Decimal("100")
     target.pv_eh_y = (target.pp_eh / target.py_close - Decimal("1")) * Decimal("100")
-
-
-@_on_insert_update(OptionMonitor)
-def _compute_option_monitor(mapper, connection, target):
-    """OptionMonitor 计算逻辑（2026-10-27 起改为委托 bds 唯一实现）。
-
-    原先这里抄了 40 行公式（atm_i/value_i/value_t/ratio_*），与 bds_option_market
-    的模型钩子完全重复、必然漂移。现在：
-    - days_left = 到期日 − today（**irs 专属口径**：监测表随时点变化，
-      与 bds 行情表的 as-of 口径不同，所以留在本钩子里算）
-    - 七个衍生字段全部委托 `bds.services.market_data.option_derived.compute_option_derived`
-      （irs → bds 是允许的依赖方向；bds → irs 禁止，所以实现只能放 bds）
-    """
-    target.days_left = (target.delisted_date - date.today()).days
-    compute_option_derived(target)
 
 
 @_on_insert_update(DiscountMonitor)
@@ -413,6 +337,10 @@ class VmInvalidate(Base, BaseModel):
     source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="数据源")
     action: Mapped[Optional[str]] = mapped_column(
         String(32), nullable=True, comment="触发后动作：减仓/清仓/重估/暂停加仓")
+    judge: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, comment="判定类别：price/percentile/discount/manual")
+    judge_expr: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, comment="判据表达式（如 price<=3900）")
     status: Mapped[str] = mapped_column(String(8), nullable=False, default="未触发", comment="状态")
     triggered_at: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="触发日")
 
@@ -445,6 +373,8 @@ class VmPlan(Base, BaseModel):
     trade_symbol: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="交易代码（真实合约）")
     seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号")
+    kind: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="剧本", comment="剧本=长期有效；委托=一次性")
     b_s: Mapped[str] = mapped_column(String(4), nullable=False, comment="买/卖")
     o_c: Mapped[Optional[str]] = mapped_column(String(4), nullable=True, comment="开/平")
     trigger_op: Mapped[str] = mapped_column(
@@ -467,3 +397,56 @@ class VmPlan(Base, BaseModel):
 
     def __str__(self):
         return f"{self.vm_symbol}#{self.seq}({self.b_s}{self.o_c or ''})"
+
+
+class VmStateLog(Base, BaseModel):
+    """逻辑 / 证伪状态变更审计日志（append-only，复盘用）。
+
+    主表（VmLogic.state / VmInvalidate.status）仍只存当前态，本表只增不改：
+    每一次 state/status **真正变化**时追加一行，旧值不覆盖，「三个月前判过什么」可回放。
+    """
+
+    __tablename__ = "irs_vm_state_log"
+    __table_args__ = (
+        Index("idx_subject", "subject_type", "subject_id", "changed_at"),
+    )
+
+    LOGIC = "logic"
+    INVALIDATE = "invalidate"
+
+    subject_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="logic=逻辑；invalidate=证伪")
+    subject_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="对应 irs_vm_logic.id / irs_vm_invalidate.id")
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="标的代码")
+    from_state: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, comment="变更前（首次登记为 NULL）")
+    to_state: Mapped[str] = mapped_column(String(16), nullable=False, comment="变更后")
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="变更时间")
+    note: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, comment="变更理由/证据（可选）")
+
+    def __str__(self):
+        return f"{self.subject_type}#{self.subject_id}:{self.from_state}->{self.to_state}"
+
+
+class VmTarget(Base, BaseModel):
+    """标的级目标仓位（决策层）：目标占总资产比例；漂移 = 当前 − 目标在前端派生。"""
+
+    __tablename__ = "irs_vm_target"
+    __table_args__ = (
+        UniqueConstraint("symbol", name="uk_target_symbol"),
+    )
+
+    symbol: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="标的（vm_symbol）")
+    target_pct: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(10, 4), nullable=True, comment="目标仓位占总资产比例（%）")
+    note: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True, comment="目标仓位说明")
+
+    unique_keys = ["symbol"]
+
+    def __str__(self):
+        return f"{self.symbol}@{self.target_pct}%"
