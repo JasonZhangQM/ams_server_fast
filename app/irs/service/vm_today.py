@@ -10,7 +10,8 @@
 - 裸仓：有归属持仓 且（logic=0 或 research=0）
 - 漂移：target_pct（irs 决策层）− current_pct（bills 事实层），前端派生不落库
 
-依赖方向：irs → bills（GroupSymbol/GroupAcc 只读）、irs → bds（分位只读），均属允许方向。
+依赖方向：bills ↔ irs 平级、可互依（规则 4.12，2026-10-29 改）；bds 只能被依赖。
+本模块只**读** bills（GroupSymbol/GroupAcc），不写；分位从 bds 只读。
 """
 from __future__ import annotations
 

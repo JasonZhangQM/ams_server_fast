@@ -404,9 +404,10 @@ class BillNote(Base, BaseModel):
     source: Mapped[str] = mapped_column(
         String(8), nullable=False, default="manual",
         comment="manual=成交当日或次日写；backfill=事后补录（>3 天）")
-    # 裸 ID 无外键：bills 不能依赖 irs（依赖只能向下 irs → bills）；执行哪条剧本由 irs 侧聚合
+    # 裸 ID 无外键：不是因为依赖方向（bills ↔ irs 平级可互依，规则 4.12），
+    # 而是删除策略——剧本会被整条删掉，FK 会让删除失败，悬空时前端显示「剧本已删除」即可。
     plan_id: Mapped[Optional[int]] = mapped_column(
-        Integer, nullable=True, comment="irs_vm_plan.id（裸 ID，无外键）")
+        Integer, nullable=True, comment="irs_vm_plan.id（裸 ID，无外键；悬空=剧本已删）")
 
     __table_args__ = (
         UniqueConstraint('bill_id', 'kind', name='uk_bbn_bill_kind'),

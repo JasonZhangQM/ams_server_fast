@@ -229,7 +229,7 @@ class GroupSymbolCodeOut(BaseModel):
     """券商码候选（下拉选项）响应 —— `GET /bills/group-symbols/symbol-options`。
 
     「期权行情同步清单」（`bds_option_config.broker_symbol`）内联编辑时用它做选项源。
-    **只供前端跨模块调用**：bds 后端不 import bills 的任何东西（规则 4.12 依赖只能向下），
+    **只供前端跨模块调用**：bds 后端不 import bills 的任何东西（规则 4.12：bds 只能被依赖），
     写入仍走 `PUT /bds/option-config/{id}`，bills 只回答「有哪些合法账单码」这一个事实。
 
     口径：

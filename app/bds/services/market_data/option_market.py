@@ -136,7 +136,7 @@ def _calc_delisted_date(end_month: str, rule: str) -> date:
 
     🔄 **2026-10-27 实现迁入 bds**：此前本函数只是一层转发，真正实现在
     `irs.service.option_monitor` 里 —— 基础数据的算法放在研究模块、而 bds 反过来
-    依赖 irs，方向是反的（违反「依赖只能向下」）。现在实现归 bds，irs 反向引用本函数。
+    依赖 irs，方向是反的（违反规则 4.12：bds 只能被依赖）。现在实现归 bds，irs 反向引用本函数。
 
     ⚠️ 它已**降级为回退/交叉校验，不是权威**：权威是 `bds_option_info.last_trade_date`
     （交易所给的）。保留算法只为两件事——① 字典缺行时兜底；② `_cross_check_delisted()`
