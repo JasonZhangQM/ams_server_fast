@@ -82,6 +82,7 @@ from server_fast.app.bds.schemas import (
     OptionInfoOut,
     OptionInfoProductOut,
     OptionMarketOut,
+    OptionMarketUpdate,
     OptionSyncPlanOut,
     SymbolInfoOut,
     TradeDateOut,
@@ -2771,6 +2772,51 @@ def list_option_market(
         "limit": limit,
         "offset": offset,
     }
+
+
+@router.put("/option-market/{market_id}", response_model=OptionMarketOut)
+def update_option_market(
+    market_id: int,
+    req: OptionMarketUpdate,
+    db: Session = Depends(get_db),
+):
+    """手工修改某条期权行情（用于接口偶发取错、需人工修正）。
+
+    只允许改「原始输入」列（价格类 + delta / 成交量 / 持仓量），**身份字段**
+    （contract_id / trade_date / price_strike / source）一律不可改 —— 改了就是
+    另一条事实，应删行重建。
+
+    请求体中 **None 表示不改**，传值才覆盖。已同步时 `sync_time` 会自动刷新。
+    `value_i / value_t / atm_i / ratio_*` 等衍生字段由模型钩子在 flush 前
+    自动按唯一口径重算，调用方无需传。
+    """
+    row = db.query(OptionMarket).filter(OptionMarket.id == market_id).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"行情记录不存在: id={market_id}")
+
+    # 只更新请求体中显式传值的字段（None=不改）
+    update_fields = ["price", "pre_settle", "settle", "price_ud",
+                     "delta_opt", "volume", "open_interest"]
+    changed = False
+    for field in update_fields:
+        val = getattr(req, field)
+        if val is not None:
+            setattr(row, field, val)
+            changed = True
+
+    if not changed:
+        # 没有任何字段改动也返回当前行，保持幂等
+        db.refresh(row)
+    else:
+        row.sync_time = datetime.now()
+        db.commit()
+        db.refresh(row)
+
+    # 组装响应体（复用 _market_out 逻辑：join info + broker）
+    info = db.query(OptionInfo).filter(OptionInfo.contract_id == row.contract_id).first()
+    broker_rows = _broker_map(db, {row.contract_id})
+    broker_symbol = broker_rows.get(row.contract_id)
+    return _market_out(row, info, broker_symbol)
 
 
 @router.get("/option-market/latest-date")

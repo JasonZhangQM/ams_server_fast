@@ -826,3 +826,26 @@ class OptionSyncPlanOut(BaseModel):
     group_count: int = Field(description="品种×到期月组合数（= 接口请求次数）")
     option_names: list[str] = Field(description="涉及的期权品种")
     groups: list[dict] = Field(description="组合明细 [{option_name, end_month}]")
+
+
+class OptionMarketUpdate(BaseModel):
+    """手工修改期权行情字段（PUT /bds/option-market/{id}）。
+
+    仅允许改「原始输入」列（价格类 + 成交量/持仓量/delta），**不允许改身份字段**
+    （contract_id / trade_date / price_strike / source）—— 改了就是另一条事实。
+
+    每个字段 **None 表示不改**；传值才会覆盖。空值可以显式传 null（JSON）或空串（前端
+    转为 None）。后端不会主动清空未传的列，避免误操作。
+
+    value_i / value_t / atm_i / ratio_* 等衍生字段**不在入参**—— 它们由模型钩子
+    在 flush 前自动按 `services/market_data/option_derived.py` 的唯一口径重算，
+    写库时顺带刷新，无需前端关心。
+    """
+
+    price: Optional[Decimal] = Field(default=None, description="最新价")
+    pre_settle: Optional[Decimal] = Field(default=None, description="前结算价")
+    settle: Optional[Decimal] = Field(default=None, description="结算价")
+    price_ud: Optional[Decimal] = Field(default=None, description="标的价")
+    delta_opt: Optional[Decimal] = Field(default=None, description="delta")
+    volume: Optional[int] = Field(default=None, description="成交量")
+    open_interest: Optional[int] = Field(default=None, description="持仓量")
