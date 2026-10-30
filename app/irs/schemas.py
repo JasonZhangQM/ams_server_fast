@@ -96,22 +96,26 @@ class ValueMonitorOut(BaseModel):
 
 
 # =========================================================================
-# 估值监测新增：请求 Schema（7 个必填字段）
+# 估值监测新增：请求 Schema
 # =========================================================================
 class ValueMonitorCreate(BaseModel):
-    """估值监测新增请求（对应 POST /irs/value-monitors）。"""
+    """估值监测新增请求（对应 POST /irs/value-monitors）。
+
+    v3 起档位版本唯一入口是详情抽屉的「档位」Tab，新增时 pp_* 可选，
+    全空时只建主表行，档位后续再去 Tab 里 save_version。
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
-    symbol: str                                # 代码
-    name: str                                  # 名称
-    pp_el: Decimal                             # 极低
-    pp_l: Decimal                              # 低
-    pp_m: Decimal                              # 中
-    pp_h: Decimal                              # 高
-    pp_eh: Decimal                             # 极高
-    theme: Optional[str] = None                # 主题
-    effective_date: Optional[date] = None      # 首版生效日（空=今天）
+    symbol: str                                  # 代码
+    name: str                                    # 名称
+    pp_el: Optional[Decimal] = None             # 极低（可选）
+    pp_l: Optional[Decimal] = None               # 低（可选）
+    pp_m: Optional[Decimal] = None               # 中（可选）
+    pp_h: Optional[Decimal] = None               # 高（可选）
+    pp_eh: Optional[Decimal] = None              # 极高（可选）
+    theme: Optional[str] = None                  # 主题
+    effective_date: Optional[date] = None        # 首版生效日（空=今天）
 
 
 # =========================================================================

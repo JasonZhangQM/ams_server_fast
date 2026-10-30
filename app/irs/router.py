@@ -841,8 +841,9 @@ def create_value_monitor(
 ):
     """新增估值监测记录。
 
-    v3 起档位只有一个写入口：先建主表行（pp_* 置 NULL），再 save_version() 建首版，
-    由 save_version 回写主表 pp_* 并触发钩子算 pv_*。
+    v3 起档位版本唯一入口是详情抽屉的「档位」Tab：
+    - pp_* 有值 → 建主表 + save_version 建首版
+    - pp_* 全空 → 只建主表行，档位后续去 Tab 里 save_version
     symbol 重复时返回 HTTP 400。
     """
     try:
@@ -853,11 +854,14 @@ def create_value_monitor(
         )
         db.add(vm)
         db.flush()
-        service.vm_version.save_version(
-            db, payload.symbol, payload.effective_date or date.today(),
-            {"pp_el": payload.pp_el, "pp_l": payload.pp_l, "pp_m": payload.pp_m,
-             "pp_h": payload.pp_h, "pp_eh": payload.pp_eh},
-            "新建标的时建立首版")
+        # 只有 pp_* 至少一个有值时才建首版档位
+        pp_values = [payload.pp_el, payload.pp_l, payload.pp_m, payload.pp_h, payload.pp_eh]
+        if any(v is not None for v in pp_values):
+            service.vm_version.save_version(
+                db, payload.symbol, payload.effective_date or date.today(),
+                {"pp_el": payload.pp_el, "pp_l": payload.pp_l, "pp_m": payload.pp_m,
+                 "pp_h": payload.pp_h, "pp_eh": payload.pp_eh},
+                "新建标的时建立首版")
         db.commit()
         return {"status": "success", "message": "新增成功"}
     except IntegrityError:
