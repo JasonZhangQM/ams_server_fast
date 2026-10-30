@@ -654,13 +654,15 @@ def save_value_monitor_logic(id_: int, payload: VmLogicSave, db: Session = Depen
         if row is None:
             row = VmLogic(symbol=vm.symbol, seq=payload.seq)
             db.add(row)
-            db.flush()  # 拿 row.id，供状态日志使用
         elif row.state != payload.state:
             row.state_at = _dt.now()
+        # 先赋值 NOT NULL 字段再 flush：flush 会立即发 INSERT，
+        # 若此时 content/state 仍为 None 将违反非空约束（2026-10-30 修复）
         row.content = payload.content
         row.pricing = payload.pricing
         row.state = payload.state
         row.evidence = payload.evidence
+        db.flush()  # 拿 row.id，供状态日志使用
         # 状态历史化：仅 state 真变时追加（新建首次登记 from_state=NULL）
         if from_state != payload.state:
             _append_state_log(db, VmStateLog.LOGIC, row.id, vm.symbol,
@@ -742,10 +744,12 @@ def save_value_monitor_invalidate(id_: int, payload: VmInvalidateSave,
         if row is None:
             row = VmInvalidate(symbol=vm.symbol, seq=payload.seq)
             db.add(row)
-            db.flush()  # 拿 row.id，供状态日志使用
+        # 先赋值 NOT NULL 字段再 flush：flush 会立即发 INSERT，
+        # 若此时 proposition/signal 仍为 None 将违反非空约束（2026-10-30 修复）
         for f in ("proposition", "signal", "logic_id", "source", "action",
                   "judge", "judge_expr", "status", "triggered_at"):
             setattr(row, f, getattr(payload, f))
+        db.flush()  # 拿 row.id，供状态日志使用
         # 状态历史化：仅 status 真变时追加（新建首次登记 from_state=NULL）
         if from_status != payload.status:
             _append_state_log(db, VmStateLog.INVALIDATE, row.id, vm.symbol,
