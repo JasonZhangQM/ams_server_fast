@@ -45,8 +45,10 @@ def _pp_of(db: Session, symbol: str) -> dict:
             "pp_h": ver.pp_h, "pp_eh": ver.pp_eh}
 
 
-def list_by_symbol(db: Session, symbol: str) -> list[dict]:
-    pp = _pp_of(db, symbol)
+def list_by_symbol(db: Session, symbol: str, pp: Optional[dict] = None) -> list[dict]:
+    """列出某标的全部剧本；pp 可外部传入以复用已查档位（避免重复 effective_version 查询）。"""
+    if pp is None:
+        pp = _pp_of(db, symbol)
     rows = (db.query(VmPlan).filter(VmPlan.vm_symbol == symbol)
             .order_by(VmPlan.seq.asc()).all())
     return [_to_dict(r, pp) for r in rows]

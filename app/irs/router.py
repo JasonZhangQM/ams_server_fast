@@ -268,24 +268,31 @@ def value_monitor_unmapped(
 
 @router.get("/value-monitors/{id_}/detail")
 def get_value_monitor_detail(id_: int, db: Session = Depends(get_db)):
-    """详情抽屉首屏：主表 + 当前档位 + 最新研究 + 剧本 + 归属合约 + 覆盖数。
+    """详情抽屉首屏（概览最小集）。
 
-    一次给全，避免前端开抽屉连打 5 个请求；各 Tab 的明细仍走各自端点。
+    2026-10-30 瘦身：只返回概览 Tab 用到的数据 + 轻量计数。
+    各 Tab 数据改为切到时懒加载（versions/research/logic/invalidate/plans/trades/groups）。
     """
     vm = db.get(ValueMonitor, id_)
     if vm is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
     sym = vm.symbol
-    plans = service.vm_plan.list_by_symbol(db, sym)
+    # 当前生效档位（概览五档 + 剧本 trigger_ref 解析都要用）
     cur_ver = service.vm_version.effective_version(db, sym)
-    rows = db.execute(text("""
-        SELECT g.id, g.category, g.symbol, g.count, g.pf_total,
-               (SELECT COUNT(*) FROM bills_bill b
-                 WHERE b.category=g.category AND b.symbol=g.symbol) AS bill_rows
-        FROM bills_group_symbol g WHERE g.vm_symbol = :s
-        ORDER BY g.id DESC
-    """), {"s": sym}).mappings().all()
-    trades = service.vm_map.trades_of(db, sym, limit=50)
+    pp = {"pp_el": cur_ver.pp_el, "pp_l": cur_ver.pp_l, "pp_m": cur_ver.pp_m,
+          "pp_h": cur_ver.pp_h, "pp_eh": cur_ver.pp_eh} if cur_ver else {}
+    # 轻量计数：概览只关心"有多少"，不关心"每一行"
+    plans_total = db.query(VmPlan).filter(VmPlan.vm_symbol == sym).count()
+    plans_active = db.query(VmPlan).filter(VmPlan.vm_symbol == sym, VmPlan.is_cancelled == False).count()
+    logic_total = db.query(VmLogic).filter(VmLogic.symbol == sym).count()
+    invalidate_total = db.query(VmInvalidate).filter(VmInvalidate.symbol == sym).count()
+    # 归属覆盖（groups + bill_rows，供概览底部文字提示）
+    cov = service.vm_map.coverage(db)
+    cov_row = next((r for r in cov if r["vm_symbol"] == sym), {"group_rows": 0, "bill_rows": 0})
+    # 剧本前 10 条摘要（概览「剧本」板块只读展示，够用）
+    plans_preview = service.vm_plan.list_by_symbol(db, sym, pp=pp)[:10]
+    # 研究最新一版（概览决策卡只用这一条）
+    latest_research = service.vm_research.latest(db, sym)
     vm_dict = vm.to_dict()
     vm_dict["zone"] = service.vm_version.compute_zone(
         {f: getattr(vm, f) for f in ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")}, vm.price)
@@ -301,15 +308,15 @@ def get_value_monitor_detail(id_: int, db: Session = Depends(get_db)):
         "vm": vm_dict,
         "current_version": ({"effective_date": cur_ver.effective_date, "note": cur_ver.note}
                             if cur_ver else None),
-        "versions": service.vm_version.list_versions(db, sym),
-        "research": service.vm_research.list_by_symbol(db, sym),
-        "plans": plans,
-        "groups": [dict(r) for r in rows],
-        "trades": trades,
-        "logic": [VmLogicOut.model_validate(x).model_dump() for x in
-                  db.query(VmLogic).filter(VmLogic.symbol == sym).order_by(VmLogic.seq).all()],
-        "invalidate": [VmInvalidateOut.model_validate(x).model_dump() for x in
-                       db.query(VmInvalidate).filter(VmInvalidate.symbol == sym).order_by(VmInvalidate.seq).all()],
+        # —— 以下是概览专用数据，不再有全量 versions/research/plans/groups/trades/logic/invalidate ——
+        "plans_preview": plans_preview,   # 剧本前 10 条（概览只读展示）
+        "latest_research": latest_research,  # 最新一版研究（概览决策卡）
+        "plans_active_count": plans_active,
+        "plans_total_count": plans_total,
+        "logic_total_count": logic_total,
+        "invalidate_total_count": invalidate_total,
+        "group_rows": cov_row["group_rows"],
+        "bill_rows": cov_row["bill_rows"],
     }
 
 
@@ -344,6 +351,7 @@ def list_value_monitor_trades(
     plan_id: int | None = Query(None),
     account: str | None = Query(None),
     symbol: str | None = Query(None),
+    category: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """标的页成交分页（含「想法」与关联剧本）。融资融券不在其中（规则一）。"""
@@ -353,9 +361,9 @@ def list_value_monitor_trades(
     offset = (page - 1) * page_size
     return {
         "items": service.vm_map.trades_of(
-            db, vm.symbol, page_size, plan_id, account, symbol, offset
+            db, vm.symbol, page_size, plan_id, account, symbol, offset, category
         ),
-        "total": service.vm_map.count_trades(db, vm.symbol, plan_id, account, symbol),
+        "total": service.vm_map.count_trades(db, vm.symbol, plan_id, account, symbol, category),
         "page": page,
         "page_size": page_size,
     }

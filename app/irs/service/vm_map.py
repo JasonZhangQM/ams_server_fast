@@ -20,8 +20,9 @@ def _trade_filters(
     plan_id: int | None = None,
     account: str | None = None,
     symbol: str | None = None,
+    category: str | None = None,
 ) -> tuple[str, dict]:
-    """剧本 / 账户 / 合约三个筛选条件的公共拼装（列表与计数必须共用，避免口径漂移）。"""
+    """剧本 / 账户 / 合约 / 分类四个筛选条件的公共拼装（列表与计数必须共用，避免口径漂移）。"""
     conds = ""
     params: dict = {}
     if plan_id is not None:
@@ -31,8 +32,12 @@ def _trade_filters(
         conds += " AND b.account = :acc"
         params["acc"] = account
     if symbol:
-        conds += " AND b.symbol LIKE :sym"
+        # 合约 OR 名称 模糊匹配（用户习惯记名称如「沪金」而非代码「SHFE.au2612」）
+        conds += " AND (b.symbol LIKE :sym OR b.name LIKE :sym)"
         params["sym"] = f"%{symbol}%"
+    if category:
+        conds += " AND b.category = :cat"
+        params["cat"] = category
     return conds, params
 
 
@@ -44,20 +49,21 @@ def trades_of(
     account: str | None = None,
     symbol: str | None = None,
     offset: int = 0,
+    category: str | None = None,
 ) -> list[dict]:
     """标的页成交分页：一次 JOIN，没有 OR、没有名称匹配。
 
     ⚠️ 笔记按 bill_id 左连（只含「想法」一条）。若直接 JOIN 再 LIMIT，
     多笔记成交可能挤出别的成交上限；这里条件聚合压成两列，保证「一行 = 一笔成交」。
-    plan_id / account / symbol 为前端筛选用：剧本精确、账户精确、合约模糊。
+    plan_id / account / symbol / category 为前端筛选用：剧本精确、账户精确、合约模糊、分类精确。
     """
-    conds, params = _trade_filters(plan_id, account, symbol)
+    conds, params = _trade_filters(plan_id, account, symbol, category)
     params["vm"] = vm_symbol
     params["lim"] = limit
     params["off"] = offset
     sql = text(f"""
         SELECT b.id, b.trade_time, b.account, b.category, b.symbol, b.name,
-               b.b_s, b.o_c, b.price, b.vol, b.amount,
+               b.b_s, b.c_p, b.o_c, b.price, b.vol, b.amount, b.amount_act, b.balance,
                g.vm_symbol,
                MAX(CASE WHEN n.kind = '想法' THEN n.content END) AS note_idea,
                MAX(CASE WHEN n.kind = '想法' THEN n.content_at END) AS note_idea_at,
@@ -83,9 +89,10 @@ def count_trades(
     plan_id: int | None = None,
     account: str | None = None,
     symbol: str | None = None,
+    category: str | None = None,
 ) -> int:
     """与 trades_of 同口径的总数，供分页器算页数。"""
-    conds, params = _trade_filters(plan_id, account, symbol)
+    conds, params = _trade_filters(plan_id, account, symbol, category)
     params["vm"] = vm_symbol
     sql = text(f"""
         SELECT COUNT(DISTINCT b.id)
@@ -124,6 +131,8 @@ def groups_of(
     params.update({"s": vm_symbol, "lim": limit, "off": offset})
     sql = text(f"""
         SELECT g.id, g.category, g.symbol, g.count, g.pf_total,
+               g.p_total, g.cost_total, g.price, g.multiplier,
+               g.value_total, g.pl_all, g.pfl_all,
                (SELECT COUNT(*) FROM bills_bill b
                  WHERE b.category = g.category AND b.symbol = g.symbol) AS bill_rows
         FROM bills_group_symbol g
