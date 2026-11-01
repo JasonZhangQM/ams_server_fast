@@ -64,6 +64,13 @@ class GroupOut(BaseModel):
     diff_dw: Optional[Decimal] = None  # 出入净额
     diff_dwt: Optional[Decimal] = None  # 划转净额
 
+    # 人工维护列（同步 df 不携带该列，从机制上防覆盖）
+    risk_exposure: Optional[Decimal] = None  # 风险敞口（人工确认；NULL=未设置）
+
+    # 派生展示列（list_groups 带出，不落 bills_group 表）：编辑弹窗的
+    # 风险敞口参考值要用（期权 = 持仓量×行权价×乘数＋持仓成本）
+    strike: Optional[Decimal] = None  # 行权价（仅期权交易行；其余类别与未登记合约为 None）
+
     # 通用字段（BaseModel 提供）
     id: int  # 主键
     create_time: datetime  # 创建时间
@@ -188,6 +195,7 @@ class GroupAccOut(BaseModel):
     diff_dw: Optional[Decimal] = None  # 入金净额
     diff_dwt: Optional[Decimal] = None  # 划转净额
     status: Optional[Decimal] = None  # 校验
+    risk_exposure: Optional[Decimal] = None  # 风险敞口（账户内 Group 汇总，编辑联动刷新；NULL=未设置）
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
@@ -196,7 +204,7 @@ class GroupAccOut(BaseModel):
 
 
 class GroupSymbolOut(BaseModel):
-    """标的汇总响应（对应 GroupSymbol 模型：14 个派生字段 + vm_symbol，笔记列已全部下线）。"""
+    """标的汇总响应（对应 GroupSymbol 模型：14 个派生字段 + vm_symbol/risk_exposure，笔记列已全部下线）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -215,8 +223,15 @@ class GroupSymbolOut(BaseModel):
     diff_dw: Optional[Decimal] = None  # 出入净额
     diff_dwt: Optional[Decimal] = None  # 划转净额
 
-    # v3：唯一的可编辑列（不进 _DERIVED_COLS，重算不覆盖）
+    # 人工维护列（不进 _DERIVED_COLS，重算不覆盖）
     vm_symbol: Optional[str] = None  # 归属标的；融资融券与未归属为 None
+    # 联动派生列：人工设置在 Group，本列 = 同 (category, symbol) 各 Group 值之和，
+    # 由 Group 编辑联动刷新；同步白名单不含它，重算不覆盖
+    risk_exposure: Optional[Decimal] = None  # 风险敞口（同标的各 Group 汇总；NULL=未设置）
+
+    # 派生展示列（list_group_symbols 带出，不落 bills_group_symbol 表）：
+    # 期权行按账单码经 bds_option_config -> bds_option_info 查得的权威行权价
+    strike: Optional[Decimal] = None  # 行权价（仅期权交易行；其余类别与未登记合约为 None）
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
@@ -248,7 +263,8 @@ class GroupSymbolCodeOut(BaseModel):
 class GroupSymbolVmUpdate(BaseModel):
     """归属标的修改请求（PATCH /bills/group-symbols/{id}/vm）。
 
-    v3 起合约表只剩这一个可编辑字段。融资融券行（symbol='RZRQ'）传任何值都会被
+    GroupSymbol 唯一的人工列（风险敞口人工设置已上移到 Group，本表同名列由
+    Group 编辑联动汇总维护）。融资融券行（symbol='RZRQ'）传任何值都会被
     后端以 400 拒绝——融资只是融资行为，name 不承担归属含义（v3 §4.5.1 规则一）。
     显式传 null 表示清空归属。
     """
@@ -372,7 +388,12 @@ class BillUpdate(BaseModel):
 class GroupUpdate(BaseModel):
     """Group 修改请求（PATCH /bills/group/{id}）。
 
-    仅允许修改 profit_time（收益试算时间）和 value_time（市值更新时间），
+    可修改字段：
+    - profit_time / value_time：收益试算 / 市值更新时间戳（exclude_none 语义，
+      不传或 null = 不修改）；
+    - risk_exposure：风险敞口，人工确认口径。**显式携带即写入**（null = 清空），
+      通过 model_fields_set 区分「没传」与「传 null」；落库后由路由联动刷新
+      GroupAcc（按 account 汇总）与 GroupSymbol（按 category+symbol 汇总）。
     其余字段由后端批量导入/同步流程自动生成，不允许前端手动编辑。
     """
 
@@ -380,6 +401,7 @@ class GroupUpdate(BaseModel):
 
     profit_time: Optional[datetime] = None  # 收益试算时间
     value_time: Optional[datetime] = None  # 市值更新时间
+    risk_exposure: Optional[Decimal] = None  # 风险敞口；显式传 null = 清空
 
 
 # =========================================================================

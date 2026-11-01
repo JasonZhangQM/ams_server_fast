@@ -19,11 +19,12 @@ from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol
 logger = logging.getLogger("uvicorn.error")
 
 # bills_group_symbol 的派生列：由 bills_group 聚合算出、每次重算都要覆盖。
-# 手动维护的笔记列（logic/plan/invalidate/review/theme/note_at）不在此列，
+# 不在此列的：vm_symbol（人工归属列）；risk_exposure（人工值设在 Group，
+# 由 Group 编辑联动刷新到本表，见 router._cascade_risk_exposure）。
 # upsert_df_to_db 用 update_columns 显式限定，从机制上防覆盖。
-# ⚠️ 重算只更新这些派生列（upsert_df_to_db 的 update_columns 白名单）。
-# **vm_symbol 是人工维护的归属列，永远不要加进这个列表**——一旦加进来，
-# 下一次同步就会把它整体清空，且不报错（v3 方案风险 15 / 验收 17）。
+# ⚠️ 重算只更新白名单里的派生列。
+# **vm_symbol / risk_exposure 永远不要加进这个列表**——一旦加进来，下一次同步
+# 就会把人工值整体冲掉（risk_exposure 还会被 fillna(0) 变成 0），且不报错。
 _DERIVED_COLS = [
     'count', 'p_total', 'cost_total', 'price', 'multiplier', 'value_total',
     'pf_total', 'pl_all', 'pfl_all', 'diff_br', 'diff_dw', 'diff_dwt',
@@ -119,6 +120,65 @@ def upsert_group_profit_sql():
 
 
 ## 账户与标的汇总
+# 持仓归零清空风险敞口：人工设置的 risk_exposure 只对"还持有"的行有意义，
+# 平仓离场（p_total=0）后残留的敞口值会污染 GroupSymbol / GroupAcc 汇总。
+# 幂等（WHERE risk_exposure IS NOT NULL），清空后同口径联动刷新两张汇总表
+# （与 router._cascade_risk_exposure 一致：按标的、按账户、合计行）。
+def clear_zero_position_risk_sql():
+    _engine = settings.DB_ENGINE
+    # 1) 找出将被清空的行（先取键，清空后要按这些键联动刷新汇总表）
+    sql_keys = '''
+        SELECT account, category, symbol
+        FROM bills_group
+        WHERE p_total = 0 AND risk_exposure IS NOT NULL
+        '''
+    df_hit = get_sql_to_df(sql_keys, _engine)
+    if df_hit.empty:
+        logger.info('持仓归零清空风险敞口:无')
+        return 0
+    # 2) 清空（NULL=未设置，与人工清空同语义）
+    sql_clear = '''
+        UPDATE bills_group
+        SET risk_exposure = NULL
+        WHERE p_total = 0 AND risk_exposure IS NOT NULL
+        '''
+    cleared = act_sql_engine(_engine, sql_clear)
+    logger.info(f'持仓归零清空风险敞口:{cleared}')
+    # 3) 联动刷新受影响的 GroupSymbol（按 category+symbol 求和）
+    pairs = list({(c, s) for c, s in zip(df_hit['category'], df_hit['symbol'])})
+    pairs_str = ', '.join(f"('{c}','{s}')" for c, s in pairs)
+    sql_gs = f'''
+        UPDATE bills_group_symbol gs
+        JOIN (SELECT category, symbol, SUM(risk_exposure) AS s
+              FROM bills_group
+              WHERE (category, symbol) IN ({pairs_str})
+              GROUP BY category, symbol) t
+          ON gs.category = t.category AND gs.symbol = t.symbol
+        SET gs.risk_exposure = t.s
+        '''
+    act_sql_engine(_engine, sql_gs)
+    # 4) 联动刷新受影响的 GroupAcc（按 account 求和）与合计行（全账户求和）
+    accounts = list(df_hit['account'].unique())
+    acc_str = ', '.join(f"'{a}'" for a in accounts)
+    sql_ga = f'''
+        UPDATE bills_group_acc ga
+        JOIN (SELECT account, SUM(risk_exposure) AS s
+              FROM bills_group
+              WHERE account IN ({acc_str})
+              GROUP BY account) t
+          ON ga.account = t.account
+        SET ga.risk_exposure = t.s
+        '''
+    act_sql_engine(_engine, sql_ga)
+    sql_total = '''
+        UPDATE bills_group_acc ga
+        JOIN (SELECT SUM(risk_exposure) AS s FROM bills_group) t
+        SET ga.risk_exposure = t.s
+        WHERE ga.account = '合计'
+        '''
+    act_sql_engine(_engine, sql_total)
+    return cleared
+
 # 账户汇总
 # 取出汇总所有数据，汇总平仓盈亏，总盈亏
 def get_group_sql_df():
@@ -194,6 +254,10 @@ def upsert_group_symbol_sql():
         ORDER BY account;
     '''
     df_g = get_sql_to_df(sql, _engine)
+    # ⚠️ 丢掉 Group 的 risk_exposure（人工列）：GroupSymbol 同名列由 Group 编辑联动
+    # 维护（router._cascade_risk_exposure）。留在 df 里会被 fillna(0) 把「未设置」
+    # 变成 0，且新行 INSERT 时写入的 0 与联动的 NULL 语义冲突
+    df_g = df_g.drop(columns=['risk_exposure'], errors='ignore')
     df_g = df_g.fillna(0)
     df_g = df_g.astype(filter_dtypes(df_g.columns, _mdl.to_dtype()))
     df_g['pl_all'] = (  # 平仓盈亏
@@ -212,10 +276,11 @@ def upsert_group_symbol_sql():
         df_in = df_init_model(df_symbol, _mdl_symbol)
         _table = _mdl_symbol.__table__.name
         _unique_keys = _mdl_symbol.unique_keys
-        # 显式白名单：只更新派生列，绝不碰人工列。
-        # ⚠️ 现在的人工列只有 vm_symbol（归属标的）一个——它**必须留在白名单之外**。
-        # 默认写法「更新除唯一键外所有列」在 df 多带一列时会把人工列静默冲成 NULL，
-        # 而 vm_symbol 被清空后不会有任何报错，只会在标的页悄悄少掉几十笔成交。
+        # 显式白名单：只更新派生列，绝不碰人工/联动列。
+        # ⚠️ 白名单外的是 vm_symbol（人工归属）与 risk_exposure（人工值设在
+        # Group、编辑联动刷新）——默认写法「更新除唯一键外所有列」在 df 多带一列时
+        # 会把它们静默冲掉，而 vm_symbol 被清空后不会有任何报错，
+        # 只会在标的页悄悄少掉几十笔成交。
         result = upsert_df_to_db(
             df_in, _table, _engine, _unique_keys, update_columns=_DERIVED_COLS)
     return result

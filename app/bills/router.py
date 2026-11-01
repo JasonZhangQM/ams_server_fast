@@ -10,13 +10,16 @@
 - search_fields 用 contains（模糊），list_filter 用 ==（精确）。
 """
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Callable, List, Optional, Tuple
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
+from server_fast.app.bds.models import OptionConfig, OptionInfo
 from server_fast.app.bills.config import Config
 from server_fast.app.bills.constants import (
     RZRQ_CATEGORY,
@@ -54,6 +57,10 @@ from server_fast.common.db import get_db
 from server_fast.common.pagination import PageResponse
 
 router = APIRouter(prefix="/bills", tags=["bills"])
+
+# 期权码尾部行权价的兜底解析（查表 miss 时用，覆盖 CFFEX `-P-4000` / SHFE `C1040`
+# 两种风格；ETF 8 位数字券商码不含行权价，不命中即 None）
+_STRIKE_RE = re.compile(r'(?:-[CP]-|[CP])(\d+(?:\.\d+)?)$')
 
 
 # 通用类别列表接口：返回 Config.MAP_CATEGORY 字典的所有 key 作为类别列表
@@ -171,7 +178,10 @@ def list_groups(
     total = query.count()
     # 按账户、代码升序排列
     items = query.order_by(Group.account.asc(), Group.symbol.asc()).offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    dicts = [item.to_dict() for item in items]
+    # 附加期权行权价（不落表）：Group 行编辑弹窗的风险敞口参考值要用
+    _attach_option_strike(db, dicts)
+    return {"items": dicts, "total": total, "limit": limit, "offset": offset}
 
 
 # Bill 列表
@@ -428,7 +438,43 @@ def list_group_symbols(
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
     items = query.offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    dicts = [item.to_dict() for item in items]
+    _attach_option_strike(db, dicts)
+    return {"items": dicts, "total": total, "limit": limit, "offset": offset}
+
+
+def _attach_option_strike(db: Session, dicts: list) -> None:
+    """就地给行 dict 附加 `strike`（行权价，仅期权行，不落任何表）。
+
+    优先查表：账单码 -> bds_option_config.broker_symbol -> contract_id ->
+    bds_option_info.strike（权威值，A 类已调整），两次 IN 批量查；
+    同步清单只登记在算风险的合约，历史/已平仓合约查不到，退化为正则解析
+    期权码尾部（CFFEX `-P-4000` / SHFE `C1040` 风格）；ETF 8 位数字码解析不出 -> None。
+    /group（Group 行编辑参考值）与 /group-symbols（行权价列）共用。
+    """
+    cid_map: dict = {}
+    strike_map: dict = {}
+    if dicts:
+        opt_symbols = {d["symbol"] for d in dicts if (d["category"] or "").startswith("期权")}
+        if opt_symbols:
+            cid_map = {
+                bs: cid for bs, cid in db.query(OptionConfig.broker_symbol, OptionConfig.contract_id)
+                .filter(OptionConfig.broker_symbol.in_(opt_symbols)).all()
+            }
+            if cid_map:
+                strike_map = {
+                    cid: s for cid, s in db.query(OptionInfo.contract_id, OptionInfo.strike)
+                    .filter(OptionInfo.contract_id.in_(set(cid_map.values()))).all()
+                }
+        for d in dicts:
+            if not (d["category"] or "").startswith("期权"):
+                d["strike"] = None
+                continue
+            strike = strike_map.get(cid_map.get(d["symbol"]))
+            if strike is None:
+                m = _STRIKE_RE.search(d["symbol"] or "")
+                strike = Decimal(m.group(1)) if m else None
+            d["strike"] = strike
 
 
 @router.get("/group-symbols/unmapped-count")
@@ -672,16 +718,28 @@ def update_group(
 ):
     """修改 Group 记录（PATCH /bills/group/{id}）。
 
-    仅允许修改 profit_time 和 value_time 两个时间戳字段。
+    - profit_time / value_time：时间戳，不传不修改（exclude_none）；
+    - risk_exposure：风险敞口的**唯一人工入口**（显式携带即写入，null = 清空），
+      落库后同事务联动刷新两张汇总表：
+        GroupSymbol（同 category+symbol）= SUM(Group.risk_exposure)
+        GroupAcc（同 account）          = SUM(Group.risk_exposure)
+      同步/批量导入 df 不携带该列，重算不会覆盖这里写下的值。
     其余字段由后端批量导入/同步流程自动生成，不允许前端手动编辑。
     """
     group = db.get(Group, id_)
     if group is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
     try:
+        # 时间戳：缺省 = 不修改（与旧语义一致）
         data = payload.model_dump(exclude_none=True)
+        data.pop("risk_exposure", None)
         for field, value in data.items():
             setattr(group, field, value)
+
+        # 风险敞口：显式携带（含 null）即写入，并联动刷新汇总表
+        if "risk_exposure" in payload.model_fields_set:
+            group.risk_exposure = payload.risk_exposure
+            _cascade_risk_exposure(db, group)
         db.commit()
         return {"status": "success", "message": "修改成功"}
     except Exception as e:
@@ -689,23 +747,56 @@ def update_group(
         raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
 
 
+def _cascade_risk_exposure(db: Session, group: Group) -> None:
+    """Group.risk_exposure 变更后的联动刷新（同事务调用，调用方负责 commit）。
+
+    - GroupSymbol（category+symbol 粒度）：= 同键各 Group.risk_exposure 之和；
+    - GroupAcc（account 粒度）：= 同账户各 Group.risk_exposure 之和；
+    - GroupAcc 合计行（account='合计'，由 upsert_group_acc_sql 生成）：
+      = 全部 Group.risk_exposure 之和。
+    SUM 全 NULL 得 NULL（未设置语义自然传导）；汇总行不存在时 UPDATE 不命中，
+    由同步流程另行补建后，下次编辑会刷上。同步管道的 df 不含该列
+    （Group.fields_api_details / df_init_model 均不补列），重算不会覆盖。
+    """
+    db.flush()  # 先落 pending 变更，下面的 SUM 才能读到新值
+    sum_symbol = db.query(func.sum(Group.risk_exposure)).filter(
+        Group.category == group.category, Group.symbol == group.symbol).scalar()
+    db.query(GroupSymbol).filter(
+        GroupSymbol.category == group.category,
+        GroupSymbol.symbol == group.symbol,
+    ).update({GroupSymbol.risk_exposure: sum_symbol}, synchronize_session=False)
+    sum_acc = db.query(func.sum(Group.risk_exposure)).filter(
+        Group.account == group.account).scalar()
+    db.query(GroupAcc).filter(
+        GroupAcc.account == group.account,
+    ).update({GroupAcc.risk_exposure: sum_acc}, synchronize_session=False)
+    # 合计行：全账户总和（与 upsert_group_acc_sql 的合计行口径一致）
+    sum_total = db.query(func.sum(Group.risk_exposure)).scalar()
+    db.query(GroupAcc).filter(
+        GroupAcc.account == '合计',
+    ).update({GroupAcc.risk_exposure: sum_total}, synchronize_session=False)
+
+
 # =========================================================================
 # 同步路由
 # =========================================================================
 
-# 合并后的同步路由：顺序执行实时估值 → 标的汇总 → 账户汇总
+# 合并后的同步路由：顺序执行实时估值 → 持仓归零清空风险敞口 → 标的汇总 → 账户汇总
 @router.post("/sync/group")
 def sync_group():
     """触发实时估值 + 标的汇总 + 账户汇总同步。
 
-    顺序执行：value_float_em_sql → upsert_group_symbol_sql → upsert_group_acc_sql。
+    顺序执行：value_float_em_sql → clear_zero_position_risk_sql
+    → upsert_group_symbol_sql → upsert_group_acc_sql。
     """
     from server_fast.app.bills.services.value_calc import value_float_em_sql
-    from server_fast.app.bills.services.group_summary import upsert_group_symbol_sql, upsert_group_acc_sql
+    from server_fast.app.bills.services.group_summary import (
+        upsert_group_symbol_sql, upsert_group_acc_sql, clear_zero_position_risk_sql)
 
     return _run_sync_steps(
         [
             ("value_float_em_sql", value_float_em_sql),
+            ("clear_zero_position_risk_sql", clear_zero_position_risk_sql),
             ("upsert_group_acc_sql", upsert_group_acc_sql),
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
         ]
@@ -723,11 +814,12 @@ def run_batch_import():
     4. upsert_group_cash_sql       资金汇总
     5. upsert_group_profit_sql     收益汇总
     6. upsert_profit_group_sql     收益试算
-    7. cash_update_group_sql       资金试算
-    8. upsert_profit_year_sql      年度收益统计
-    9. value_float_em_sql          市值更新
-    10. upsert_group_acc_sql        账户汇总
-    11. upsert_group_symbol_sql     标的汇总
+    7. clear_zero_position_risk_sql 持仓归零清空风险敞口（联动刷新汇总）
+    8. cash_update_group_sql       资金试算
+    9. upsert_profit_year_sql      年度收益统计
+    10. value_float_em_sql          市值更新
+    11. upsert_group_acc_sql        账户汇总
+    12. upsert_group_symbol_sql     标的汇总
     """
     from server_fast.app.bills.services.bill_import import insert_bill_all_excel_sql
     from server_fast.app.bills.services.group_summary import (
@@ -737,6 +829,7 @@ def run_batch_import():
         upsert_group_profit_sql,
         upsert_group_acc_sql,
         upsert_group_symbol_sql,
+        clear_zero_position_risk_sql,
     )
     from server_fast.app.bills.services.profit_calc import upsert_profit_group_sql
     from server_fast.app.bills.services.cash_calc import cash_update_group_sql
@@ -751,6 +844,7 @@ def run_batch_import():
             ("upsert_group_cash_sql", upsert_group_cash_sql),
             ("upsert_group_profit_sql", upsert_group_profit_sql),
             ("upsert_profit_group_sql", upsert_profit_group_sql),
+            ("clear_zero_position_risk_sql", clear_zero_position_risk_sql),
             ("cash_update_group_sql", cash_update_group_sql),
             ("upsert_profit_year_sql", upsert_profit_year_sql),
             ("value_float_em_sql", value_float_em_sql),

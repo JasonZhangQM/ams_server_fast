@@ -8,7 +8,9 @@ RiskParam / ScenarioGrid。
 - 外键列名以 _id 结尾
 - unique_together 与同名唯一索引合并为 UniqueConstraint
 - 笔记（logic/plan/invalidate/review/theme）v3 起已从 GroupSymbol 整体迁出：
-  标的层档案 -> irs_vm_*，单笔成交 -> BillNote。GroupSymbol 只留 vm_symbol 一个手动列。
+  标的层档案 -> irs_vm_*，单笔成交 -> BillNote。GroupSymbol 手动列只剩 vm_symbol
+  （归属标的）；风险敞口人工设置在 Group（账户×分类×代码粒度），GroupSymbol /
+  GroupAcc 的同名列由编辑联动汇总维护。
 
 2026-10-26：原 `OptionContract` 已两次迁移 —— 先由 `bills_option_contract` 迁至
 `app/bds/models.py`（改名为 `bds_option_contract`），当日又**并入 `bds_option_config`**
@@ -253,6 +255,12 @@ class Group(Base, BaseModel):
     diff_dw: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="出入净额")
     diff_dwt: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="划转净额")
 
+    # 风险敞口：人工确认口径（唯一的手动数值列）。编辑落库时由 router 联动刷新
+    # GroupAcc（按 account 汇总）与 GroupSymbol（按 category+symbol 汇总）；
+    # 同步/批量导入的 df 不携带该列（upsert 白名单机制），从机制上防覆盖。NULL = 未设置
+    risk_exposure: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), comment="风险敞口（人工确认；编辑时联动刷新账户/标的汇总；NULL=未设置）")
+
     # ---- 保留的自定义类属性 ----
     unique_keys = ['account', 'category', 'symbol']
     fields_pl = [
@@ -326,6 +334,11 @@ class GroupAcc(BaseModel, Base):
     diff_dw: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="入金净额")
     diff_dwt: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="划转净额")
     status: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="校验")
+    # 风险敞口：账户内各 Group.risk_exposure 之和，由 Group 编辑联动刷新；
+    # 合计行（account='合计'）= 全账户 Group 之和，同由联动刷新
+    # （同步汇总 df 不携带该列，不会被 upsert 覆盖）。NULL = 全部未设置
+    risk_exposure: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), comment="风险敞口（账户内 Group 汇总，合计行为全账户总和，编辑联动刷新；NULL=未设置）")
 
     # ---- 保留的自定义类属性（原样保留，即使引用了其他模型字段）----
     fields_update = [
@@ -359,11 +372,18 @@ class GroupSymbol(Base, BaseModel):
     diff_dw: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="出入净额")
     diff_dwt: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="划转净额")
 
-    # ---- v3 归属标的（唯一的手动列；不进 _DERIVED_COLS 白名单，重算不会覆盖）----
-    # 融资融券行（symbol='RZRQ'）恒为 NULL：融资只是一个融资行为，name 不承担归属含义
+    # ---- 人工维护列（不进 _DERIVED_COLS 白名单，重算不会覆盖）----
+    # v3 归属标的：可归属 = 交易类别行（证券/期货/期权交易），口径纯按 category
+    # 判断（constants.is_attachable）；理财/融资融券/收益费用/出入金/'-'/cash 六类
+    # 资金流水行恒为 NULL——RZRQ/CRJ/SYFY 等占位 symbol 非证券，融资行为不归属标的
     vm_symbol: Mapped[Optional[str]] = mapped_column(
         String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
         comment="归属标的（irs_value_monitor.symbol）；融资融券与未归属为 NULL")
+    # 风险敞口：不再人工维护——人工设置已上移到 Group（账户×分类×代码粒度），
+    # 本列 = 同 (category, symbol) 各 Group.risk_exposure 之和，由 Group 编辑联动刷新。
+    # 保留在本表仅供标的页展示；同步白名单不含它，重算不会覆盖。NULL = 全部未设置
+    risk_exposure: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), comment="风险敞口（同标的各 Group 汇总，编辑联动刷新；NULL=未设置）")
 
     # ---- 保留的自定义类属性 ----
     unique_keys = ['category', 'symbol']
