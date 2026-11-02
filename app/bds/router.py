@@ -114,6 +114,7 @@ from server_fast.app.bds.services import (
 )
 from server_fast.app.bds.config import Config
 from server_fast.app.bds.services import index_valuation
+from server_fast.app.bds.services.valuation import stock_valuation
 from server_fast.app.bds.services.market_data import option_info, option_market
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
@@ -2269,6 +2270,51 @@ def list_index_valuation_percentiles(
     """
     try:
         return index_valuation.get_percentiles(index_codes, metric)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@router.get("/stock-valuations")
+def list_stock_valuations(
+    symbols: List[str] = Query(..., description="证券代码（可多值，如 ?symbols=A&symbols=B），1~10 只"),
+    start_date: Optional[str] = Query(default=None, description="起始日期 YYYY-MM-DD，默认近 10 年"),
+    end_date: Optional[str] = Query(default=None, description="结束日期 YYYY-MM-DD，默认今天"),
+    metric: str = Query(default="pe_ttm",
+                        description="指标: pe_ttm / pb_mrq / ps_ttm / pcf_ttm_oper / dy_ttm（无 pe_median）"),
+):
+    """个股估值日序列（画图用，`/irs/valuation-percent` 个股模式）。
+
+    结构与 `/index-valuations` 对齐：`trade_dates` + `series`，前端图表原样复用。
+    序列已按指标口径清洗（亏损期负 PE / 负 PB / 负 PCF 置 null 断线），
+    `data_ranges` 另给**原始**覆盖区间供前端标注。
+    """
+    try:
+        s = date.fromisoformat(start_date) if start_date else None
+        e = date.fromisoformat(end_date) if end_date else None
+        return stock_valuation.get_series(symbols, s, e, metric)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+
+
+@router.get("/stock-valuation-percentiles")
+def list_stock_valuation_percentiles(
+    symbols: List[str] = Query(..., description="证券代码（可多值），1~10 只"),
+    metric: str = Query(default="pe_ttm",
+                        description="指标: pe_ttm / pb_mrq / ps_ttm / pcf_ttm_oper / dy_ttm（无 pe_median）"),
+):
+    """个股分位汇总（`/irs/valuation-percent` 个股模式，卡片/表格用）。
+
+    **分位不落库，实时算**：单标的直接查 `bds_daily_valuation` 自身历史
+    （唯一键 symbol+trade_date 前缀），无聚合表、无回填任务。
+    窗口口径与 `/index-valuation-percentiles` 完全一致：自然日回溯 3/5/10 年，
+    锚点 = 该标的最后一个有值交易日。
+
+    与指数项的差异：无效当前值（亏损 PE / 负 PB / 负 PCF）不算分位，
+    给 `status='loss'` + `status_note`；上市不足窗口期给 `windows_short`。
+    `dy_ttm` 返回**原始**分位（高=股息高=便宜），反向染色由前端做。
+    """
+    try:
+        return stock_valuation.get_percentiles(symbols, metric)
     except ValueError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
 
