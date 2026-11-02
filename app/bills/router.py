@@ -1099,15 +1099,33 @@ def save_bill_note(
 
 
 @router.get("/attribution/by-plan", response_model=AttributionByPlanOut)
-def attribution_by_plan(db: Session = Depends(get_db)):
+def attribution_by_plan(vm_symbol: Optional[str] = Query(None), db: Session = Depends(get_db)):
     """剧本盈亏归因（P3-3）。
 
     读 bills_bill_note.plan_id 按剧本聚合；每笔成交只取一条带 plan_id 的决策笔记
     （每笔成交只有一条「想法」，bill_id 天然唯一；MIN 仅作防御性兜底）。
     pl = pl_long + pl_short（平仓盈亏 l/s，正=盈利）；未归因成交单列残差，不静默丢弃。
     剧本名/标的不在此处返回，由前端按 plan_id 与 irs 剧本列表映射（bills 不依赖 irs）。
+
+    vm_symbol 可选（标的档案页传入）：已归因部分只统计该标的的剧本
+    （irs_vm_plan.vm_symbol，表名字符串跨模块引用，规则 4.12）；
+    未归因残差同步收窄为「归属该标的（bills_group_symbol.vm_symbol）且无剧本笔记」的成交。
+    不传则维持全局口径。
     """
-    assigned_sql = text("""
+    # 过滤片段只在传参时拼进 SQL，参数也只在传参时绑定（避免 :vm_symbol 未定义）
+    assigned_filter = (
+        "WHERE a.plan_id IN (SELECT id FROM irs_vm_plan WHERE vm_symbol = :vm_symbol)"
+        if vm_symbol
+        else ""
+    )
+    unassigned_filter = (
+        "AND EXISTS (SELECT 1 FROM bills_group_symbol g "
+        "WHERE g.category = b.category AND g.symbol = b.symbol AND g.vm_symbol = :vm_symbol)"
+        if vm_symbol
+        else ""
+    )
+    params = {"vm_symbol": vm_symbol} if vm_symbol else {}
+    assigned_sql = text(f"""
         SELECT a.plan_id,
                COUNT(*) AS exec_count,
                COALESCE(SUM(p.pl_long), 0) + COALESCE(SUM(p.pl_short), 0) AS total_pl,
@@ -1122,11 +1140,12 @@ def attribution_by_plan(db: Session = Depends(get_db)):
         ) a
         JOIN bills_bill b ON b.id = a.bill_id
         JOIN bills_profit p ON p.bill_id = a.bill_id
+        {assigned_filter}
         GROUP BY a.plan_id
         ORDER BY total_pl DESC
     """)
     items = []
-    for r in db.execute(assigned_sql).mappings().all():
+    for r in db.execute(assigned_sql, params).mappings().all():
         total = float(r["total_pl"] or 0)
         n = int(r["exec_count"])
         w = int(r["win_count"] or 0)
@@ -1139,7 +1158,7 @@ def attribution_by_plan(db: Session = Depends(get_db)):
             "avg_pl": round(total / n, 2) if n else 0.0,
             "last_trade_time": r["last_trade_time"],
         })
-    unassigned_sql = text("""
+    unassigned_sql = text(f"""
         SELECT COUNT(*) AS exec_count,
                COALESCE(SUM(p.pl_long), 0) + COALESCE(SUM(p.pl_short), 0) AS total_pl
         FROM bills_bill b
@@ -1148,8 +1167,9 @@ def attribution_by_plan(db: Session = Depends(get_db)):
             SELECT 1 FROM bills_bill_note n
             WHERE n.bill_id = b.id AND n.plan_id IS NOT NULL
         )
+        {unassigned_filter}
     """)
-    u = db.execute(unassigned_sql).mappings().first()
+    u = db.execute(unassigned_sql, params).mappings().first()
     return {
         "items": items,
         "unattributed": {
