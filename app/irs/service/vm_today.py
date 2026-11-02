@@ -38,6 +38,8 @@ INDEX_PCT_SYMBOLS = {"SHSE.000300", "SHSE.000905", "SPX"}
 
 # 距最近档位 %：pv_* 字段即 (档位/现价-1)*100，取绝对值最小者
 PV_FIELDS = ("pv_el", "pv_l", "pv_m", "pv_h", "pv_eh")
+# 档位价格：今日页刻度条直接透传 ValueMonitor 主表列（save_version 会回写主表，与生效版本一致）
+PP_FIELDS = ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")
 
 
 def percentiles() -> dict:
@@ -185,6 +187,8 @@ def today_items(db: Session) -> list[dict]:
             "price": float(vm.price) if vm.price is not None else None,
             "zone": compute_zone(pp, vm.price),
             "nearest_level_pct": _nearest_level_pct(vm),
+            "pp": {f: getattr(vm, f) for f in PP_FIELDS},
+            "pv": {f: getattr(vm, f) for f in PV_FIELDS},
             "pe_pct": pct_map.get((sym, "pe_ttm")),
             "pb_pct": pct_map.get((sym, "pb_mrq")),
             "hit_plans": hit_plans,

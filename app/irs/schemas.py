@@ -9,7 +9,7 @@
 """
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -418,6 +418,8 @@ class TodayItem(BaseModel):
     price: Optional[float] = None
     zone: Optional[str] = None
     nearest_level_pct: Optional[float] = None   # 距最近档位 %
+    pp: Optional[Dict[str, Optional[float]]] = None  # 五档价格 pp_el~pp_eh（今日页刻度条）
+    pv: Optional[Dict[str, Optional[float]]] = None  # 距各档 % pv_el~pv_eh（负=档位在下方）
     pe_pct: Optional[float] = None              # 当前价对应 PE 分位（指数标的）
     pb_pct: Optional[float] = None              # 当前价对应 PB 分位（指数标的）
     hit_plans: List[TodayPlanHit] = Field(default_factory=list)
