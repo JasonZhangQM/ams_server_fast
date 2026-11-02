@@ -2,6 +2,7 @@
 
 import logging
 
+import numpy as np
 import pandas as pd
 
 from server_fast.config import settings
@@ -265,8 +266,19 @@ def upsert_group_symbol_sql():
     df_g['pfl_all'] = (  # 盈亏合计
         df_g['pl_all'] + df_g['pf_total'])
 
+    # 平仓行（p_total=0）的 price 已被 value_calc 冻结在最后一次重算时点
+    # （行筛选 end_time<>value_time OR p_total>0 OR value_time IS NULL：平仓后
+    # 不再进清单），聚合前必须排除，否则历史高价会被 MAX 钉进 GroupSymbol.price
+    # （实测 2026-11-02：513100 钉在 2.4000 vs 在仓 2.2390、300750 钉在 298.38
+    # vs 232.92；600036 为反向案例——现价高于冻结价时恰好显示"对"，纯运气，
+    # 价格回落即钉在高位）。mask 后 groupby.max 跳过 NaN：无在仓行的标的
+    # 聚合得 NaN → upsert_df_to_db 写 NULL（前端显示 '-'），已清仓的标的
+    # 本就不该显示一个陈旧的"最新价"。
+    df_g.loc[df_g['p_total'] == 0, 'price'] = np.nan
     df_symbol = df_g.groupby(['category', 'symbol']).sum(numeric_only=True)
-    # price/multiplier 同一标的应一致，取 max 覆盖 sum 累加值（剔除 fillna(0) 空值）
+    # price/multiplier 同一标的应一致，取 max 覆盖 sum 累加值（剔除 fillna(0) 空值）。
+    # price 只聚合在仓行（平仓行已置 NaN）；multiplier 不 mask：乘数不随行情
+    # 变化，平仓行的值同样有效
     df_symbol['price'] = df_g.groupby(['category', 'symbol'])['price'].max()
     df_symbol['multiplier'] = df_g.groupby(['category', 'symbol'])['multiplier'].max()
 
