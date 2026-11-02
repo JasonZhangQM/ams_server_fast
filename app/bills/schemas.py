@@ -124,10 +124,10 @@ class BillOut(BaseModel):
     account: str  # 账户
 
     # ---- v3 派生：归属标的与成交笔记（list_bills 带出，不落 bills_bill 表）----
-    vm_symbol: Optional[str] = None  # 归属标的（来自 bills_group_symbol.vm_symbol；融资融券恒为 None）
+    underlying_symbol: Optional[str] = None  # 归属标的（来自 bills_group_symbol.underlying_symbol；融资融券恒为 None）
     note_idea: Optional[str] = None  # 「想法」正文
     note_idea_at: Optional[datetime] = None  # 「想法」落笔时间（晚于成交 = 事后补写）
-    plan_id: Optional[int] = None  # 该笔记执行的剧本 irs_vm_plan.id（裸 ID，无外键）
+    plan_id: Optional[int] = None  # 该笔记执行的剧本 irs_um_plan.id（裸 ID，无外键）
 
     # 通用字段（BaseModel 提供）
     id: int  # 主键
@@ -204,7 +204,7 @@ class GroupAccOut(BaseModel):
 
 
 class GroupSymbolOut(BaseModel):
-    """标的汇总响应（对应 GroupSymbol 模型：14 个派生字段 + vm_symbol/risk_exposure，笔记列已全部下线）。"""
+    """标的汇总响应（对应 GroupSymbol 模型：14 个派生字段 + underlying_symbol/risk_exposure，笔记列已全部下线）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -224,7 +224,7 @@ class GroupSymbolOut(BaseModel):
     diff_dwt: Optional[Decimal] = None  # 划转净额
 
     # 人工维护列（不进 _DERIVED_COLS，重算不覆盖）
-    vm_symbol: Optional[str] = None  # 归属标的；融资融券与未归属为 None
+    underlying_symbol: Optional[str] = None  # 归属标的；融资融券与未归属为 None
     # 联动派生列：人工设置在 Group，本列 = 同 (category, symbol) 各 Group 值之和，
     # 由 Group 编辑联动刷新；同步白名单不含它，重算不覆盖
     risk_exposure: Optional[Decimal] = None  # 风险敞口（同标的各 Group 汇总；NULL=未设置）
@@ -260,8 +260,8 @@ class GroupSymbolCodeOut(BaseModel):
     value_total: Optional[Decimal] = None  # 当前市值（跨分类求和）
 
 
-class GroupSymbolVmUpdate(BaseModel):
-    """归属标的修改请求（PATCH /bills/group-symbols/{id}/vm）。
+class GroupSymbolUnderlyingUpdate(BaseModel):
+    """归属标的修改请求（PATCH /bills/group-symbols/{id}/um）。
 
     GroupSymbol 唯一的人工列（风险敞口人工设置已上移到 Group，本表同名列由
     Group 编辑联动汇总维护）。融资融券行（symbol='RZRQ'）传任何值都会被
@@ -271,7 +271,7 @@ class GroupSymbolVmUpdate(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    vm_symbol: Optional[str] = None  # 归属标的（irs_value_monitor.symbol）
+    underlying_symbol: Optional[str] = None  # 归属标的（irs_underlying_monitor.symbol）
 
 
 class BillNoteOut(BaseModel):
@@ -294,10 +294,10 @@ class BillNoteOut(BaseModel):
 class BillNoteSave(BaseModel):
     """成交笔记保存请求（PUT /bills/bills/{id}/note/{kind}）。
 
-    kind 只接受「想法」；复盘走标的层 irs_vm_review。
+    kind 只接受「想法」；复盘走标的层 irs_um_review。
     content_at 由后端写，前端不可传——否则"当时写的"可以被伪造，反自欺就失效了。
     source 由后端按「落笔时间 vs 成交时间」自动判定，前端不可传。
-    plan_id 可选：执行剧本后回填的 irs_vm_plan.id（裸 ID，无外键）；
+    plan_id 可选：执行剧本后回填的 irs_um_plan.id（裸 ID，无外键）；
     与正文一同整体保存，传 None 表示解除关联。content 可为空（只关联剧本时）。
     """
 
@@ -511,7 +511,7 @@ class AttributionPlanOut(BaseModel):
     total_pl = Σ(pl_long + pl_short)，正=盈利；win_rate = 盈利笔数 / 执行笔数。
     """
 
-    plan_id: int  # irs_vm_plan.id（裸 ID）
+    plan_id: int  # irs_um_plan.id（裸 ID）
     exec_count: int  # 执行笔数（每笔成交只取一条带 plan_id 的笔记，去重）
     total_pl: float  # 累计平仓盈亏（正=盈利）
     win_count: int  # 盈利笔数（pl > 0）

@@ -3,7 +3,7 @@
 
 对应 router.py 中 GET 路由的返回结构：
 - DiscountMonitorOut  /irs/discounts-monitor    贴水监测全字段（合并配置+监测）
-- ValueMonitorOut     /irs/value-monitors       估值监测全字段
+- UnderlyingMonitorOut     /irs/underlying-monitors       标的监测全字段
 
 所有 Schema 均启用 from_attributes=True 以支持从 ORM 实例直接构造。
 """
@@ -42,10 +42,10 @@ class DiscountMonitorOut(BaseModel):
 
 
 # =========================================================================
-# 估值监测：对应 ValueMonitor 模型全字段（25 字段）
+# 标的监测：对应 UnderlyingMonitor 模型全字段（25 字段）
 # =========================================================================
-class ValueMonitorOut(BaseModel):
-    """估值监测响应（对应 /irs/value-monitors，独立表含估值区间+行情+监测字段）。"""
+class UnderlyingMonitorOut(BaseModel):
+    """标的监测响应（对应 /irs/underlying-monitors，独立表含估值区间+行情+监测字段）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -68,7 +68,7 @@ class ValueMonitorOut(BaseModel):
     pv_yh: Optional[Decimal] = None            # 年高(%)
     pv_yl: Optional[Decimal] = None            # 年低(%)
     pv_yy: Optional[Decimal] = None            # 最新(%)
-    # 估值监测字段
+    # 标的监测字段
     pv_el: Optional[Decimal] = None            # 极低(%)
     pv_l: Optional[Decimal] = None             # 低(%)
     pv_m: Optional[Decimal] = None             # 中(%)
@@ -96,10 +96,10 @@ class ValueMonitorOut(BaseModel):
 
 
 # =========================================================================
-# 估值监测新增：请求 Schema
+# 标的监测新增：请求 Schema
 # =========================================================================
-class ValueMonitorCreate(BaseModel):
-    """估值监测新增请求（对应 POST /irs/value-monitors）。
+class UnderlyingMonitorCreate(BaseModel):
+    """标的监测新增请求（对应 POST /irs/underlying-monitors）。
 
     v3 起档位版本唯一入口是详情抽屉的「档位」Tab，新增时 pp_* 可选，
     全空时只建主表行，档位后续再去 Tab 里 save_version。
@@ -119,10 +119,10 @@ class ValueMonitorCreate(BaseModel):
 
 
 # =========================================================================
-# 估值监测修改：请求 Schema（symbol 不可改；pp_* 为空表示不动档位）
+# 标的监测修改：请求 Schema（symbol 不可改；pp_* 为空表示不动档位）
 # =========================================================================
-class ValueMonitorUpdate(BaseModel):
-    """估值监测修改请求（对应 PUT /irs/value-monitors/{id}）。
+class UnderlyingMonitorUpdate(BaseModel):
+    """标的监测修改请求（对应 PUT /irs/underlying-monitors/{id}）。
 
     v3 起 pp_* 不再直写主表：全部转发 save_version()（版本表 upsert + 回写主表）。
     pp_* 传 None 表示"不改档位"（只改 name/theme 时不必带五档）。
@@ -146,9 +146,9 @@ class ValueMonitorUpdate(BaseModel):
 
 
 # =========================================================================
-# v3：档位版本（irs_vm_version）
+# v3：档位版本（irs_um_version）
 # =========================================================================
-class VmVersionOut(BaseModel):
+class UnderlyingVersionOut(BaseModel):
     """档位版本响应：五档 + 现算 pv_* + 状态 + 相对上一版差值。"""
 
     model_config = ConfigDict(from_attributes=True)
@@ -181,7 +181,7 @@ class VmVersionOut(BaseModel):
     update_time: datetime
 
 
-class VmVersionSave(BaseModel):
+class UnderlyingVersionSave(BaseModel):
     """档位版本保存请求：选新日期=新建，选历史日期=改那一版。"""
 
     symbol: str
@@ -195,9 +195,9 @@ class VmVersionSave(BaseModel):
 
 
 # =========================================================================
-# v3：标的研究（irs_vm_research，按 research_date 留版）
+# v3：标的研究（irs_um_research，按 research_date 留版）
 # =========================================================================
-class VmResearchOut(BaseModel):
+class UnderlyingResearchOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -216,7 +216,7 @@ class VmResearchOut(BaseModel):
     update_time: datetime
 
 
-class VmResearchSave(BaseModel):
+class UnderlyingResearchSave(BaseModel):
     """研究保存请求：按 (symbol, research_date) upsert；未传的字段保持不变。"""
 
     research_date: date
@@ -232,13 +232,13 @@ class VmResearchSave(BaseModel):
 
 
 # =========================================================================
-# v3：剧本（irs_vm_plan）
+# v3：剧本（irs_um_plan）
 # =========================================================================
-class VmPlanOut(BaseModel):
+class UnderlyingPlanOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    vm_symbol: str
+    underlying_symbol: str
     trade_symbol: str
     seq: int
     b_s: str
@@ -258,7 +258,7 @@ class VmPlanOut(BaseModel):
     update_time: datetime
 
 
-class VmPlanSave(BaseModel):
+class UnderlyingPlanSave(BaseModel):
     """剧本保存请求：seq 定位（同标的同 seq 覆盖）。"""
 
     seq: int
@@ -277,7 +277,7 @@ class VmPlanSave(BaseModel):
 # =========================================================================
 # v3：标的复盘（锚定研究版本，同一版本可多次）
 # =========================================================================
-class VmReviewOut(BaseModel):
+class UnderlyingReviewOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -289,7 +289,7 @@ class VmReviewOut(BaseModel):
     update_time: datetime
 
 
-class VmReviewSave(BaseModel):
+class UnderlyingReviewSave(BaseModel):
     """复盘保存请求：锚定研究版本；review_date 由后端填，前端不可传。"""
 
     research_id: int
@@ -299,7 +299,7 @@ class VmReviewSave(BaseModel):
 # =========================================================================
 # v3：投资逻辑 / 证伪条件（批次二的功能，接口先通）
 # =========================================================================
-class VmLogicOut(BaseModel):
+class UnderlyingLogicOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -314,7 +314,7 @@ class VmLogicOut(BaseModel):
     update_time: datetime
 
 
-class VmLogicSave(BaseModel):
+class UnderlyingLogicSave(BaseModel):
     seq: int
     content: str
     pricing: Optional[str] = None
@@ -322,7 +322,7 @@ class VmLogicSave(BaseModel):
     evidence: Optional[str] = None
 
 
-class VmInvalidateOut(BaseModel):
+class UnderlyingInvalidateOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -345,12 +345,12 @@ class VmInvalidateOut(BaseModel):
     auto_judged: Optional[dict] = None
 
 
-class VmInvalidateSave(BaseModel):
+class UnderlyingInvalidateSave(BaseModel):
     """证伪条件保存入参（按 seq upsert）。
 
-    ⚠️ 这里**只能有入参字段**。曾误从 VmInvalidateOut 复制进来 `id` / `create_time` /
+    ⚠️ 这里**只能有入参字段**。曾误从 UnderlyingInvalidateOut 复制进来 `id` / `create_time` /
     `update_time` 三行，`id: int` 无默认值 ⇒ 任何保存都 422，证伪从来没写进去过。
-    出参字段一律放 VmInvalidateOut，不要回抄。
+    出参字段一律放 UnderlyingInvalidateOut，不要回抄。
     """
 
     seq: int
@@ -366,9 +366,9 @@ class VmInvalidateSave(BaseModel):
 
 
 # =========================================================================
-# 状态审计日志（irs_vm_state_log，append-only）
+# 状态审计日志（irs_um_state_log，append-only）
 # =========================================================================
-class VmStateLogOut(BaseModel):
+class UnderlyingStateLogOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -382,9 +382,9 @@ class VmStateLogOut(BaseModel):
 
 
 # =========================================================================
-# 目标仓位（irs_vm_target，决策层）
+# 目标仓位（irs_um_target，决策层）
 # =========================================================================
-class VmTargetOut(BaseModel):
+class UnderlyingTargetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -393,7 +393,7 @@ class VmTargetOut(BaseModel):
     note: Optional[str] = None
 
 
-class VmTargetSave(BaseModel):
+class UnderlyingTargetSave(BaseModel):
     symbol: str
     target_pct: Optional[Decimal] = None
     note: Optional[str] = None

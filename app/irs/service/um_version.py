@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""档位版本（irs_vm_version）：生效区间语义 + 主表 pp_* 回写。
+"""档位版本（irs_um_version）：生效区间语义 + 主表 pp_* 回写。
 
 一条铁律：**档位五档只能经 save_version() 写入**。主表 pp_* 是"当前生效版缓存"，
 任何地方直写 pp_* 都会让版本链与显示值分叉（v1 §八 R1）。
@@ -16,7 +16,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from server_fast.app.irs.models import ValueMonitor, VmVersion
+from server_fast.app.irs.models import UnderlyingMonitor, UnderlyingVersion
 
 PP_FIELDS = ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")
 PP_LABELS = {"pp_el": "极低", "pp_l": "低", "pp_m": "中", "pp_h": "高", "pp_eh": "极高"}
@@ -61,7 +61,7 @@ def compute_zone(pp: dict, price) -> Optional[str]:
 
 
 def pp_dict_of(obj) -> dict:
-    """从任意带 pp_* 属性的对象抽出五档 dict（ValueMonitor / VmVersion 通用）。"""
+    """从任意带 pp_* 属性的对象抽出五档 dict（UnderlyingMonitor / UnderlyingVersion 通用）。"""
     return {f: getattr(obj, f, None) for f in PP_FIELDS}
 
 
@@ -73,7 +73,7 @@ def calc_pv(pp: Optional[Decimal], price: Optional[Decimal],
     return ((pp / base) - Decimal("1")) * Decimal("100")
 
 
-def _version_pv(row: VmVersion, price: Optional[Decimal],
+def _version_pv(row: UnderlyingVersion, price: Optional[Decimal],
                 py_close: Optional[Decimal]) -> dict:
     """给版本行补现算的 pv_*（相对现价 / 相对上年末），不写库。"""
     out = {}
@@ -84,34 +84,34 @@ def _version_pv(row: VmVersion, price: Optional[Decimal],
 
 
 def effective_version(db: Session, symbol: str,
-                      as_of: Optional[date] = None) -> Optional[VmVersion]:
+                      as_of: Optional[date] = None) -> Optional[UnderlyingVersion]:
     """某日生效的档位版 = effective_date <= as_of 的最大版。"""
     as_of = as_of or date.today()
-    return (db.query(VmVersion)
-            .filter(VmVersion.symbol == symbol, VmVersion.effective_date <= as_of)
-            .order_by(VmVersion.effective_date.desc())
+    return (db.query(UnderlyingVersion)
+            .filter(UnderlyingVersion.symbol == symbol, UnderlyingVersion.effective_date <= as_of)
+            .order_by(UnderlyingVersion.effective_date.desc())
             .first())
 
 
-def refresh_current_pp(db: Session, symbol: str) -> Optional[VmVersion]:
+def refresh_current_pp(db: Session, symbol: str) -> Optional[UnderlyingVersion]:
     """把主表 pp_* 刷成"当前生效版"。
 
     没有 <= today 的版本（全是未来版）时，退化为取最早一版：让主表至少有个可见值，
     同时由 status 标出 'pending'，避免列表页出现一列空白档位。
     """
-    vm = db.query(ValueMonitor).filter(ValueMonitor.symbol == symbol).one_or_none()
-    if vm is None:
+    um = db.query(UnderlyingMonitor).filter(UnderlyingMonitor.symbol == symbol).one_or_none()
+    if um is None:
         return None
     ver = effective_version(db, symbol)
     fallback = False
     if ver is None:
-        ver = (db.query(VmVersion).filter(VmVersion.symbol == symbol)
-               .order_by(VmVersion.effective_date.asc()).first())
+        ver = (db.query(UnderlyingVersion).filter(UnderlyingVersion.symbol == symbol)
+               .order_by(UnderlyingVersion.effective_date.asc()).first())
         fallback = ver is not None
     if ver is not None:
         for f in PP_FIELDS:
-            setattr(vm, f, getattr(ver, f))
-    db.flush()  # 触发 ValueMonitor 钩子按新 pp_* 重算 pv_*
+            setattr(um, f, getattr(ver, f))
+    db.flush()  # 触发 UnderlyingMonitor 钩子按新 pp_* 重算 pv_*
     if fallback:
         ver._fallback = True  # 仅用于返回值说明，不入库
     return ver
@@ -132,12 +132,12 @@ def _check_percentile_warnings(symbol: str, pp: dict) -> list[dict]:
     非指数标的直接返回空数组（没有分位数据可纠偏）。**只提示、绝不自动改档位**。
     """
     out: list[dict] = []
-    # 复用 vm_today.INDEX_PCT_SYMBOLS —— SPX 不在其中时 percentiles() 内部会过滤
+    # 复用 um_today.INDEX_PCT_SYMBOLS —— SPX 不在其中时 percentiles() 内部会过滤
     if symbol not in {"SHSE.000300", "SHSE.000905"}:
         return out
-    # 延迟 import 避免顶层循环依赖（vm_today 会 import vm_version）
-    from server_fast.app.irs.service import vm_today
-    pct_map = vm_today.percentiles()
+    # 延迟 import 避免顶层循环依赖（um_today 会 import um_version）
+    from server_fast.app.irs.service import um_today
+    pct_map = um_today.percentiles()
     pb = pct_map.get((symbol, "pb_mrq"))
     if pb is None:
         return out
@@ -177,15 +177,15 @@ def save_version(db: Session, symbol: str, effective_date: date,
     返回 {action: created|updated|unchanged, warnings: [...], ...}——前端据此提示"将新建 X 日"
     还是"将覆盖 X 日"，并在有分位校验告警时渲染红标。
     """
-    if db.query(ValueMonitor.symbol).filter(ValueMonitor.symbol == symbol).first() is None:
-        raise ValueError(f"标的 {symbol} 不在估值监测里，请先新增标的")
+    if db.query(UnderlyingMonitor.symbol).filter(UnderlyingMonitor.symbol == symbol).first() is None:
+        raise ValueError(f"标的 {symbol} 不在标的监测里，请先新增标的")
 
-    row = (db.query(VmVersion)
-           .filter(VmVersion.symbol == symbol, VmVersion.effective_date == effective_date)
+    row = (db.query(UnderlyingVersion)
+           .filter(UnderlyingVersion.symbol == symbol, UnderlyingVersion.effective_date == effective_date)
            .one_or_none())
     action = "created" if row is None else "updated"
     if row is None:
-        row = VmVersion(symbol=symbol, effective_date=effective_date)
+        row = UnderlyingVersion(symbol=symbol, effective_date=effective_date)
         db.add(row)
 
     changed = []
@@ -223,16 +223,16 @@ def save_version(db: Session, symbol: str, effective_date: date,
 
 def list_versions(db: Session, symbol: str) -> list[dict]:
     """该标的全部版本（日期倒序），每行附现算 pv_*、status 与相对上一版的差值。"""
-    vm = db.query(ValueMonitor).filter(ValueMonitor.symbol == symbol).one_or_none()
-    price = vm.price if vm else None
-    py_close = vm.py_close if vm else None
+    um = db.query(UnderlyingMonitor).filter(UnderlyingMonitor.symbol == symbol).one_or_none()
+    price = um.price if um else None
+    py_close = um.py_close if um else None
     today = date.today()
-    rows = (db.query(VmVersion).filter(VmVersion.symbol == symbol)
-            .order_by(VmVersion.effective_date.desc()).all())
+    rows = (db.query(UnderlyingVersion).filter(UnderlyingVersion.symbol == symbol)
+            .order_by(UnderlyingVersion.effective_date.desc()).all())
     cur = effective_version(db, symbol)
-    pending = (db.query(VmVersion)
-               .filter(VmVersion.symbol == symbol, VmVersion.effective_date > today)
-               .order_by(VmVersion.effective_date.asc()).first())
+    pending = (db.query(UnderlyingVersion)
+               .filter(UnderlyingVersion.symbol == symbol, UnderlyingVersion.effective_date > today)
+               .order_by(UnderlyingVersion.effective_date.asc()).first())
     out = []
     for i, r in enumerate(rows):
         prev = rows[i + 1] if i + 1 < len(rows) else None
@@ -256,15 +256,15 @@ def list_versions(db: Session, symbol: str) -> list[dict]:
 def seed_versions_from_main(db: Session) -> int:
     """给还没有任何版本行的标的补一版（锚点取建标日，不用 update_time——它是同步时间）。"""
     n = 0
-    vms = db.query(ValueMonitor).all()
-    for vm in vms:
-        exists = db.query(VmVersion.id).filter(VmVersion.symbol == vm.symbol).first()
+    vms = db.query(UnderlyingMonitor).all()
+    for um in vms:
+        exists = db.query(UnderlyingVersion.id).filter(UnderlyingVersion.symbol == um.symbol).first()
         if exists:
             continue
-        anchor = (vm.create_time.date() if vm.create_time else date.today())
-        db.add(VmVersion(symbol=vm.symbol, effective_date=anchor,
+        anchor = (um.create_time.date() if um.create_time else date.today())
+        db.add(UnderlyingVersion(symbol=um.symbol, effective_date=anchor,
                          note="新建标的时自动建立首版",
-                         **{f: getattr(vm, f) for f in PP_FIELDS}))
+                         **{f: getattr(um, f) for f in PP_FIELDS}))
         n += 1
     db.flush()
     return n

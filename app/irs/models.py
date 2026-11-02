@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """irs 应用 SQLAlchemy 2.0 模型定义。
 
-- 2 个 ORM 模型继承 (Base, BaseModel)：DiscountMonitor、ValueMonitor
+- 2 个 ORM 模型继承 (Base, BaseModel)：DiscountMonitor、UnderlyingMonitor
   （期权监测 OptionMonitor 已于 2026-10-29 下线，行情统一走 bds_option_market）
 - 衍生字段计算逻辑通过 SQLAlchemy before_insert / before_update 事件钩子实现
 - 保留所有自定义类属性（cols_map_fields / unique_keys / fields_request 等）
@@ -49,12 +49,12 @@ def _on_insert_update(model):
 # =========================================================================
 
 
-class ValueMonitor(Base, BaseModel):
-    """估值监测"""
+class UnderlyingMonitor(Base, BaseModel):
+    """标的监测"""
 
-    __tablename__ = "irs_value_monitor"
+    __tablename__ = "irs_underlying_monitor"
     __table_args__ = (
-        Index("k_irs_value_monitor_symbol", "symbol"),
+        Index("k_irs_underlying_monitor_symbol", "symbol"),
     )
 
     symbol: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, comment="代码")
@@ -77,7 +77,7 @@ class ValueMonitor(Base, BaseModel):
     pv_yh: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="年高(%)")
     pv_yl: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="年低(%)")
     pv_yy: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="最新(%)")
-    # 估值监测字段
+    # 标的监测字段
     pv_el: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="极低(%)")
     pv_l: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="低(%)")
     pv_m: Mapped[Optional[Decimal]] = mapped_column(Numeric(9, 2), nullable=True, comment="中(%)")
@@ -151,9 +151,9 @@ class DiscountMonitor(Base, BaseModel):
 # =========================================================================
 
 
-@_on_insert_update(ValueMonitor)
-def _compute_value_monitor(mapper, connection, target):
-    """ValueMonitor 计算逻辑：基于本表 price/py_close/y_high/y_low/pp_* 计算监测指标(%)。
+@_on_insert_update(UnderlyingMonitor)
+def _compute_underlying_monitor(mapper, connection, target):
+    """UnderlyingMonitor 计算逻辑：基于本表 price/py_close/y_high/y_low/pp_* 计算监测指标(%)。
 
     ⚠️ price 为空时**必须清空** pv_*，不能 return 了事（v3 §5.3）：
     否则改档位/改上游后 pv_* 会保留上一版算出的旧值，页面上看起来像"按新档位算的"，
@@ -214,17 +214,17 @@ def _compute_discount_monitor(mapper, connection, target):
 # =========================================================================
 
 
-class VmVersion(Base, BaseModel):
+class UnderlyingVersion(Base, BaseModel):
     """档位版本：某日档位 = effective_date <= D 的最大版（生效区间语义，不是每日快照）。"""
 
-    __tablename__ = "irs_vm_version"
+    __tablename__ = "irs_um_version"
     __table_args__ = (
         UniqueConstraint("symbol", "effective_date", name="uk_vmv_symbol_date"),
         Index("k_vmv_date", "effective_date"),
     )
 
     symbol: Mapped[str] = mapped_column(
-        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
         nullable=False, comment="标的代码")
     effective_date: Mapped[date] = mapped_column(
         Date, nullable=False, comment="生效日期（自该日起适用，含当日）")
@@ -239,14 +239,14 @@ class VmVersion(Base, BaseModel):
         return f"{self.symbol}@{self.effective_date}"
 
 
-class VmResearch(Base, BaseModel):
+class UnderlyingResearch(Base, BaseModel):
     """标的研究定稿（1:N，按 research_date 留版）。
 
     选新日期 = 新建，选历史日期 = 修改（与档位版本同构）。
     research_date 是"我哪天定了这个结论"，不是报告里的数据截止日。
     """
 
-    __tablename__ = "irs_vm_research"
+    __tablename__ = "irs_um_research"
     __table_args__ = (
         UniqueConstraint("symbol", "research_date", name="uk_vmr_symbol_date"),
         Index("k_vmr_date", "research_date"),
@@ -255,7 +255,7 @@ class VmResearch(Base, BaseModel):
     CONCLUSION_CHOICES = ["买入", "增持", "持有", "观望", "回避", "不入池"]
 
     symbol: Mapped[str] = mapped_column(
-        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
         nullable=False, comment="标的代码")
     research_date: Mapped[date] = mapped_column(Date, nullable=False, comment="研究定稿日")
     thesis: Mapped[Optional[str]] = mapped_column(
@@ -281,14 +281,14 @@ class VmResearch(Base, BaseModel):
         return f"{self.symbol}@{self.research_date}({self.conclusion})"
 
 
-class VmLogic(Base, BaseModel):
+class UnderlyingLogic(Base, BaseModel):
     """投资逻辑条目（2-4 条，带 完好/减弱/破坏 状态）。
 
     单独成表而不是塞进一段 TEXT：state 要被查询——"列出全部 state='破坏' 的逻辑"
     是复盘第一步，文本做不到，一条 SQL 就行。
     """
 
-    __tablename__ = "irs_vm_logic"
+    __tablename__ = "irs_um_logic"
     __table_args__ = (
         UniqueConstraint("symbol", "seq", name="uk_vml_symbol_seq"),
         Index("k_vml_state", "state"),
@@ -297,7 +297,7 @@ class VmLogic(Base, BaseModel):
     STATE_CHOICES = ["完好", "减弱", "破坏"]
 
     symbol: Mapped[str] = mapped_column(
-        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
         nullable=False, comment="标的代码")
     seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号 1-4")
     content: Mapped[str] = mapped_column(
@@ -316,10 +316,10 @@ class VmLogic(Base, BaseModel):
         return f"{self.symbol}#{self.seq}({self.state})"
 
 
-class VmInvalidate(Base, BaseModel):
+class UnderlyingInvalidate(Base, BaseModel):
     """证伪条件登记：只登记判据与触发状态，**不自动计算**。"""
 
-    __tablename__ = "irs_vm_invalidate"
+    __tablename__ = "irs_um_invalidate"
     __table_args__ = (
         UniqueConstraint("symbol", "seq", name="uk_vmi_symbol_seq"),
         Index("k_vmi_status", "status"),
@@ -328,7 +328,7 @@ class VmInvalidate(Base, BaseModel):
     STATUS_CHOICES = ["未触发", "已触发", "已失效"]
 
     symbol: Mapped[str] = mapped_column(
-        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+        String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
         nullable=False, comment="标的代码")
     logic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="对应逻辑条目")
     seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号")
@@ -351,7 +351,7 @@ class VmInvalidate(Base, BaseModel):
         return f"{self.symbol}#{self.seq}({self.status})"
 
 
-class VmPlan(Base, BaseModel):
+class UnderlyingPlan(Base, BaseModel):
     """剧本 —— "到什么价、做什么"的唯一载体（必须写真实代码和点位）。
 
     剧本长期有效、可反复执行；执行次数与盈亏归因走 `bills_bill_note.plan_id`，
@@ -360,16 +360,16 @@ class VmPlan(Base, BaseModel):
     改档位后剧本自动跟随，不用手改 8 条剧本。
     """
 
-    __tablename__ = "irs_vm_plan"
+    __tablename__ = "irs_um_plan"
     __table_args__ = (
-        UniqueConstraint("vm_symbol", "seq", name="uk_vmp_symbol_seq"),
+        UniqueConstraint("underlying_symbol", "seq", name="uk_ump_symbol_seq"),
         Index("k_vmp_trade", "trade_symbol"),
     )
 
     TRIGGER_REFS = ["pp_el", "pp_l", "pp_m", "pp_h", "pp_eh"]
 
-    vm_symbol: Mapped[str] = mapped_column(
-        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
+    underlying_symbol: Mapped[str] = mapped_column(
+        String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
         nullable=False, comment="标的代码")
     trade_symbol: Mapped[str] = mapped_column(
         String(32), nullable=False, comment="交易代码（真实合约）")
@@ -391,13 +391,13 @@ class VmPlan(Base, BaseModel):
     is_cancelled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, comment="手动作废")
 
-    unique_keys = ["vm_symbol", "seq"]
+    unique_keys = ["underlying_symbol", "seq"]
 
     def __str__(self):
-        return f"{self.vm_symbol}#{self.seq}({self.b_s}{self.o_c or ''})"
+        return f"{self.underlying_symbol}#{self.seq}({self.b_s}{self.o_c or ''})"
 
 
-class VmReview(Base, BaseModel):
+class UnderlyingReview(Base, BaseModel):
     """标的复盘 —— 锚定「研究版本」，同一版本可多次复盘。
 
     与「投研」同层：研究是事前假设，复盘是事后成绩单。
@@ -407,7 +407,7 @@ class VmReview(Base, BaseModel):
     盈亏归因走 `bills_bill_note.plan_id`，本表不参与计算。
     """
 
-    __tablename__ = "irs_vm_review"
+    __tablename__ = "irs_um_review"
     __table_args__ = (
         Index("k_vmr_symbol_date", "symbol", "review_date"),
         Index("k_vmr_research_date", "research_id", "review_date"),
@@ -415,11 +415,11 @@ class VmReview(Base, BaseModel):
     )
 
     symbol: Mapped[str] = mapped_column(
-        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="CASCADE"),
+        String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="CASCADE"),
         nullable=False, comment="标的代码")
     research_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("irs_vm_research.id", ondelete="CASCADE"),
-        nullable=False, comment="被复盘的研究版本 irs_vm_research.id")
+        BigInteger, ForeignKey("irs_um_research.id", ondelete="CASCADE"),
+        nullable=False, comment="被复盘的研究版本 irs_um_research.id")
     content: Mapped[str] = mapped_column(Text, nullable=False, comment="复盘正文")
     review_date: Mapped[date] = mapped_column(
         Date, nullable=False, comment="落笔日期（后端填，前端不可传）")
@@ -428,14 +428,14 @@ class VmReview(Base, BaseModel):
         return f"{self.symbol}复盘(research={self.research_id})"
 
 
-class VmStateLog(Base, BaseModel):
+class UnderlyingStateLog(Base, BaseModel):
     """逻辑 / 证伪状态变更审计日志（append-only，复盘用）。
 
-    主表（VmLogic.state / VmInvalidate.status）仍只存当前态，本表只增不改：
+    主表（UnderlyingLogic.state / UnderlyingInvalidate.status）仍只存当前态，本表只增不改：
     每一次 state/status **真正变化**时追加一行，旧值不覆盖，「三个月前判过什么」可回放。
     """
 
-    __tablename__ = "irs_vm_state_log"
+    __tablename__ = "irs_um_state_log"
     __table_args__ = (
         Index("idx_subject", "subject_type", "subject_id", "changed_at"),
     )
@@ -446,7 +446,7 @@ class VmStateLog(Base, BaseModel):
     subject_type: Mapped[str] = mapped_column(
         String(16), nullable=False, comment="logic=逻辑；invalidate=证伪")
     subject_id: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="对应 irs_vm_logic.id / irs_vm_invalidate.id")
+        Integer, nullable=False, comment="对应 irs_um_logic.id / irs_um_invalidate.id")
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="标的代码")
     from_state: Mapped[Optional[str]] = mapped_column(
         String(16), nullable=True, comment="变更前（首次登记为 NULL）")
@@ -460,16 +460,16 @@ class VmStateLog(Base, BaseModel):
         return f"{self.subject_type}#{self.subject_id}:{self.from_state}->{self.to_state}"
 
 
-class VmTarget(Base, BaseModel):
+class UnderlyingTarget(Base, BaseModel):
     """标的级目标仓位（决策层）：目标占总资产比例；漂移 = 当前 − 目标在前端派生。"""
 
-    __tablename__ = "irs_vm_target"
+    __tablename__ = "irs_um_target"
     __table_args__ = (
         UniqueConstraint("symbol", name="uk_target_symbol"),
     )
 
     symbol: Mapped[str] = mapped_column(
-        String(32), nullable=False, comment="标的（vm_symbol）")
+        String(32), nullable=False, comment="标的（underlying_symbol）")
     target_pct: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(10, 4), nullable=True, comment="目标仓位占总资产比例（%）")
     note: Mapped[Optional[str]] = mapped_column(

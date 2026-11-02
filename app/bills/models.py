@@ -8,7 +8,7 @@ RiskParam / ScenarioGrid。
 - 外键列名以 _id 结尾
 - unique_together 与同名唯一索引合并为 UniqueConstraint
 - 笔记（logic/plan/invalidate/review/theme）v3 起已从 GroupSymbol 整体迁出：
-  标的层档案 -> irs_vm_*，单笔成交 -> BillNote。GroupSymbol 手动列只剩 vm_symbol
+  标的层档案 -> irs_um_*，单笔成交 -> BillNote。GroupSymbol 手动列只剩 underlying_symbol
   （归属标的）；风险敞口人工设置在 Group（账户×分类×代码粒度），GroupSymbol /
   GroupAcc 的同名列由编辑联动汇总维护。
 
@@ -376,9 +376,9 @@ class GroupSymbol(Base, BaseModel):
     # v3 归属标的：可归属 = 交易类别行（证券/期货/期权交易），口径纯按 category
     # 判断（constants.is_attachable）；理财/融资融券/收益费用/出入金/'-'/cash 六类
     # 资金流水行恒为 NULL——RZRQ/CRJ/SYFY 等占位 symbol 非证券，融资行为不归属标的
-    vm_symbol: Mapped[Optional[str]] = mapped_column(
-        String(32), ForeignKey("irs_value_monitor.symbol", ondelete="RESTRICT"),
-        comment="归属标的（irs_value_monitor.symbol）；融资融券与未归属为 NULL")
+    underlying_symbol: Mapped[Optional[str]] = mapped_column(
+        String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
+        comment="归属标的（irs_underlying_monitor.symbol）；融资融券与未归属为 NULL")
     # 风险敞口：不再人工维护——人工设置已上移到 Group（账户×分类×代码粒度），
     # 本列 = 同 (category, symbol) 各 Group.risk_exposure 之和，由 Group 编辑联动刷新。
     # 保留在本表仅供标的页展示；同步白名单不含它，重算不会覆盖。NULL = 全部未设置
@@ -401,7 +401,7 @@ class BillNote(Base, BaseModel):
     """成交笔记（1:N，挂 bills_bill.id）。
 
     - kind 只有「想法」，同笔成交只有一份（UK bill_id+kind）；
-      复盘自 2026-10-29 起上移到标的层（irs_vm_review），不再逐笔记。
+      复盘自 2026-10-29 起上移到标的层（irs_um_review），不再逐笔记。
     - ON DELETE SET NULL + biz_key：既有"删账户末笔 -> 重导"会换新 id，
       CASCADE 会让笔记静默蒸发，SET NULL 留孤儿等 relink 找回；
     - content_at 一律后端写，前端不可传（否则"当时写的"可以伪造）。
@@ -427,7 +427,7 @@ class BillNote(Base, BaseModel):
     # 裸 ID 无外键：不是因为依赖方向（bills ↔ irs 平级可互依，规则 4.12），
     # 而是删除策略——剧本会被整条删掉，FK 会让删除失败，悬空时前端显示「剧本已删除」即可。
     plan_id: Mapped[Optional[int]] = mapped_column(
-        Integer, nullable=True, comment="irs_vm_plan.id（裸 ID，无外键；悬空=剧本已删）")
+        Integer, nullable=True, comment="irs_um_plan.id（裸 ID，无外键；悬空=剧本已删）")
 
     __table_args__ = (
         UniqueConstraint('bill_id', 'kind', name='uk_bbn_bill_kind'),

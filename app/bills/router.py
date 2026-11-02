@@ -49,13 +49,13 @@ from server_fast.app.bills.schemas import (
     GroupOut,
     GroupSymbolCodeOut,
     GroupSymbolOut,
-    GroupSymbolVmUpdate,
+    GroupSymbolUnderlyingUpdate,
     GroupUpdate,
     ProfitOut,
     ProfitYearOut,
     RiskBoardOut,
 )
-from server_fast.app.irs.models import ValueMonitor
+from server_fast.app.irs.models import UnderlyingMonitor
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
@@ -195,7 +195,7 @@ def list_bills(
     symbol: Optional[str] = None,
     name: Optional[str] = None,
     keyword: Optional[str] = None,
-    vm_symbol: Optional[str] = None,
+    underlying_symbol: Optional[str] = None,
     plan_id: Optional[int] = None,
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -205,9 +205,9 @@ def list_bills(
 
     account/category 单值精确匹配，symbol 模糊，name 模糊（标的中文名 / 合约简称）。
     keyword 为合并搜索：代码或名称任一模糊命中即可（OR），供前端单输入框使用。
-    vm_symbol 按归属标的精确筛选（经 bills_group_symbol 的 (category, symbol) 关联）。
+    underlying_symbol 按归属标的精确筛选（经 bills_group_symbol 的 (category, symbol) 关联）。
 
-    v3 起每行额外带：`vm_symbol`（经 bills_group_symbol 归属，融资融券恒为 None）
+    v3 起每行额外带：`underlying_symbol`（经 bills_group_symbol 归属，融资融券恒为 None）
     与一条笔记摘要（想法）。笔记只做一次 IN 查询补齐，不让账单表承担 JOIN。
 
     排序：固定 `id DESC`。id 为自增主键、等于入库顺序，倒序即最新一笔在前。
@@ -227,16 +227,16 @@ def list_bills(
     # 合并搜索：一个输入框同时匹配代码与名称，命中任一即可（AND 在这里是错的）
     if keyword:
         query = query.filter(or_(Bill.symbol.contains(keyword), Bill.name.contains(keyword)))
-    # 归属标的筛选：vm_symbol 不是 bills_bill 的列，来自 bills_group_symbol
+    # 归属标的筛选：underlying_symbol 不是 bills_bill 的列，来自 bills_group_symbol
     # （两表以 (category, symbol) 关联，同一组在 group_symbol 里唯一）。
     # 用 EXISTS 而不是 JOIN：JOIN 在关联逻辑万一不唯一时会放大行数，让 count 与分页全错。
-    if vm_symbol:
+    if underlying_symbol:
         query = query.filter(
             db.query(GroupSymbol.id)
             .filter(
                 GroupSymbol.category == Bill.category,
                 GroupSymbol.symbol == Bill.symbol,
-                GroupSymbol.vm_symbol == vm_symbol,
+                GroupSymbol.underlying_symbol == underlying_symbol,
             )
             .exists()
         )
@@ -261,19 +261,19 @@ def list_bills(
     if dicts:
         bill_ids = [d["id"] for d in dicts]
         # 归属：一次 JOIN group_symbol（(category,symbol) 是两表共有键）
-        vm_map = {}
+        um_map = {}
         keys = {(d["category"], d["symbol"]) for d in dicts}
-        gs_rows = (db.query(GroupSymbol.category, GroupSymbol.symbol, GroupSymbol.vm_symbol)
-                   .filter(GroupSymbol.vm_symbol.isnot(None)).all())
-        for cat, sym, vm in gs_rows:
+        gs_rows = (db.query(GroupSymbol.category, GroupSymbol.symbol, GroupSymbol.underlying_symbol)
+                   .filter(GroupSymbol.underlying_symbol.isnot(None)).all())
+        for cat, sym, um in gs_rows:
             if (cat, sym) in keys:
-                vm_map[(cat, sym)] = vm
+                um_map[(cat, sym)] = um
         # 笔记：一次取完（只含想法）
         notes = {}
         for n in (db.query(BillNote).filter(BillNote.bill_id.in_(bill_ids)).all()):
             notes.setdefault(n.bill_id, {})[n.kind] = n
         for d in dicts:
-            d["vm_symbol"] = vm_map.get((d["category"], d["symbol"]))
+            d["underlying_symbol"] = um_map.get((d["category"], d["symbol"]))
             idea = notes.get(d["id"], {}).get(BillNote.KIND_IDEA)
             d["note_idea"] = idea.content if idea else None
             d["note_idea_at"] = idea.content_at if idea else None
@@ -389,7 +389,7 @@ def list_group_symbols(
     pos_state: Optional[str] = Query(default=None, pattern="^(holding|closed)$"),
     mapped: Optional[str] = Query(default=None, pattern="^(yes|no)$",
                                   description="归属筛选：yes=已归属；no=未归属（不含融资融券）"),
-    vm_symbol: Optional[str] = Query(default=None,
+    underlying_symbol: Optional[str] = Query(default=None,
                                      description="按归属标的精确筛选（如 SHSE.000300）"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
@@ -401,11 +401,11 @@ def list_group_symbols(
     value_only 为 True 时仅返回当前市值（value_total）不为 0 的记录（兼容旧参数）。
     pos_state：holding=持仓中（value_total 非 0）、closed=已平仓（value_total 为 0 或 NULL）。
     mapped：yes=已归属标的；no=未归属（**排除融资融券**——它本来就不归属，不是漏配）。
-    vm_symbol：按具体归属标的精确筛选（下拉值来自 irs_value_monitor.symbol）。
-    与 mapped 是 AND 关系：mapped=no 且 vm_symbol 有值时结果恒为空，前端选了具体标的后会清掉 mapped。
+    underlying_symbol：按具体归属标的精确筛选（下拉值来自 irs_underlying_monitor.symbol）。
+    与 mapped 是 AND 关系：mapped=no 且 underlying_symbol 有值时结果恒为空，前端选了具体标的后会清掉 mapped。
 
-    v3 起本表没有笔记列也没有 theme：主题只在 `/irs/value-monitors` 维护，
-    唯一的人工列是 `vm_symbol`。
+    v3 起本表没有笔记列也没有 theme：主题只在 `/irs/underlying-monitors` 维护，
+    唯一的人工列是 `underlying_symbol`。
     """
     query = db.query(GroupSymbol)
     query = _filter_query(
@@ -415,7 +415,7 @@ def list_group_symbols(
             (GroupSymbol.symbol, symbol, "contains"),
             # 归属标的是受控代码值，必须精确；_filter_query 只认 'eq'，
             # 写成 '==' 会落进 else 分支做 contains，把 SHSE.000300 串成前缀匹配
-            (GroupSymbol.vm_symbol, vm_symbol, "eq"),
+            (GroupSymbol.underlying_symbol, underlying_symbol, "eq"),
         ],
     )
     # 仅保留当前市值不为 0 的记录
@@ -430,14 +430,14 @@ def list_group_symbols(
         query = query.filter(GroupSymbol.category.in_(TRADE_CATS),
                              GroupSymbol.symbol.notin_(sorted(VIRTUAL_SYMBOLS)),
                              or_(
-                                 GroupSymbol.vm_symbol.isnot(None),
-                                 GroupSymbol.symbol.in_(db.query(ValueMonitor.symbol))))
+                                 GroupSymbol.underlying_symbol.isnot(None),
+                                 GroupSymbol.symbol.in_(db.query(UnderlyingMonitor.symbol))))
     elif mapped == "no":
         # 与 unmapped-count 同口径（constants.is_attachable）：排除资金流水行与同代码自动命中
         query = query.filter(GroupSymbol.category.in_(TRADE_CATS),
                              GroupSymbol.symbol.notin_(sorted(VIRTUAL_SYMBOLS)),
-                             GroupSymbol.vm_symbol.is_(None),
-                             ~GroupSymbol.symbol.in_(db.query(ValueMonitor.symbol)))
+                             GroupSymbol.underlying_symbol.is_(None),
+                             ~GroupSymbol.symbol.in_(db.query(UnderlyingMonitor.symbol)))
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
     items = query.offset(offset).limit(limit).all()
@@ -485,22 +485,22 @@ def count_unmapped_group_symbols(db: Session = Depends(get_db)):
     """归属计数：已归属 / 未归属 / 不参与归属（顶部提示用）。
 
     三态口径，加起来等于 total：
-    - `mapped`   已归属：有 vm_symbol，或 `symbol` 与某标的同代码（自动命中，无需填）；
-    - `unmapped` 真未归属：可归属的交易行里既无 vm_symbol、也不同代码 —— 这才是可操作清单；
+    - `mapped`   已归属：有 underlying_symbol，或 `symbol` 与某标的同代码（自动命中，无需填）；
+    - `unmapped` 真未归属：可归属的交易行里既无 underlying_symbol、也不同代码 —— 这才是可操作清单；
     - `excluded` 不参与归属：资金流水行（`CRJ`/`SYFY`/`cash`/`RZRQ` + 理财逆回购），
-                 给了 vm_symbol 也没意义，故不算漏配。
+                 给了 underlying_symbol 也没意义，故不算漏配。
 
     口径唯一来源见 `app/bills/constants.py::is_attachable`。
 
     ⚠️ 必须声明在 `/group-symbols/{id_}` 之前，否则 "unmapped-count" 会被当成 id。
     """
-    vm_symbols = {r[0] for r in db.query(ValueMonitor.symbol).all()}
-    rows = db.query(GroupSymbol.category, GroupSymbol.symbol, GroupSymbol.vm_symbol).all()
+    underlying_symbols = {r[0] for r in db.query(UnderlyingMonitor.symbol).all()}
+    rows = db.query(GroupSymbol.category, GroupSymbol.symbol, GroupSymbol.underlying_symbol).all()
     mapped_n = unmapped_n = excluded_n = 0
-    for cat, sym, vm in rows:
+    for cat, sym, um in rows:
         if not is_attachable(cat, sym):
             excluded_n += 1
-        elif vm or sym in vm_symbols:
+        elif um or sym in underlying_symbols:
             mapped_n += 1
         else:
             unmapped_n += 1
@@ -565,15 +565,15 @@ def list_group_symbol_options(
     ]
 
 
-@router.patch("/group-symbols/{id_}/vm")
+@router.patch("/group-symbols/{id_}/um")
 def update_group_symbol_vm(
     id_: int,
-    payload: GroupSymbolVmUpdate,
+    payload: GroupSymbolUnderlyingUpdate,
     db: Session = Depends(get_db),
 ):
-    """修改合约行的归属标的（PATCH /bills/group-symbols/{id}/vm）。
+    """修改合约行的归属标的（PATCH /bills/group-symbols/{id}/um）。
 
-    铁律 4.9：**只写 vm_symbol 一列**（`update_columns=['vm_symbol']` 的白名单语义），
+    铁律 4.9：**只写 underlying_symbol 一列**（`update_columns=['underlying_symbol']` 的白名单语义），
     禁止整行回写——否则派生列会被上一屏的旧值覆盖。
 
     不可归属行（`constants.is_attachable` 为假：融资融券 / 出入金 CRJ / 收益费用 SYFY /
@@ -583,19 +583,19 @@ def update_group_symbol_vm(
     gs = db.get(GroupSymbol, id_)
     if gs is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
-    if payload.vm_symbol is not None and not is_attachable(gs.category, gs.symbol):
+    if payload.underlying_symbol is not None and not is_attachable(gs.category, gs.symbol):
         raise HTTPException(
             status_code=400,
             detail=f"{gs.category} / {gs.symbol} 是资金流水行，不参与标的归属")
-    if payload.vm_symbol:
-        exists = db.query(ValueMonitor.symbol).filter(ValueMonitor.symbol == payload.vm_symbol).first()
+    if payload.underlying_symbol:
+        exists = db.query(UnderlyingMonitor.symbol).filter(UnderlyingMonitor.symbol == payload.underlying_symbol).first()
         if exists is None:
             raise HTTPException(status_code=400,
-                                detail=f"标的 {payload.vm_symbol} 不在估值监测里，请先新增标的")
+                                detail=f"标的 {payload.underlying_symbol} 不在标的监测里，请先新增标的")
     try:
-        gs.vm_symbol = payload.vm_symbol or None
+        gs.underlying_symbol = payload.underlying_symbol or None
         db.commit()
-        return {"status": "success", "vm_symbol": gs.vm_symbol}
+        return {"status": "success", "underlying_symbol": gs.underlying_symbol}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"修改失败：{str(e)}")
@@ -1035,14 +1035,14 @@ def list_unplanned_bills(
     """
     sql = """
         SELECT b.id, b.trade_time, b.account, b.category, b.symbol, b.name,
-               b.b_s, b.o_c, b.price, b.vol, g.vm_symbol, p.first_plan_at
+               b.b_s, b.o_c, b.price, b.vol, g.underlying_symbol, p.first_plan_at
         FROM bills_bill b
         JOIN bills_group_symbol g
           ON g.category = b.category AND g.symbol = b.symbol
-        LEFT JOIN (SELECT vm_symbol, MIN(create_time) AS first_plan_at
-                     FROM irs_vm_plan GROUP BY vm_symbol) p
-          ON p.vm_symbol = g.vm_symbol
-        WHERE g.vm_symbol IS NOT NULL
+        LEFT JOIN (SELECT underlying_symbol, MIN(create_time) AS first_plan_at
+                     FROM irs_um_plan GROUP BY underlying_symbol) p
+          ON p.underlying_symbol = g.underlying_symbol
+        WHERE g.underlying_symbol IS NOT NULL
           AND b.category <> '融资融券'
           AND (p.first_plan_at IS NULL OR b.trade_time < DATE(p.first_plan_at))
     """
@@ -1099,7 +1099,7 @@ def save_bill_note(
 
 
 @router.get("/attribution/by-plan", response_model=AttributionByPlanOut)
-def attribution_by_plan(vm_symbol: Optional[str] = Query(None), db: Session = Depends(get_db)):
+def attribution_by_plan(underlying_symbol: Optional[str] = Query(None), db: Session = Depends(get_db)):
     """剧本盈亏归因（P3-3）。
 
     读 bills_bill_note.plan_id 按剧本聚合；每笔成交只取一条带 plan_id 的决策笔记
@@ -1107,24 +1107,24 @@ def attribution_by_plan(vm_symbol: Optional[str] = Query(None), db: Session = De
     pl = pl_long + pl_short（平仓盈亏 l/s，正=盈利）；未归因成交单列残差，不静默丢弃。
     剧本名/标的不在此处返回，由前端按 plan_id 与 irs 剧本列表映射（bills 不依赖 irs）。
 
-    vm_symbol 可选（标的档案页传入）：已归因部分只统计该标的的剧本
-    （irs_vm_plan.vm_symbol，表名字符串跨模块引用，规则 4.12）；
-    未归因残差同步收窄为「归属该标的（bills_group_symbol.vm_symbol）且无剧本笔记」的成交。
+    underlying_symbol 可选（标的档案页传入）：已归因部分只统计该标的的剧本
+    （irs_um_plan.underlying_symbol，表名字符串跨模块引用，规则 4.12）；
+    未归因残差同步收窄为「归属该标的（bills_group_symbol.underlying_symbol）且无剧本笔记」的成交。
     不传则维持全局口径。
     """
-    # 过滤片段只在传参时拼进 SQL，参数也只在传参时绑定（避免 :vm_symbol 未定义）
+    # 过滤片段只在传参时拼进 SQL，参数也只在传参时绑定（避免 :underlying_symbol 未定义）
     assigned_filter = (
-        "WHERE a.plan_id IN (SELECT id FROM irs_vm_plan WHERE vm_symbol = :vm_symbol)"
-        if vm_symbol
+        "WHERE a.plan_id IN (SELECT id FROM irs_um_plan WHERE underlying_symbol = :underlying_symbol)"
+        if underlying_symbol
         else ""
     )
     unassigned_filter = (
         "AND EXISTS (SELECT 1 FROM bills_group_symbol g "
-        "WHERE g.category = b.category AND g.symbol = b.symbol AND g.vm_symbol = :vm_symbol)"
-        if vm_symbol
+        "WHERE g.category = b.category AND g.symbol = b.symbol AND g.underlying_symbol = :underlying_symbol)"
+        if underlying_symbol
         else ""
     )
-    params = {"vm_symbol": vm_symbol} if vm_symbol else {}
+    params = {"underlying_symbol": underlying_symbol} if underlying_symbol else {}
     assigned_sql = text(f"""
         SELECT a.plan_id,
                COUNT(*) AS exec_count,

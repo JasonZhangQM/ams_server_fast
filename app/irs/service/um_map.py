@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""标的 ↔ 成交的归属查询（映射存在 bills_group_symbol.vm_symbol）。
+"""标的 ↔ 成交的归属查询（映射存在 bills_group_symbol.underlying_symbol）。
 
 一条硬规则（v3 §4.5.1 规则一 + 2026-10-23 用户补充）：**资金流水行整体不参与归属**。
 `RZRQ`（融资融券）/ `CRJ`（出入金）/ `SYFY`（收益费用）/ `cash` 以及理财逆回购，
@@ -43,7 +43,7 @@ def _trade_filters(
 
 def trades_of(
     db: Session,
-    vm_symbol: str,
+    underlying_symbol: str,
     limit: int = 500,
     plan_id: int | None = None,
     account: str | None = None,
@@ -58,13 +58,13 @@ def trades_of(
     plan_id / account / symbol / category 为前端筛选用：剧本精确、账户精确、合约模糊、分类精确。
     """
     conds, params = _trade_filters(plan_id, account, symbol, category)
-    params["vm"] = vm_symbol
+    params["um"] = underlying_symbol
     params["lim"] = limit
     params["off"] = offset
     sql = text(f"""
         SELECT b.id, b.trade_time, b.account, b.category, b.symbol, b.name,
                b.b_s, b.c_p, b.o_c, b.price, b.vol, b.amount, b.amount_act, b.balance,
-               g.vm_symbol,
+               g.underlying_symbol,
                MAX(CASE WHEN n.kind = '想法' THEN n.content END) AS note_idea,
                MAX(CASE WHEN n.kind = '想法' THEN n.content_at END) AS note_idea_at,
                MAX(CASE WHEN n.kind = '想法' THEN n.plan_id END) AS plan_id
@@ -72,10 +72,10 @@ def trades_of(
         JOIN bills_group_symbol g
           ON g.category = b.category AND g.symbol = b.symbol
         LEFT JOIN bills_bill_note n ON n.bill_id = b.id
-        WHERE g.vm_symbol = :vm
+        WHERE g.underlying_symbol = :um
           AND {attachable_sql('b')}{conds}
         GROUP BY b.id, b.trade_time, b.account, b.category, b.symbol, b.name,
-                 b.b_s, b.o_c, b.price, b.vol, b.amount, g.vm_symbol
+                 b.b_s, b.o_c, b.price, b.vol, b.amount, g.underlying_symbol
         ORDER BY b.trade_time DESC, b.id DESC
         LIMIT :lim OFFSET :off
     """)
@@ -85,7 +85,7 @@ def trades_of(
 
 def count_trades(
     db: Session,
-    vm_symbol: str,
+    underlying_symbol: str,
     plan_id: int | None = None,
     account: str | None = None,
     symbol: str | None = None,
@@ -93,14 +93,14 @@ def count_trades(
 ) -> int:
     """与 trades_of 同口径的总数，供分页器算页数。"""
     conds, params = _trade_filters(plan_id, account, symbol, category)
-    params["vm"] = vm_symbol
+    params["um"] = underlying_symbol
     sql = text(f"""
         SELECT COUNT(DISTINCT b.id)
         FROM bills_bill b
         JOIN bills_group_symbol g
           ON g.category = b.category AND g.symbol = b.symbol
         LEFT JOIN bills_bill_note n ON n.bill_id = b.id
-        WHERE g.vm_symbol = :vm
+        WHERE g.underlying_symbol = :um
           AND {attachable_sql('b')}{conds}
     """)
     return int(db.execute(sql, params).scalar_one())
@@ -120,7 +120,7 @@ def _group_filters(category: str | None, symbol: str | None) -> tuple[str, dict]
 
 def groups_of(
     db: Session,
-    vm_symbol: str,
+    underlying_symbol: str,
     limit: int = 10,
     offset: int = 0,
     category: str | None = None,
@@ -128,7 +128,7 @@ def groups_of(
 ) -> list[dict]:
     """该标的的合约行分页（id 倒序）；分类精确、合约模糊。"""
     conds, params = _group_filters(category, symbol)
-    params.update({"s": vm_symbol, "lim": limit, "off": offset})
+    params.update({"s": underlying_symbol, "lim": limit, "off": offset})
     sql = text(f"""
         SELECT g.id, g.category, g.symbol, g.count, g.pf_total,
                g.p_total, g.cost_total, g.price, g.multiplier,
@@ -136,7 +136,7 @@ def groups_of(
                (SELECT COUNT(*) FROM bills_bill b
                  WHERE b.category = g.category AND b.symbol = g.symbol) AS bill_rows
         FROM bills_group_symbol g
-        WHERE g.vm_symbol = :s{conds}
+        WHERE g.underlying_symbol = :s{conds}
         ORDER BY g.id DESC
         LIMIT :lim OFFSET :off
     """)
@@ -145,16 +145,16 @@ def groups_of(
 
 def count_groups(
     db: Session,
-    vm_symbol: str,
+    underlying_symbol: str,
     category: str | None = None,
     symbol: str | None = None,
 ) -> int:
     """与 groups_of 同口径的合约行总数。"""
     conds, params = _group_filters(category, symbol)
-    params["s"] = vm_symbol
+    params["s"] = underlying_symbol
     sql = text(f"""
         SELECT COUNT(*) FROM bills_group_symbol g
-        WHERE g.vm_symbol = :s{conds}
+        WHERE g.underlying_symbol = :s{conds}
     """)
     return int(db.execute(sql, params).scalar_one())
 
@@ -162,12 +162,12 @@ def count_groups(
 def coverage(db: Session) -> list[dict]:
     """每个标的的归属覆盖：合约行数 + 成交笔数（同代码命中 + 显式映射）。"""
     sql = text(f"""
-        SELECT v.symbol AS vm_symbol, v.name,
+        SELECT v.symbol AS underlying_symbol, v.name,
                COUNT(DISTINCT g.id) AS group_rows,
                COUNT(DISTINCT b.id) AS bill_rows
-        FROM irs_value_monitor v
+        FROM irs_underlying_monitor v
         LEFT JOIN bills_group_symbol g
-               ON g.vm_symbol = v.symbol OR g.symbol = v.symbol
+               ON g.underlying_symbol = v.symbol OR g.symbol = v.symbol
         LEFT JOIN bills_bill b
                ON b.category = g.category AND b.symbol = g.symbol
               AND {attachable_sql('b')}
@@ -182,17 +182,17 @@ def unmapped(db: Session, limit: int = 300) -> list[dict]:
 
     三态语义（v3 §6.4）：
     - 资金流水行（RZRQ/CRJ/SYFY/cash/理财）-> '—'（本来就不归属，不是漏配）
-    - 同代码（g.symbol 就是某个标的）-> 自动命中，不需要填 vm_symbol
-    - 其余且 vm_symbol IS NULL -> 真正未归属，这是可操作清单
+    - 同代码（g.symbol 就是某个标的）-> 自动命中，不需要填 underlying_symbol
+    - 其余且 underlying_symbol IS NULL -> 真正未归属，这是可操作清单
     """
     sql = text(f"""
         SELECT g.id, g.category, g.symbol, g.count, g.pf_total,
                (SELECT COUNT(*) FROM bills_bill b
                  WHERE b.category = g.category AND b.symbol = g.symbol) AS bill_rows
         FROM bills_group_symbol g
-        WHERE g.vm_symbol IS NULL
+        WHERE g.underlying_symbol IS NULL
           AND {attachable_sql('g')}
-          AND g.symbol NOT IN (SELECT symbol FROM irs_value_monitor)
+          AND g.symbol NOT IN (SELECT symbol FROM irs_underlying_monitor)
         ORDER BY bill_rows DESC, g.symbol
         LIMIT :lim
     """)
@@ -205,12 +205,12 @@ def unmapped_count(db: Session) -> dict:
         SELECT
           SUM(CASE WHEN {non_attachable_sql()} THEN 1 ELSE 0 END) AS excluded,
           SUM(CASE WHEN {attachable_sql()}
-                    AND (vm_symbol IS NOT NULL
-                         OR symbol IN (SELECT symbol FROM irs_value_monitor))
+                    AND (underlying_symbol IS NOT NULL
+                         OR symbol IN (SELECT symbol FROM irs_underlying_monitor))
                    THEN 1 ELSE 0 END) AS mapped,
           SUM(CASE WHEN {attachable_sql()}
-                    AND vm_symbol IS NULL
-                    AND symbol NOT IN (SELECT symbol FROM irs_value_monitor)
+                    AND underlying_symbol IS NULL
+                    AND symbol NOT IN (SELECT symbol FROM irs_underlying_monitor)
                    THEN 1 ELSE 0 END) AS unmapped,
           COUNT(*) AS total
         FROM bills_group_symbol

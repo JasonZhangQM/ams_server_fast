@@ -20,11 +20,11 @@ from server_fast.app.bills.models import Bill, Group, GroupAcc, GroupSymbol
 logger = logging.getLogger("uvicorn.error")
 
 # bills_group_symbol 的派生列：由 bills_group 聚合算出、每次重算都要覆盖。
-# 不在此列的：vm_symbol（人工归属列）；risk_exposure（人工值设在 Group，
+# 不在此列的：underlying_symbol（人工归属列）；risk_exposure（人工值设在 Group，
 # 由 Group 编辑联动刷新到本表，见 router._cascade_risk_exposure）。
 # upsert_df_to_db 用 update_columns 显式限定，从机制上防覆盖。
 # ⚠️ 重算只更新白名单里的派生列。
-# **vm_symbol / risk_exposure 永远不要加进这个列表**——一旦加进来，下一次同步
+# **underlying_symbol / risk_exposure 永远不要加进这个列表**——一旦加进来，下一次同步
 # 就会把人工值整体冲掉（risk_exposure 还会被 fillna(0) 变成 0），且不报错。
 _DERIVED_COLS = [
     'count', 'p_total', 'cost_total', 'price', 'multiplier', 'value_total',
@@ -289,9 +289,9 @@ def upsert_group_symbol_sql():
         _table = _mdl_symbol.__table__.name
         _unique_keys = _mdl_symbol.unique_keys
         # 显式白名单：只更新派生列，绝不碰人工/联动列。
-        # ⚠️ 白名单外的是 vm_symbol（人工归属）与 risk_exposure（人工值设在
+        # ⚠️ 白名单外的是 underlying_symbol（人工归属）与 risk_exposure（人工值设在
         # Group、编辑联动刷新）——默认写法「更新除唯一键外所有列」在 df 多带一列时
-        # 会把它们静默冲掉，而 vm_symbol 被清空后不会有任何报错，
+        # 会把它们静默冲掉，而 underlying_symbol 被清空后不会有任何报错，
         # 只会在标的页悄悄少掉几十笔成交。
         result = upsert_df_to_db(
             df_in, _table, _engine, _unique_keys, update_columns=_DERIVED_COLS)

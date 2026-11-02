@@ -5,7 +5,7 @@
     1 证伪已触发（红）→ 2 剧本命中（橙）→ 3 裸仓且有持仓（黄）→ 4 复核到期（蓝）→ 5 其余。
 
 口径只在后端这一处算（铁律 4.5）：
-- zone：`vm_version.compute_zone`（带语义、左闭右开）
+- zone：`um_version.compute_zone`（带语义、左闭右开）
 - 命中：现价满足剧本的 trigger_op（`effective_trigger` 现算，不落库）
 - 裸仓：有归属持仓 且（logic=0 或 research=0）
 - 漂移：target_pct（irs 决策层）− current_pct（bills 事实层），前端派生不落库
@@ -23,22 +23,22 @@ from sqlalchemy.orm import Session
 
 from server_fast.app.bills.models import GroupAcc, GroupSymbol
 from server_fast.app.irs.models import (
-    ValueMonitor,
-    VmInvalidate,
-    VmLogic,
-    VmPlan,
-    VmTarget,
+    UnderlyingMonitor,
+    UnderlyingInvalidate,
+    UnderlyingLogic,
+    UnderlyingPlan,
+    UnderlyingTarget,
 )
-from server_fast.app.irs.service.vm_plan import effective_trigger
-from server_fast.app.irs.service.vm_research import latest
-from server_fast.app.irs.service.vm_version import compute_zone, effective_version
+from server_fast.app.irs.service.um_plan import effective_trigger
+from server_fast.app.irs.service.um_research import latest
+from server_fast.app.irs.service.um_version import compute_zone, effective_version
 
 # 能取到估值分位的指数标的（方案 P0-4 / P2-1），其余显示 None
 INDEX_PCT_SYMBOLS = {"SHSE.000300", "SHSE.000905", "SPX"}
 
 # 距最近档位 %：pv_* 字段即 (档位/现价-1)*100，取绝对值最小者
 PV_FIELDS = ("pv_el", "pv_l", "pv_m", "pv_h", "pv_eh")
-# 档位价格：今日页刻度条直接透传 ValueMonitor 主表列（save_version 会回写主表，与生效版本一致）
+# 档位价格：今日页刻度条直接透传 UnderlyingMonitor 主表列（save_version 会回写主表，与生效版本一致）
 PP_FIELDS = ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")
 
 
@@ -47,7 +47,7 @@ def percentiles() -> dict:
 
     列表页 / 详情抽屉同样复用本函数补 pe_pct/pb_pct（口径唯一，铁律 4.5）。
 
-    ⚠️ SPX（标普500）在 irs_value_monitor 里有一条，但 index_valuation 体系
+    ⚠️ SPX（标普500）在 irs_underlying_monitor 里有一条，但 index_valuation 体系
     只覆盖国内 A 股宽基指数 —— 这里按 dbsCfg.INDEX_CODE 白名单过滤，避免
     get_percentiles("未知指数代码：SPX") 抛 ValueError 被吞掉。
     """
@@ -68,7 +68,7 @@ def percentiles() -> dict:
         return {}
 
 
-def _is_hit(p: VmPlan, pp: dict, price) -> bool:
+def _is_hit(p: UnderlyingPlan, pp: dict, price) -> bool:
     """现价是否满足触发条件（命中 = 到价）。"""
     if price is None or p.is_cancelled:
         return False
@@ -92,53 +92,53 @@ def _is_hit(p: VmPlan, pp: dict, price) -> bool:
     return False
 
 
-def _nearest_level_pct(vm: ValueMonitor) -> Optional[float]:
+def _nearest_level_pct(um: UnderlyingMonitor) -> Optional[float]:
     vals = []
     for f in PV_FIELDS:
-        v = getattr(vm, f, None)
+        v = getattr(um, f, None)
         if v is not None:
             vals.append((abs(float(v)), float(v)))
     return min(vals, key=lambda x: x[0])[1] if vals else None
 
 
-def _unfinished_plans(db: Session, symbol: str) -> list[VmPlan]:
+def _unfinished_plans(db: Session, symbol: str) -> list[UnderlyingPlan]:
     """未暂停的剧本（长期有效，全部纳入今日命中判定）。"""
-    rows = db.query(VmPlan).filter(VmPlan.vm_symbol == symbol).order_by(VmPlan.seq).all()
+    rows = db.query(UnderlyingPlan).filter(UnderlyingPlan.underlying_symbol == symbol).order_by(UnderlyingPlan.seq).all()
     return [p for p in rows if not p.is_cancelled]
 
 
 def today_items(db: Session) -> list[dict]:
     """聚合全部标的的今日信息并按优先级排序。"""
     today = date.today()
-    vms = db.query(ValueMonitor).order_by(ValueMonitor.symbol).all()
+    vms = db.query(UnderlyingMonitor).order_by(UnderlyingMonitor.symbol).all()
     pct_map = percentiles()
 
     # 目标仓位 + 当前市值占比（只查一次，8 个标的规模下 JOIN 反而重）
-    targets = {t.symbol: t for t in db.query(VmTarget).all()}
+    targets = {t.symbol: t for t in db.query(UnderlyingTarget).all()}
     total_asset = db.query(func.coalesce(func.sum(GroupAcc.acc_aset), 0)).scalar() or 0
     current = {}
     has_pos = set()
-    gs_rows = db.query(GroupSymbol.value_total, GroupSymbol.p_total, GroupSymbol.vm_symbol).all()
-    for value_total, p_total, vm_symbol in gs_rows:
-        if not vm_symbol:
+    gs_rows = db.query(GroupSymbol.value_total, GroupSymbol.p_total, GroupSymbol.underlying_symbol).all()
+    for value_total, p_total, underlying_symbol in gs_rows:
+        if not underlying_symbol:
             continue
         if p_total or (value_total is not None and value_total != 0):
-            has_pos.add(vm_symbol)
+            has_pos.add(underlying_symbol)
         if value_total is not None:
-            current[vm_symbol] = current.get(vm_symbol, 0) + float(value_total)
+            current[underlying_symbol] = current.get(underlying_symbol, 0) + float(value_total)
 
     # 逻辑 / 证伪计数，按标的聚成 dict（一次查询）
-    logic_total = dict(db.query(VmLogic.symbol, func.count(VmLogic.id))
-                       .group_by(VmLogic.symbol).all())
-    logic_weak = dict(db.query(VmLogic.symbol, func.count(VmLogic.id))
-                      .filter(VmLogic.state == "减弱").group_by(VmLogic.symbol).all())
-    inv_triggered = dict(db.query(VmInvalidate.symbol, func.count(VmInvalidate.id))
-                         .filter(VmInvalidate.status == "已触发")
-                         .group_by(VmInvalidate.symbol).all())
+    logic_total = dict(db.query(UnderlyingLogic.symbol, func.count(UnderlyingLogic.id))
+                       .group_by(UnderlyingLogic.symbol).all())
+    logic_weak = dict(db.query(UnderlyingLogic.symbol, func.count(UnderlyingLogic.id))
+                      .filter(UnderlyingLogic.state == "减弱").group_by(UnderlyingLogic.symbol).all())
+    inv_triggered = dict(db.query(UnderlyingInvalidate.symbol, func.count(UnderlyingInvalidate.id))
+                         .filter(UnderlyingInvalidate.status == "已触发")
+                         .group_by(UnderlyingInvalidate.symbol).all())
 
     items = []
-    for vm in vms:
-        sym = vm.symbol
+    for um in vms:
+        sym = um.symbol
         pp = {}
         ver = effective_version(db, sym)
         if ver is not None:
@@ -150,7 +150,7 @@ def today_items(db: Session) -> list[dict]:
             "seq": p.seq, "trade_symbol": p.trade_symbol,
             "b_s": p.b_s, "o_c": p.o_c, "reason": p.reason,
             "effective_trigger": effective_trigger(p, pp),
-        } for p in plans if _is_hit(p, pp, vm.price)]
+        } for p in plans if _is_hit(p, pp, um.price)]
 
         research = latest(db, sym) or {}
         next_review = research.get("next_review")
@@ -182,13 +182,13 @@ def today_items(db: Session) -> list[dict]:
 
         items.append({
             "symbol": sym,
-            "name": vm.name,
-            "theme": vm.theme,
-            "price": float(vm.price) if vm.price is not None else None,
-            "zone": compute_zone(pp, vm.price),
-            "nearest_level_pct": _nearest_level_pct(vm),
-            "pp": {f: getattr(vm, f) for f in PP_FIELDS},
-            "pv": {f: getattr(vm, f) for f in PV_FIELDS},
+            "name": um.name,
+            "theme": um.theme,
+            "price": float(um.price) if um.price is not None else None,
+            "zone": compute_zone(pp, um.price),
+            "nearest_level_pct": _nearest_level_pct(um),
+            "pp": {f: getattr(um, f) for f in PP_FIELDS},
+            "pv": {f: getattr(um, f) for f in PV_FIELDS},
             "pe_pct": pct_map.get((sym, "pe_ttm")),
             "pb_pct": pct_map.get((sym, "pb_mrq")),
             "hit_plans": hit_plans,
@@ -213,19 +213,19 @@ def today_items(db: Session) -> list[dict]:
 # =========================================================================
 
 import re
-from server_fast.app.irs.models import VmInvalidate, ValueMonitor
+from server_fast.app.irs.models import UnderlyingInvalidate, UnderlyingMonitor
 
 # judge_expr 格式约定：{metric}{op}{value}，如 price<=3900 / pb_pct>=0.7
 _OP_RE = re.compile(r"^(.*?)\s*(<=|>=|==|=|<|>|≤|≥)\s*([0-9]*\.?[0-9]+)\s*$")
 
 
-def judge_one(db: Session, inv: VmInvalidate,
+def judge_one(db: Session, inv: UnderlyingInvalidate,
               pct_map: Optional[dict] = None) -> Optional[dict]:
     """对一条证伪做候选触发判定（只读，**不改 status**）。
 
     三类分治（方案 P2-2）：
-    - price       → 当前价 ValueMonitor.price
-    - percentile  → 指数标的 pe_pct / pb_pct 10y 分位（vm_today.percentiles()）
+    - price       → 当前价 UnderlyingMonitor.price
+    - percentile  → 指数标的 pe_pct / pb_pct 10y 分位（um_today.percentiles()）
     - manual      → 不做
     - discount    → 暂不做（贴水率需要跨模块查）
 
@@ -233,7 +233,7 @@ def judge_one(db: Session, inv: VmInvalidate,
         {"candidate": True/False, "current_value": float,
          "threshold": float, "op": str, "metric": str}
 
-    关键约束：**只写候选、不改 VmInvalidate.status**。机器给提示，人做决定。
+    关键约束：**只写候选、不改 UnderlyingInvalidate.status**。机器给提示，人做决定。
     """
     if inv.judge in (None, "manual"):
         return None
@@ -257,9 +257,9 @@ def judge_one(db: Session, inv: VmInvalidate,
     # 数据源解析
     current_value: Optional[float] = None
     if inv.judge == "price" and metric == "price":
-        vm = (db.query(ValueMonitor.price)
-              .filter(ValueMonitor.symbol == inv.symbol).scalar())
-        current_value = float(vm) if vm is not None else None
+        um = (db.query(UnderlyingMonitor.price)
+              .filter(UnderlyingMonitor.symbol == inv.symbol).scalar())
+        current_value = float(um) if um is not None else None
     elif inv.judge == "percentile" and metric in ("pe_pct", "pb_pct"):
         pct = (pct_map or percentiles()).get((inv.symbol, metric))
         current_value = float(pct) if pct is not None else None
@@ -288,8 +288,8 @@ def judge_one(db: Session, inv: VmInvalidate,
 
 def judge_list(db: Session, symbol: str) -> dict[int, Optional[dict]]:
     """批量判定一个标的的全部证伪（复用一次 percentiles() 调用）。"""
-    invs = (db.query(VmInvalidate)
-            .filter(VmInvalidate.symbol == symbol).all())
+    invs = (db.query(UnderlyingInvalidate)
+            .filter(UnderlyingInvalidate.symbol == symbol).all())
     if not invs:
         return {}
     pct_map = percentiles()

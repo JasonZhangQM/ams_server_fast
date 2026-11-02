@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""标的复盘（irs_vm_review）业务函数。
+"""标的复盘（irs_um_review）业务函数。
 
 口径：
 - 复盘锚定「研究版本」：一次复盘回答「这版研究的结论兑现了没有」；
@@ -15,26 +15,26 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from server_fast.app.irs.models import VmResearch, VmReview
+from server_fast.app.irs.models import UnderlyingResearch, UnderlyingReview
 
 
-def list_by_symbol(db: Session, symbol: str) -> list[VmReview]:
+def list_by_symbol(db: Session, symbol: str) -> list[UnderlyingReview]:
     """按落笔日期倒序：最新复盘在前，同一日期按 id 倒序兜底。"""
-    return (db.query(VmReview)
-            .filter(VmReview.symbol == symbol)
-            .order_by(VmReview.review_date.desc(), VmReview.id.desc())
+    return (db.query(UnderlyingReview)
+            .filter(UnderlyingReview.symbol == symbol)
+            .order_by(UnderlyingReview.review_date.desc(), UnderlyingReview.id.desc())
             .all())
 
 
-def list_by_research(db: Session, research_id: int) -> list[VmReview]:
-    return (db.query(VmReview)
-            .filter(VmReview.research_id == research_id)
-            .order_by(VmReview.review_date.desc(), VmReview.id.desc())
+def list_by_research(db: Session, research_id: int) -> list[UnderlyingReview]:
+    return (db.query(UnderlyingReview)
+            .filter(UnderlyingReview.research_id == research_id)
+            .order_by(UnderlyingReview.review_date.desc(), UnderlyingReview.id.desc())
             .all())
 
 
 def _validate(db: Session, symbol: str, research_id: int, content: Optional[str]) -> str:
-    research = db.get(VmResearch, research_id)
+    research = db.get(UnderlyingResearch, research_id)
     if research is None:
         raise ValueError(f"研究版本不存在：{research_id}")
     if research.symbol != symbol:
@@ -45,9 +45,9 @@ def _validate(db: Session, symbol: str, research_id: int, content: Optional[str]
     return text
 
 
-def create(db: Session, symbol: str, research_id: int, content: Optional[str]) -> VmReview:
+def create(db: Session, symbol: str, research_id: int, content: Optional[str]) -> UnderlyingReview:
     text = _validate(db, symbol, research_id, content)
-    row = VmReview(symbol=symbol, research_id=research_id, content=text,
+    row = UnderlyingReview(symbol=symbol, research_id=research_id, content=text,
                    review_date=date.today())
     db.add(row)
     db.flush()
@@ -55,8 +55,8 @@ def create(db: Session, symbol: str, research_id: int, content: Optional[str]) -
 
 
 def update(db: Session, review_id: int, research_id: int,
-           content: Optional[str]) -> Optional[VmReview]:
-    row = db.get(VmReview, review_id)
+           content: Optional[str]) -> Optional[UnderlyingReview]:
+    row = db.get(UnderlyingReview, review_id)
     if row is None:
         return None
     text = _validate(db, row.symbol, research_id, content)
@@ -67,7 +67,7 @@ def update(db: Session, review_id: int, research_id: int,
 
 
 def delete(db: Session, review_id: int) -> bool:
-    row = db.get(VmReview, review_id)
+    row = db.get(UnderlyingReview, review_id)
     if row is None:
         return False
     db.delete(row)
