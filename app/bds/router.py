@@ -126,8 +126,10 @@ from server_fast.sync_runner import TABLES, resolve_symbols, run_tasks
 
 logger = logging.getLogger("uvicorn.error")
 
-# 模块级停止信号字典：{task_id: threading.Event}，供 POST /bds/stop/batch-sync 触发
-_stop_events: dict[int, threading.Event] = {}
+# 停止信号字典移至 sync_task_utils.py：bills 的导入任务线程（scope='bills_import'）
+# 也要注册到这里，供 POST /bds/stop/batch-sync 统一触发；此处别名保持本文件引用不变
+from server_fast.app.bds.sync_task_utils import STOP_EVENTS as _stop_events
+from server_fast.app.bds.sync_task_utils import cleanup_zombies as _cleanup_zombies
 
 router = APIRouter(prefix="/bds", tags=["bds"])
 
@@ -162,24 +164,6 @@ def _guard_list_offset(offset: int) -> None:
                 "筛选缩小范围后再翻页。"
             ),
         )
-
-
-def _cleanup_zombies(db: Session, minutes: int = 5) -> int:
-    """清理僵尸任务（running 状态超过指定分钟数未更新）。返回清理数量。"""
-    from datetime import datetime, timedelta
-    cutoff = datetime.now() - timedelta(minutes=minutes)
-    zombies = db.query(BdsSyncTask).filter(
-        BdsSyncTask.status == "running",
-        BdsSyncTask.update_time < cutoff,
-    ).all()
-    for z in zombies:
-        z.status = "failed"
-        z.errors = (z.errors or []) + [{"symbol": "", "table": "", "message": f"僵尸任务（running 超 {minutes} 分钟未更新，后端重启残留）"}]
-        z.end_time = z.update_time
-        print(f'[batch-sync] 清理僵尸 #{z.id} (update_time={z.update_time})')
-    if zombies:
-        db.commit()
-    return len(zombies)
 
 
 def _run_sync(task_name: str, func) -> dict:

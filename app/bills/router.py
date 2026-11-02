@@ -13,13 +13,16 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, List, Optional, Tuple
 import re
+import threading
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from server_fast.app.bds.models import OptionConfig, OptionInfo
+from server_fast.app.bds.models import BdsSyncTask, OptionConfig, OptionInfo
+from server_fast.app.bds.schemas import BdsSyncTaskOut
+from server_fast.app.bds.sync_task_utils import STOP_EVENTS, cleanup_zombies
 from server_fast.app.bills.config import Config
 from server_fast.app.bills.constants import (
     RZRQ_CATEGORY,
@@ -53,7 +56,7 @@ from server_fast.app.bills.schemas import (
     RiskBoardOut,
 )
 from server_fast.app.irs.models import ValueMonitor
-from server_fast.common.db import get_db
+from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
 router = APIRouter(prefix="/bills", tags=["bills"])
@@ -801,7 +804,48 @@ def sync_group():
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
         ]
     )
+
+
 # =========================================================================
+# 交易明细批量导入（12 步流水线）：同步版 /run/batch-import 与任务版 /run/batch-import-task
+# =========================================================================
+
+def _build_import_steps() -> List[Tuple[str, Callable]]:
+    """12 步导入流水线（步骤名, 执行函数），供同步版与任务版端点共用。
+
+    services 内部自管理 session（pandas.to_sql + 独立 engine），步骤间无函数调用依赖，
+    仅通过 DB 表间接耦合——顺序即契约，改动须同步更新两端点 docstring。
+    """
+    from server_fast.app.bills.services.bill_import import insert_bill_all_excel_sql
+    from server_fast.app.bills.services.group_summary import (
+        update_symbol_bill_sql,
+        del_old_symbol_group_sql,
+        upsert_group_cash_sql,
+        upsert_group_profit_sql,
+        upsert_group_acc_sql,
+        upsert_group_symbol_sql,
+        clear_zero_position_risk_sql,
+    )
+    from server_fast.app.bills.services.profit_calc import upsert_profit_group_sql
+    from server_fast.app.bills.services.cash_calc import cash_update_group_sql
+    from server_fast.app.bills.services.profit_year import upsert_profit_year_sql
+    from server_fast.app.bills.services.value_calc import value_float_em_sql
+
+    return [
+        ("insert_bill_all_excel_sql", insert_bill_all_excel_sql),
+        ("update_symbol_bill_sql", update_symbol_bill_sql),
+        ("del_old_symbol_group_sql", del_old_symbol_group_sql),
+        ("upsert_group_cash_sql", upsert_group_cash_sql),
+        ("upsert_group_profit_sql", upsert_group_profit_sql),
+        ("upsert_profit_group_sql", upsert_profit_group_sql),
+        ("clear_zero_position_risk_sql", clear_zero_position_risk_sql),
+        ("cash_update_group_sql", cash_update_group_sql),
+        ("upsert_profit_year_sql", upsert_profit_year_sql),
+        ("value_float_em_sql", value_float_em_sql),
+        ("upsert_group_acc_sql", upsert_group_acc_sql),
+        ("upsert_group_symbol_sql", upsert_group_symbol_sql),
+    ]
+
 
 @router.post("/run/batch-import")
 def run_batch_import():
@@ -821,37 +865,153 @@ def run_batch_import():
     11. upsert_group_acc_sql        账户汇总
     12. upsert_group_symbol_sql     标的汇总
     """
-    from server_fast.app.bills.services.bill_import import insert_bill_all_excel_sql
-    from server_fast.app.bills.services.group_summary import (
-        update_symbol_bill_sql,
-        del_old_symbol_group_sql,
-        upsert_group_cash_sql,
-        upsert_group_profit_sql,
-        upsert_group_acc_sql,
-        upsert_group_symbol_sql,
-        clear_zero_position_risk_sql,
-    )
-    from server_fast.app.bills.services.profit_calc import upsert_profit_group_sql
-    from server_fast.app.bills.services.cash_calc import cash_update_group_sql
-    from server_fast.app.bills.services.profit_year import upsert_profit_year_sql
-    from server_fast.app.bills.services.value_calc import value_float_em_sql
+    return _run_sync_steps(_build_import_steps())
 
-    return _run_sync_steps(
-        [
-            ("insert_bill_all_excel_sql", insert_bill_all_excel_sql),
-            ("update_symbol_bill_sql", update_symbol_bill_sql),
-            ("del_old_symbol_group_sql", del_old_symbol_group_sql),
-            ("upsert_group_cash_sql", upsert_group_cash_sql),
-            ("upsert_group_profit_sql", upsert_group_profit_sql),
-            ("upsert_profit_group_sql", upsert_profit_group_sql),
-            ("clear_zero_position_risk_sql", clear_zero_position_risk_sql),
-            ("cash_update_group_sql", cash_update_group_sql),
-            ("upsert_profit_year_sql", upsert_profit_year_sql),
-            ("value_float_em_sql", value_float_em_sql),
-            ("upsert_group_acc_sql", upsert_group_acc_sql),
-            ("upsert_group_symbol_sql", upsert_group_symbol_sql),
-        ]
+
+# =========================================================================
+# 交易明细导入 · 后台任务版：整合进「批量同步 → 宏观与基础数据同步」卡片
+# （勾选「交易明细导入」段触发；前端在批量同步页轮询进度，bills 页面入口已移除）
+# =========================================================================
+
+# 导入任务的段标识：与 bds 一键同步共用 bds_sync_task 表，scope ≤ 16 字符（String(16)）
+IMPORT_SCOPE = "bills_import"
+IMPORT_STAGE_NAME = "交易明细导入"
+
+
+def _run_import_thread(task_id: int):
+    """后台线程：按固定顺序执行 12 步导入流水线，每步写一次进度到 bds_sync_task。
+
+    与 HTTP 请求完全隔离（自建 SessionLocal）；进度更新另开短 session 并逐步 commit，
+    刷新 update_time 防止 5 分钟僵尸清理误杀（对齐 bds._run_sync_thread 的做法）。
+
+    失败语义与同步版 /run/batch-import 一致：任一步异常即终止后续步骤、整体置
+    failed——流水线后段依赖前段产物（代码映射 → 收益试算 → 账户/标的汇总），
+    带病续跑会把错误状态一路算进汇总表。
+    """
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).get(task_id)
+    steps = _build_import_steps()
+    total = len(steps)
+    # 单段统计包：结构对齐 bds 一键同步的 result.stages，前端复用同一张段摘要表渲染
+    stage_stat = {"key": IMPORT_SCOPE, "name": IMPORT_STAGE_NAME, "group": "basic",
+                  "total": total, "done": 0, "ok": 0, "no_data": 0, "error": 0, "rows": 0}
+    errors: list = []
+    done = ok = no_data = err = 0
+
+    def flush() -> None:
+        # 短 session 逐步 commit：避免长事务，也让 update_time 持续刷新
+        s = SessionLocal()
+        try:
+            t = s.query(BdsSyncTask).get(task_id)
+            t.done_count = done
+            t.success_count = ok
+            t.no_data_count = no_data
+            t.error_count = err
+            t.progress = round(done / total * 100, 2) if total else 100
+            t.result = {"stages": [stage_stat], "stage": IMPORT_SCOPE}
+            s.commit()
+        finally:
+            s.close()
+
+    try:
+        task.status = "running"
+        task.start_time = datetime.now()
+        db.commit()
+
+        stop_event = STOP_EVENTS.get(task_id)
+        for name, fn in steps:
+            if stop_event and stop_event.is_set():
+                break
+            done += 1
+            stage_stat["done"] += 1
+            try:
+                count = fn()
+            except Exception as e:
+                # 步骤失败：计入明细并终止流水线（见 docstring 失败语义）
+                err += 1
+                stage_stat["error"] += 1
+                errors.append({"symbol": name, "table": IMPORT_STAGE_NAME,
+                               "message": f"{type(e).__name__}: {e}"})
+                print(f"[bills-import #{task_id}] {name} 失败: {type(e).__name__}: {e}")
+                break
+            if isinstance(count, int) and count > 0:
+                ok += 1
+                stage_stat["ok"] += 1
+                stage_stat["rows"] += count
+            else:
+                # 0 / None / 非计数返回值：执行成功但无行数可报，按"无数据"口径计
+                no_data += 1
+                stage_stat["no_data"] += 1
+            print(f"[bills-import #{task_id}] {name} -> {count} ({done}/{total})")
+            flush()
+
+        stopped = bool(stop_event and stop_event.is_set())
+        task.status = "stopped" if stopped else ("failed" if err else "done")
+        task.done_count = done
+        task.success_count = ok
+        task.no_data_count = no_data
+        task.error_count = err
+        task.progress = round(done / total * 100, 2) if total else 100
+        task.errors = errors or None
+        task.result = {"stages": [stage_stat], "stage": None, "stopped": stopped}
+        task.end_time = datetime.now()
+        db.commit()
+        print(f"[bills-import #{task_id}] {task.status}: {done}/{total} 成功={ok} 无数据={no_data} 失败={err}")
+    except Exception as e:
+        errors.append({"symbol": "", "table": IMPORT_STAGE_NAME, "message": f"线程异常: {type(e).__name__}: {e}"})
+        task.status = "failed"
+        task.errors = errors
+        task.end_time = datetime.now()
+        db.commit()
+        print(f"[bills-import #{task_id}] 失败: {e}")
+    finally:
+        STOP_EVENTS.pop(task_id, None)
+        db.close()
+
+
+@router.post("/run/batch-import-task", response_model=BdsSyncTaskOut)
+def run_batch_import_task(db: Session = Depends(get_db)):
+    """交易明细导入（后台任务版，供「批量同步 → 宏观与基础数据同步」卡片调用）。
+
+    与同步版 /run/batch-import 的区别：立即返回任务对象，前端轮询
+    GET /bds/sync-tasks/{id} 拿进度，停止走 POST /bds/stop/batch-sync（步间生效，
+    市值更新等长步骤需等其自然返回）。
+
+    任务模型复用 bds_sync_task（bills 依赖 bds 合规，规则 4.12），scope='bills_import'，
+    result.stages 与 bds 一键同步同构（单段 12 项），前端共用同一张段摘要表。
+    ⚠️ 与批量同步/成分股/估值/一键同步共用任务表 ⇒ **全局互斥**（有 running 则 409）。
+    """
+    # 清理僵尸任务 + 互斥检查（与 bds 各同步端点同一口径）
+    cleanup_zombies(db, minutes=5)
+    running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+    if running:
+        raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+    task = BdsSyncTask(
+        scope=IMPORT_SCOPE,
+        # 前端用 scope_params.stages 回填勾选状态，与一键同步任务口径一致
+        scope_params={"stages": [IMPORT_SCOPE]},
+        tables=[IMPORT_SCOPE],
+        mark_synced=0,
+        trading_status="trading",
+        max_symbols=0,
+        status="pending",
+        total_count=12,
+        done_count=0,
+        success_count=0,
+        no_data_count=0,
+        error_count=0,
+        progress=0,
+        errors=None,
     )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    # 注册停止信号（复用 /bds/stop/batch-sync）后立即返回，流水线在后台线程执行
+    STOP_EVENTS[task.id] = threading.Event()
+    threading.Thread(target=_run_import_thread, args=(task.id,), daemon=True).start()
+    return task
 
 
 # =========================================================================
