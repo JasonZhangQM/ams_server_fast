@@ -32,6 +32,7 @@ from server_fast.app.irs.models import (
 from server_fast.app.irs.service.um_plan import effective_trigger
 from server_fast.app.irs.service.um_research import latest
 from server_fast.app.irs.service.um_version import compute_zone, effective_version
+from server_fast.common.db import SessionLocal
 
 # 能取到估值分位的指数标的（方案 P0-4 / P2-1），其余显示 None
 INDEX_PCT_SYMBOLS = {"SHSE.000300", "SHSE.000905", "SPX"}
@@ -43,29 +44,61 @@ PP_FIELDS = ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")
 
 
 def percentiles() -> dict:
-    """{(index_code, metric): pct_10y}，失败返回空 dict（分位是纠偏，不是今日页主链）。
+    """{(symbol, metric): pct_10y}，失败返回空 dict（分位是纠偏，不是今日页主链）。
 
     列表页 / 详情抽屉同样复用本函数补 pe_pct/pb_pct（口径唯一，铁律 4.5）。
 
-    ⚠️ SPX（标普500）在 irs_underlying_monitor 里有一条，但 index_valuation 体系
-    只覆盖国内 A 股宽基指数 —— 这里按 dbsCfg.INDEX_CODE 白名单过滤，避免
-    get_percentiles("未知指数代码：SPX") 抛 ValueError 被吞掉。
+    两个分支（2026-11-03 起个股也能算分位）：
+    - 指数：index_valuation.get_percentiles，按 INDEX_PCT_SYMBOLS 白名单过滤
+      （SPX 不在 dbsCfg.INDEX_CODE 里，传入会抛 ValueError，先滤掉）。
+    - 个股：stock_valuation.get_percentiles（bds_daily_valuation 现算不落库，
+      窗口口径与指数一致）。先查 UnderlyingMonitor 全部标的、按 bds_symbol_info
+      过滤出在市 A 股个股（指数/美股/黄金的 market 恒为 NULL，天然被排除；
+      已退市剔除，见 MEMORY §七 铁律 1），status != ok（亏损/无数据/当前值无效）
+      不给出分位——宁空勿错。
     """
+    out: dict = {}
+    # 分支一：指数分位（失败不阻断个股分支）
     try:
         from server_fast.app.bds.services.valuation import index_valuation
         from server_fast.app.bds.config import Config as dbsCfg
         known = set(dbsCfg.INDEX_CODE.keys())
-        # 只向 bds 层传递它认识的指数代码（SPX 不在其中，跳过不报错）
         valid = [c for c in INDEX_PCT_SYMBOLS if c in known]
-        out = {}
         for metric in ("pe_ttm", "pb_mrq"):
             data = index_valuation.get_percentiles(index_codes=valid, metric=metric)
             for item in data.get("items", []):
                 p10 = item.get("pct_10y") or {}
                 out[(item["index_code"], metric)] = p10.get("pct")
-        return out
     except Exception:
-        return {}
+        pass
+    # 分支二：个股分位（在市 A 股才进；status != ok 不给分位）
+    try:
+        from server_fast.app.bds.models import SymbolInfo
+        from server_fast.app.bds.services.valuation import stock_valuation
+
+        symbols = [r[0] for r in SessionLocal().query(UnderlyingMonitor.symbol).all()]
+        if symbols:
+            today = date.today()
+            info_rows = (
+                SessionLocal()
+                .query(SymbolInfo.symbol)
+                .filter(SymbolInfo.symbol.in_(symbols),
+                        SymbolInfo.market.isnot(None))
+                .filter((SymbolInfo.delisted_date.is_(None))
+                        | (SymbolInfo.delisted_date > today))
+                .all()
+            )
+            codes = [r[0] for r in info_rows]
+            for metric in ("pe_ttm", "pb_mrq"):
+                data = stock_valuation.get_percentiles(codes, metric=metric)
+                for item in data.get("items", []):
+                    if item.get("status") != "ok":
+                        continue
+                    p10 = item.get("pct_10y") or {}
+                    out[(item["symbol"], metric)] = p10.get("pct")
+    except Exception:
+        pass
+    return out
 
 
 def _is_hit(p: UnderlyingPlan, pp: dict, price) -> bool:
