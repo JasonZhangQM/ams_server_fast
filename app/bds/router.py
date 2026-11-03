@@ -113,7 +113,7 @@ from server_fast.app.bds.services import (
     plan_index_constituent_backfill,
 )
 from server_fast.app.bds.config import Config
-from server_fast.app.bds.services import index_valuation
+from server_fast.app.bds.services.valuation import index_valuation
 from server_fast.app.bds.services.valuation import stock_valuation
 from server_fast.app.bds.services.market_data import option_info, option_market
 from server_fast.common.db import SessionLocal, get_db

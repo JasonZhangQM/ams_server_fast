@@ -52,7 +52,7 @@ def percentiles() -> dict:
     get_percentiles("未知指数代码：SPX") 抛 ValueError 被吞掉。
     """
     try:
-        from server_fast.app.bds.services import index_valuation
+        from server_fast.app.bds.services.valuation import index_valuation
         from server_fast.app.bds.config import Config as dbsCfg
         known = set(dbsCfg.INDEX_CODE.keys())
         # 只向 bds 层传递它认识的指数代码（SPX 不在其中，跳过不报错）

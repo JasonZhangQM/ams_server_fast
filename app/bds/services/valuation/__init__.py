@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""估值分位查询域：指数（index_valuation，根目录历史遗留）+ 个股（stock_valuation）。
+"""估值分位查询域：指数（index_valuation）+ 个股（stock_valuation）。
 
 个股估值分位直接读 `bds_daily_valuation`（个股日频 PE/PB/PS/PCF/DY，唯一键
 symbol+trade_date，最左前缀即 symbol），**现算不落库**——与指数分位同理由：

@@ -29,7 +29,7 @@ from typing import Optional
 from sqlalchemy import text
 
 from server_fast.app.bds.models import SymbolInfo
-from server_fast.app.bds.services.index_valuation import WINDOWS
+from server_fast.app.bds.services.valuation.index_valuation import WINDOWS
 from server_fast.common.db import SessionLocal
 
 logger = logging.getLogger("uvicorn.error")
