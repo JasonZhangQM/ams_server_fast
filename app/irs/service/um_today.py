@@ -34,7 +34,8 @@ from server_fast.app.irs.service.um_research import latest
 from server_fast.app.irs.service.um_version import compute_zone, effective_version
 
 # 历史白名单（方案 P0-4 / P2-1）：读表后不再由本模块过滤，保留供审计与 um_version 注释引用。
-# 落表 subject 由 bds 侧 L1_SUBJECTS 定义（bds 不得反向依赖 irs，🔒4.12）。
+# 落表默认 subject 由 bds 侧 subject_diagnostics() 运行时从 irs_underlying_monitor
+# 推导（🔒4.12：bds 不 import irs，用表名字符串 SQL 取数），不再是 L1_SUBJECTS 常量。
 INDEX_PCT_SYMBOLS = {"SHSE.000300", "SHSE.000905", "SPX"}
 
 # 距最近档位 %：pv_* 字段即 (档位/现价-1)*100，取绝对值最小者

@@ -1240,7 +1240,9 @@ class ValuationPercentile(Base, BaseModel):
     的 1406 坑；DDL 与模型声明两步走（🔒4.4），比对列名/类型/可空，不比列序。
     ⚠️ `note` 是人工列/哨兵列，**不在 `percentile_store.fields_pct_update` 白名单**，
     重算不得覆盖（§10 哨兵 4）。
-    ⚠️ 宽表已 43 列：若 L3 再纳入 `pcf_ttm_oper` / `pe_median`，必须转长表。
+    ⚠️ `windows_undercovered`（P1-4）只标「窗口左界早于该 metric 有效值首日」，
+    与 `windows_short`（n<250）语义不同；分位数值与 status 三态一律不受影响。
+    ⚠️ 宽表已 44 列：若 L3 再纳入 `pcf_ttm_oper` / `pe_median`，必须转长表。
     """
 
     __tablename__ = "bds_valuation_percentile"
@@ -1282,7 +1284,10 @@ class ValuationPercentile(Base, BaseModel):
     status_ps: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
     status_dy: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
     status_note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    windows_short: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="按 metric 分组的短窗口标记")
+    windows_short: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="按 metric 分组的短窗口标记（n<250）")
+    # P1-4：仅标记「名义窗口年限 > 实际数据覆盖」，不改分位数值 / status（方案 A）
+    windows_undercovered: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, comment="按 metric 分组的覆盖不足窗口（左界早于该 metric 有效值首日）")
     window_cut: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="本行 3/5/10y 实际左界，口径审计用")
 
     first_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)

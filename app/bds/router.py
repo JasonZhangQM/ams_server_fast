@@ -86,6 +86,7 @@ from server_fast.app.bds.schemas import (
     OptionSyncPlanOut,
     SymbolInfoOut,
     TradeDateOut,
+    ValuationPctSubjectOut,
     ValuationPctSyncRequest,
 )
 from server_fast.app.bds.services import (
@@ -2415,8 +2416,10 @@ def sync_index_valuation(req: IndexValuationSyncRequest):
         db.close()
 
 
-def _run_valuation_pct_thread(task_id: int, mode: str, subjects: list,
-                              from_date, total_count: int):
+def _run_valuation_pct_thread(task_id: int, mode: str,
+                              subjects: Optional[list[str]],
+                              from_date, total_count: int,
+                              prune_orphans: bool = False):
     """后台线程：估值分位按日落盘重算，结束时把结构化审计写进 task.result。
 
     与 `_run_valuation_thread` 同构：自建 SessionLocal、复用 `_stop_events`、
@@ -2445,7 +2448,7 @@ def _run_valuation_pct_thread(task_id: int, mode: str, subjects: list,
         stop_event = _stop_events.get(task_id)
         result = percentile_store.rebuild(
             mode=mode, subjects=subjects, from_date=from_date,
-            on_progress=on_progress)
+            prune_orphans=prune_orphans, on_progress=on_progress)
 
         task.status = "stopped" if (stop_event is not None and stop_event.is_set()) else "done"
         task.done_count = total_count
@@ -2459,8 +2462,9 @@ def _run_valuation_pct_thread(task_id: int, mode: str, subjects: list,
         db.commit()
         print(f'[valuation-pct #{task_id}] {task.status}：{result["rows_upserted"]} 行, '
               f'跳过 {result.get("skipped_count", 0)} 个标的, '
-              f'变更 {result["audit"]["changed"]}, 孤儿 {result["orphans_deleted"]}, '
-              f'{result["duration_ms"]} ms')
+              f'强制全量 {result.get("forced_full_count", 0)} 个, '
+              f'清理孤儿 {result["orphans_deleted"]} (prune={result.get("prune_orphans")}), '
+              f'变更 {result["audit"]["changed"]}, {result["duration_ms"]} ms')
 
     except Exception as e:
         logger.exception("估值分位落盘失败 #%s", task_id)
@@ -2489,6 +2493,15 @@ def sync_valuation_percentile(req: ValuationPctSyncRequest):
     口径：`as_of` 按上游估值表实际交易日落行，窗口是**日历对日** 3/5/10 年，
     4 指标 PE(TTM)/PB(MRQ)/PS(TTM)/股息率(%)；`pct_all` 仍由分位专页实时算、不落库。
     口径由 365 天改对日属 **M2 全量重建强制触发事件**。
+
+    P0（2026-11-04）：`input_fp` 变化或窗口口径陈旧 ⇒ 该标的强制全量重建（含 M1/M3）；
+    `prune_orphans` 默认 False，只有「默认清单 + M2/auto + 显式开启」才删孤儿行，
+    传 `subjects`（单标的/子集）一律不删，避免误删其余标的全历史（方案 §1）。
+
+    **默认清单运行时从 `irs_underlying_monitor` 推导**（不传 subjects 时）：过滤掉
+    无估值数据的标的（SPX / GC00Y），监测表增删后下一次重算自动跟上；不自动触发，
+    改完监测表需手动跑一次。`result` 会带 `default_subjects` / `excluded_no_data` /
+    `orphan_in_store` / `monitor_fallback` 供核查。
     """
     db = next(get_db())
     try:
@@ -2515,6 +2528,12 @@ def sync_valuation_percentile(req: ValuationPctSyncRequest):
                 "mode": req.mode,
                 "subjects": p["subjects"],
                 "from_date": req.from_date.isoformat() if req.from_date else None,
+                "prune_orphans": req.prune_orphans,
+                "subjects_explicit": req.subjects is not None,
+                # 本次运行时默认清单快照，便于事后回溯「当时监测表里有什么」
+                "default_subjects": p["default_subjects"],
+                "excluded_no_data": p["excluded_no_data"],
+                "monitor_fallback": p["monitor_fallback"],
             },
             tables=["valuation-percentile"],
             status="running",
@@ -2527,15 +2546,71 @@ def sync_valuation_percentile(req: ValuationPctSyncRequest):
         db.refresh(task)
 
         # 4. 注册停止信号并启动后台线程
+        # 🔴 线程收 `req.subjects`（原始值，可为 None），不能收 `p["subjects"]`：
+        #    plan() 会把 None 展开成运行时默认清单，传展开值会让 rebuild 永远认为
+        #    「用户显式指定了标的」⇒ prune_orphans 在 HTTP 路径被静默忽略（P0-1 失效）。
         _stop_events[task.id] = threading.Event()
         threading.Thread(
             target=_run_valuation_pct_thread,
-            args=(task.id, req.mode, p["subjects"], req.from_date, p["total_count"]),
+            args=(task.id, req.mode, req.subjects, req.from_date,
+                  p["total_count"], req.prune_orphans),
             daemon=True,
         ).start()
         return task
     finally:
         db.close()
+
+
+@router.get("/valuation-percentile/subjects", response_model=List[ValuationPctSubjectOut])
+def list_valuation_pct_subjects(db: Session = Depends(get_db)):
+    """估值分位落盘候选标的（只读，供批量同步卡片 / 新查询页下拉）。
+
+    **以 `irs_underlying_monitor` 运行时清单为基准**（不 import irs，走
+    `percentile_store.subject_diagnostics()` 的表名字符串 SQL，🔒4.12）：
+    监测表全部标的都列出（含 SPX / GC00Y 这类无估值数据的，标 `has_data=false`）；
+    再补「落表已有但监测表已移除」（`orphan_in_store=true`，历史行默认保留）与
+    「指数源表有但还没落盘」（`in_store=false`）。个股源表有 5,920 只，全列会
+    撑爆下拉 ⇒ 不列；任意其它代码由前端 `tag` 自由输入后走单标的 M1。
+    """
+    diag = percentile_store.subject_diagnostics(db)
+    default = set(diag["default"])
+    excluded = set(diag["excluded_no_data"])
+    orphan = set(diag["orphan_in_store"])
+    index_codes = set(db.execute(text(
+        "SELECT DISTINCT index_code FROM bds_index_valuation")).scalars().all())
+
+    rows = db.execute(text(
+        "SELECT subject_type, symbol, MIN(as_of), MAX(as_of), COUNT(*) "
+        "FROM bds_valuation_percentile GROUP BY subject_type, symbol"
+    )).all()
+    seen = {r[1] for r in rows}
+    # 一次性判「有没有可算分位的数据」，候选只有十来个，EXISTS 点查即可
+    has = percentile_store.subjects_with_data(
+        db, sorted(seen | set(diag["monitor"]) | index_codes))
+    items = [ValuationPctSubjectOut(
+        subject_type=r[0], symbol=r[1], first_date=r[2], last_date=r[3],
+        row_count=int(r[4]), in_store=True,
+        in_default=(r[1] in default), has_data=(r[1] in has),
+        orphan_in_store=(r[1] in orphan),
+    ) for r in rows]
+
+    # 监测表里尚未落盘的（含无数据标的，仍列出以便用户看见「为什么没落」）
+    for code in diag["monitor"]:
+        if code not in seen:
+            items.append(ValuationPctSubjectOut(
+                subject_type=("index" if code in index_codes else "stock"),
+                symbol=code, in_store=False,
+                in_default=(code in default), has_data=(code in has),
+                orphan_in_store=False))
+            seen.add(code)
+
+    # 指数源表里有、既不在监测表也未落盘 ⇒ 供将来扩到「全部指数」时选
+    for code in sorted(index_codes):
+        if code not in seen:
+            items.append(ValuationPctSubjectOut(
+                subject_type="index", symbol=code, in_store=False,
+                in_default=False, has_data=(code in has), orphan_in_store=False))
+    return sorted(items, key=lambda x: (x.subject_type != "index", x.symbol))
 
 
 @router.get("/index-constituent-sync-status")

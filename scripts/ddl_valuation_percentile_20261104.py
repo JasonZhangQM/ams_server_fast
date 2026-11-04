@@ -72,8 +72,11 @@ CREATE TABLE IF NOT EXISTS `{TABLE}` (
   `status_ps`      varchar(16)   NOT NULL DEFAULT 'ok',
   `status_dy`      varchar(16)   NOT NULL DEFAULT 'ok',
   `status_note`    varchar(255)  DEFAULT NULL,
-  `windows_short`  json          NULL COMMENT '按 metric 分组的短窗口标记',
+  `windows_short`  json          NULL COMMENT '按 metric 分组的短窗口标记（n<250）',
   `window_cut`     json          NULL COMMENT '本行 3/5/10y 实际左界，口径审计用',
+  -- P1（2026-11-04）：窗口左界早于该 metric 有效值首日 ⇒ 名义年限 > 实际覆盖。
+  -- 只做标记，分位数值、status 三态一律不动（docs/估值分位落盘问题优化方案 §2.1 方案 A）。
+  `windows_undercovered` json NULL COMMENT '按 metric 分组的覆盖不足窗口（左界早于数据首日）',
   `first_date`     date          DEFAULT NULL,
   `raw_n`          int           DEFAULT NULL,
   `cleaned_n_pe`   int           DEFAULT NULL, `cleaned_n_pb`  int DEFAULT NULL,

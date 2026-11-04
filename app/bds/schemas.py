@@ -862,7 +862,9 @@ class ValuationPctSyncRequest(BaseModel):
       兜底新增交易日与上游历史修订，不需要脆弱的变更检测；
     - M1：只补表内最新 as_of 之后的新增交易日；
     - M3：从 `from_date` 起重算 `[from_date, 末日]`（上游历史补录 / 成分快照变化时）；
-    - auto：用 Python 侧源序列指纹 `input_fp` 自动选 skip / M1 / M3。
+    - auto：按 Python 侧源序列指纹 `input_fp` 自动选 skip / M1，
+      **只要 fp 变化就强制该 subject 全量重建**（P0-2：修订影响 `[D, D+10y]` 上千行，
+      只重写最新行会把错误永久固化）。
       🔴 绝不用 `MAX(update_time)` 判修订（重复同步同一天会刷时间戳但值没变 ⇒ 误报）。
 
     **口径变更（365 天 → 日历对日）属 M2 强制触发事件**：上线时必须全量重建，
@@ -873,9 +875,35 @@ class ValuationPctSyncRequest(BaseModel):
 
     mode: str = Field(
         default="M2", description="重算模式: M1 / M2 / M3 / auto（默认 M2 全量重建）")
-    # 不传 = bds 侧 L1 常量（2 指数 + 4 个股）；显式传可在新增标的时覆盖，
-    # 避免在 bds 域 import irs（🔒4.12：bds 只能被依赖）
+    # 不传 = 运行时从 irs_underlying_monitor 推导（过滤无估值数据标的）；
+    # 显式传 = 单标的/子集，bds 用表名字符串 SQL 取数、不 import irs（🔒4.12）
     subjects: Optional[list[str]] = Field(
-        default=None, description="标的代码清单；不传 = L1 默认 6 个（2 指数 + 4 个股）")
+        default=None, description="标的代码清单；不传 = 标的监测表全部有效标的（运行时推导）")
     from_date: Optional[date] = Field(
         default=None, description="M3 的修订起始日（闭区间，含当日）；M3 必填")
+    # 🔴 P0-1：默认关闭。只有「不传 subjects（默认清单）+ M2/auto」时开启才真的删，
+    # 单标的/子集重算永不删除其余标的的历史行。
+    prune_orphans: bool = Field(
+        default=False,
+        description="危险操作：清理不在标的白名单内的孤儿行；默认 False，且传 subjects 时一律忽略")
+
+
+class ValuationPctSubjectOut(BaseModel):
+    """估值分位落盘候选标的（GET /bds/valuation-percentile/subjects）。
+
+    **以 `irs_underlying_monitor` 运行时清单为基准**（不再硬编码 L1）：监测表全部
+    标的都列出，含无估值数据的（`has_data=false`）；再补「落表已有但监测表已移除」
+    （`orphan_in_store=true`，历史行默认保留）与「指数源表有但还没落盘」。
+    个股源表有 5,920 只，全列会撑爆下拉 ⇒ 不列；任意其它代码可用前端 `tag`
+    自由输入后走单标的 M1（`subjects` 参数本来就接受任意代码）。
+    """
+
+    symbol: str = Field(description="gm 格式代码")
+    subject_type: str = Field(description="index / stock")
+    first_date: Optional[date] = Field(default=None, description="落表最早 as_of")
+    last_date: Optional[date] = Field(default=None, description="落表最新 as_of")
+    row_count: int = Field(default=0, description="落表行数；未落盘恒 0")
+    in_store: bool = Field(default=True, description="是否已在落表中存在")
+    in_default: bool = Field(default=False, description="是否属于本次运行时默认清单（监测表 ∧ 有估值数据）")
+    has_data: bool = Field(default=True, description="上游估值表是否有可算分位的数据；无数据的不落盘")
+    orphan_in_store: bool = Field(default=False, description="落表已有但监测表已移除；需显式 prune 才清理")
