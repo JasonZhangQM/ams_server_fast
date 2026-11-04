@@ -795,7 +795,12 @@ class BdsSyncTask(Base, BaseModel):
     # index_valuation = 指数估值重算（POST /bds/sync/index-valuation，15 字符）
     # macro_sync      = 一键同步（POST /bds/sync/macro，10 字符；基础数据+宏观数据七段顺序执行。
     #                   名字沿用不改——历史任务靠它被前端卡片接管，改了会导致老任务刷不出来）
-    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill/index_valuation/macro_sync")
+    # bills_import    = 交易明细导入（bills 域独立后台任务，共用本表做全局互斥）
+    # option_market  = 期权行情同步（宏观一键同步的其中一段，但也可单独起任务）
+    # option_info    = 期权合约字典（端点已删，历史任务仍在，前端 NON_BATCH_SCOPES 必须排除）
+    # valuation_pct  = 估值分位按日落盘重算（POST /bds/sync/valuation-percentile，14 字符；
+    #                   2026-11-04 P2 新增。全库一把锁 ⇒ 必须排在批量同步/成分/指数估值之后）
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill/index_valuation/macro_sync/bills_import/option_market/option_info/valuation_pct")
     scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols} 或 {index_codes/start_date} 或 {stages}")
     tables: Mapped[list] = mapped_column(JSON, nullable=False, comment="要同步的表列表")
     mark_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", comment="全部成功后是否写 sync_at: 1=是 0=否")
@@ -1218,3 +1223,87 @@ class BdsTableStat(Base, BaseModel):
     __table_args__ = (
         UniqueConstraint("table_name", name="uk_bds_table_stat"),
     )
+
+
+class ValuationPercentile(Base, BaseModel):
+    """估值分位按日落盘（对应表 bds_valuation_percentile，2026-11-04 P2）。
+
+    一行 = 一个 subject 的一个 `as_of`（观察日）。分位是标的×日期的纯函数，
+    上游序列不变时历史行永久有效；时间推移只追加新行，上游修订才覆盖旧行。
+
+    口径：`as_of` 为该 subject 在上游估值表实际出现的交易日；窗口左界是**日历对日**
+    `shift_years(as_of, 3/5/10)`（见 `services/valuation/percentile_stat.py`）；
+    只落 PE(TTM) / PB(MRQ) / PS(TTM) / 股息率(%) 四指标 × 3/5/10 年，
+    `pct_all` 仍由分位专页实时算。
+
+    ⚠️ 列名 `current_*` / `status_*` 刻意避开 MySQL 保留字与 `conclusion varchar(8)`
+    的 1406 坑；DDL 与模型声明两步走（🔒4.4），比对列名/类型/可空，不比列序。
+    ⚠️ `note` 是人工列/哨兵列，**不在 `percentile_store.fields_pct_update` 白名单**，
+    重算不得覆盖（§10 哨兵 4）。
+    ⚠️ 宽表已 43 列：若 L3 再纳入 `pcf_ttm_oper` / `pe_median`，必须转长表。
+    """
+
+    __tablename__ = "bds_valuation_percentile"
+
+    subject_type: Mapped[str] = mapped_column(String(8), nullable=False, comment="index / stock")
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="gm 格式代码")
+    as_of: Mapped[date] = mapped_column(Date, nullable=False, comment="观察日：分位所属交易日，窗口右端锚点")
+
+    # 当日原始值（个股未清洗，可为负 / NULL）
+    current_pe: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="PE(TTM)")
+    current_pb: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="PB(MRQ)")
+    current_ps: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="PS(TTM)")
+    current_dy: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 4), nullable=True, comment="股息率(%)，百分数（4.7224=4.72%），非小数")
+
+    # 12 个分位列：4 指标 × 3 窗口
+    pe_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pe_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pe_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pb_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pb_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pb_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ps_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ps_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ps_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    dy_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    dy_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    dy_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+
+    # 每指标 3 窗口的 {pct,min,max,median,z,n}
+    pe_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    pb_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    ps_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    dy_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # 每指标独立状态：个股可能仅 dy 无有效值，其余三个照常出分位
+    status_pe: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok", comment="ok/loss/no_data")
+    status_pb: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
+    status_ps: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
+    status_dy: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
+    status_note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    windows_short: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="按 metric 分组的短窗口标记")
+    window_cut: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="本行 3/5/10y 实际左界，口径审计用")
+
+    first_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    raw_n: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cleaned_n_pe: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cleaned_n_pb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cleaned_n_ps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cleaned_n_dy: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    source_as_of: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="写入时上游源末日，读取侧判新鲜度")
+    input_fp: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="4 指标源序列指纹（Python 侧 sha256）")
+    calc_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, comment="本行计算时刻")
+    note: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="人工标注（哨兵列，重算不覆盖）")
+
+    __table_args__ = (
+        UniqueConstraint("subject_type", "symbol", "as_of", name="uk_bvp"),
+        Index("k_bvp_asof", "as_of"),
+        Index("k_bvp_calc", "calc_at"),
+    )
+
+    unique_keys = ["subject_type", "symbol", "as_of"]
+
+    def __str__(self) -> str:
+        return f"{self.symbol}-{self.as_of}"

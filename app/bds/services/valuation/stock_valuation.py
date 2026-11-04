@@ -19,8 +19,14 @@
 - **窗口样本不足**：上市不足窗口期（或长期停牌）时窗口实际覆盖不到名义年限，
   每个窗口回 `windows_short` 标记（n < MIN_WINDOW_SAMPLES），前端提示，不静默。
 
-窗口口径与指数分位**完全一致**：自然日回溯（3/5/10 年 = 1095/1825/3650 天），
+窗口口径与指数分位**完全一致**：**日历对日**回溯 3/5/10 年
+（`as_of=2025-10-23` 的 10 年窗口左界 `2015-10-23`；2/29 clamp 到 2/28），
+不是旧的 `1095/1825/3650 自然日`，也不是「最近 N 个交易日」。
 锚点 = 该标的最后一个有值交易日（不是 today），数据陈旧时窗口左端不漂移。
+公式统一走公共内核 `percentile_stat.stat_window`，落表路径同调一份。
+
+**分位不落库**这句话只对**本函数**成立：它保留实时计算供任意 A 股 / 5 指标分析；
+按日固化的历史分位另落 `bds_valuation_percentile`（见方案 §6.4 处置矩阵）。
 """
 import logging
 from datetime import date, timedelta
@@ -29,7 +35,9 @@ from typing import Optional
 from sqlalchemy import text
 
 from server_fast.app.bds.models import SymbolInfo
-from server_fast.app.bds.services.valuation.index_valuation import WINDOWS
+from server_fast.app.bds.services.valuation.percentile_stat import (
+    WINDOW_YEARS, clean_value, stat_window,
+)
 from server_fast.common.db import SessionLocal
 
 logger = logging.getLogger("uvicorn.error")
@@ -50,16 +58,12 @@ MIN_WINDOW_SAMPLES = 250
 
 
 def _clean(metric: str, v: Optional[float]) -> bool:
-    """指标有效值判定（窗口样本与"当前值"共用同一把尺子）。"""
-    if v is None:
-        return False
-    if metric in ("pe_ttm", "pcf_ttm_oper"):
-        return v > PE_ANOMALY_LOW
-    if metric in ("pb_mrq", "ps_ttm"):
-        return v > 0
-    if metric == "dy_ttm":
-        return v >= 0
-    return False
+    """指标有效值判定（窗口样本与"当前值"共用同一把尺子）。
+
+    规则本体已搬到公共内核 `percentile_stat.clean_value`，落表路径同一把尺子；
+    这里保留薄封装，避免序列端点 / 分位函数里的既有调用点全部改名。
+    """
+    return clean_value(metric, v)
 
 
 def resolve_symbols(symbols) -> list:
@@ -158,30 +162,14 @@ def get_series(symbols, start_date: Optional[date] = None,
     }
 
 
-def _stat(seq: list, current: float, days: Optional[int], last_date: date) -> dict:
-    """单窗口统计。与 index_valuation.get_percentiles 内的 _stat 同公式：
-    pct = 窗口内 <= current 的样本占比（含当前值自身），z = (current-mean)/std。
-    `seq` 是 [(trade_date, value), ...]，已过有效值清洗、按日期升序。
+def _stat(seq: list, current: float, years: Optional[int], as_of: date) -> dict:
+    """单窗口统计（薄封装，公式唯一来源 `percentile_stat.stat_window`）。
+
+    `years` 是**年数**（3/5/10），`None` = 全历史 `pct_all`；`as_of` 是窗口右端锚点，
+    公共内核会显式加 `d <= as_of` 上界 —— 实时路径的 `seq` 虽天然截至当前，
+    但把上界写进公式才能与落表算历史行时用同一份实现。
     """
-    if days is None:
-        vals = [v for _, v in seq]
-    else:
-        cut = last_date - timedelta(days=days)
-        vals = [v for d, v in seq if d >= cut]
-    if not vals:
-        return {"pct": None, "min": None, "max": None, "median": None, "z": None, "n": 0}
-    n = len(vals)
-    srt = sorted(vals)
-    mean = sum(vals) / n
-    var = sum((x - mean) ** 2 for x in vals) / n if n > 1 else 0.0
-    std = var ** 0.5
-    return {
-        "pct": round(sum(1 for x in vals if x <= current) / n * 100, 2),
-        "min": round(srt[0], 4), "max": round(srt[-1], 4),
-        "median": round((srt[(n - 1) // 2] + srt[n // 2]) / 2, 4),
-        "z": round((current - mean) / std, 2) if std else None,
-        "n": n,
-    }
+    return stat_window(seq, current, years, as_of)
 
 
 def get_percentiles(symbols, metric: str = "pe_ttm") -> dict:
@@ -190,7 +178,12 @@ def get_percentiles(symbols, metric: str = "pe_ttm") -> dict:
     结构与指数 `/index-valuation-percentiles` 对齐（items 内主键是 `symbol`），
     另带个股特有字段：`status`（ok/loss/no_data）、`status_note`、`online_date`、
     `first_date`（数据首日）、`raw_n`/`cleaned_n`、`windows_short`。
-    **分位不落库**，窗口口径与指数分位完全一致（见模块 docstring）。
+    窗口口径与指数分位完全一致（见模块 docstring）。
+
+    **历史分位已按 `as_of` 落 `bds_valuation_percentile`**（2026-11-04）；本函数保留实时
+    计算，供任意 A 股 / 5 指标分析与影子校验。原「窗口每天滑动、存下次日过期」的理由
+    已被 `as_of` 参数化消解。落表只固化 6 个 irs subject × 4 指标 × 3 窗口，
+    本端点的任意选股能力不受影响。
     """
     if metric not in STOCK_METRICS:
         raise ValueError(f"metric 必须是 {STOCK_METRICS} 之一")
@@ -271,9 +264,10 @@ def get_percentiles(symbols, metric: str = "pe_ttm") -> dict:
 
         current = seq[-1][1]
         windows_short = []
-        for key, days in (("pct_all", None), ("pct_10y", WINDOWS["pct_10y"]),
-                          ("pct_5y", WINDOWS["pct_5y"]), ("pct_3y", WINDOWS["pct_3y"])):
-            st = _stat(seq, current, days, last_date)
+        for key, years in (("pct_all", None), ("pct_10y", WINDOW_YEARS["pct_10y"]),
+                           ("pct_5y", WINDOW_YEARS["pct_5y"]),
+                           ("pct_3y", WINDOW_YEARS["pct_3y"])):
+            st = _stat(seq, current, years, last_date)
             base[key] = st
             if st["n"] < MIN_WINDOW_SAMPLES:
                 windows_short.append(key)

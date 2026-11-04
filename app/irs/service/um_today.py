@@ -32,9 +32,9 @@ from server_fast.app.irs.models import (
 from server_fast.app.irs.service.um_plan import effective_trigger
 from server_fast.app.irs.service.um_research import latest
 from server_fast.app.irs.service.um_version import compute_zone, effective_version
-from server_fast.common.db import SessionLocal
 
-# 能取到估值分位的指数标的（方案 P0-4 / P2-1），其余显示 None
+# 历史白名单（方案 P0-4 / P2-1）：读表后不再由本模块过滤，保留供审计与 um_version 注释引用。
+# 落表 subject 由 bds 侧 L1_SUBJECTS 定义（bds 不得反向依赖 irs，🔒4.12）。
 INDEX_PCT_SYMBOLS = {"SHSE.000300", "SHSE.000905", "SPX"}
 
 # 距最近档位 %：pv_* 字段即 (档位/现价-1)*100，取绝对值最小者
@@ -46,59 +46,27 @@ PP_FIELDS = ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")
 def percentiles() -> dict:
     """{(symbol, metric): pct_10y}，失败返回空 dict（分位是纠偏，不是今日页主链）。
 
-    列表页 / 详情抽屉同样复用本函数补 pe_pct/pb_pct（口径唯一，铁律 4.5）。
+    列表页 / 详情抽屉 / 今日页 / 证伪判定同样复用本函数补 pe_pct/pb_pct（口径唯一，🔒4.5）。
 
-    两个分支（2026-11-03 起个股也能算分位）：
-    - 指数：index_valuation.get_percentiles，按 INDEX_PCT_SYMBOLS 白名单过滤
-      （SPX 不在 dbsCfg.INDEX_CODE 里，传入会抛 ValueError，先滤掉）。
-    - 个股：stock_valuation.get_percentiles（bds_daily_valuation 现算不落库，
-      窗口口径与指数一致）。先查 UnderlyingMonitor 全部标的、按 bds_symbol_info
-      过滤出在市 A 股个股（指数/美股/黄金的 market 恒为 NULL，天然被排除；
-      已退市剔除，见 MEMORY §七 铁律 1），status != ok（亏损/无数据/当前值无效）
-      不给出分位——宁空勿错。
+    **2026-11-04 P2 起改读 `bds_valuation_percentile`**（G1 切换 + G2 收口）：
+    分位是按 `as_of` 恒定的纯函数，已由 bds 后台任务按日固化，请求链路不再同步
+    现算 PE/PB 分位（原每次 2.4 s，首屏并发放大到 6.3 s）。6 个消费方一行未改。
+
+    契约保持不变：仍是 0~100 数值、仍只取 `pe_ttm` / `pb_mrq` 两个 metric、
+    `status != ok` 或表空 / 过期 / 单 subject 缺失时该键不出现 ⇒ 页面显示 `—`。
+    **不回落实时计算**（§6.3）：那等于慢问题复发加双口径。
+    分位专页继续走 bds 实时计算，可作 G0b 影子双跑的参照系。
+
+    🔴 回滚：把本函数换回调用 `index_valuation.get_percentiles` /
+    `stock_valuation.get_percentiles` 两分支即可（本次改动均在工作区未提交）；
+    口径回滚还须同时把 `WINDOW_YEARS` 换回天数并重跑 M2，不能只切读取开关。
     """
-    out: dict = {}
-    # 分支一：指数分位（失败不阻断个股分支）
     try:
-        from server_fast.app.bds.services.valuation import index_valuation
-        from server_fast.app.bds.config import Config as dbsCfg
-        known = set(dbsCfg.INDEX_CODE.keys())
-        valid = [c for c in INDEX_PCT_SYMBOLS if c in known]
-        for metric in ("pe_ttm", "pb_mrq"):
-            data = index_valuation.get_percentiles(index_codes=valid, metric=metric)
-            for item in data.get("items", []):
-                p10 = item.get("pct_10y") or {}
-                out[(item["index_code"], metric)] = p10.get("pct")
+        from server_fast.app.bds.services.valuation import percentile_store
+        return percentile_store.read_percentiles()
     except Exception:
-        pass
-    # 分支二：个股分位（在市 A 股才进；status != ok 不给分位）
-    try:
-        from server_fast.app.bds.models import SymbolInfo
-        from server_fast.app.bds.services.valuation import stock_valuation
-
-        symbols = [r[0] for r in SessionLocal().query(UnderlyingMonitor.symbol).all()]
-        if symbols:
-            today = date.today()
-            info_rows = (
-                SessionLocal()
-                .query(SymbolInfo.symbol)
-                .filter(SymbolInfo.symbol.in_(symbols),
-                        SymbolInfo.market.isnot(None))
-                .filter((SymbolInfo.delisted_date.is_(None))
-                        | (SymbolInfo.delisted_date > today))
-                .all()
-            )
-            codes = [r[0] for r in info_rows]
-            for metric in ("pe_ttm", "pb_mrq"):
-                data = stock_valuation.get_percentiles(codes, metric=metric)
-                for item in data.get("items", []):
-                    if item.get("status") != "ok":
-                        continue
-                    p10 = item.get("pct_10y") or {}
-                    out[(item["symbol"], metric)] = p10.get("pct")
-    except Exception:
-        pass
-    return out
+        # 表不存在 / 连接异常时不拖垮今日页主链，宁可显示 —
+        return {}
 
 
 def _is_hit(p: UnderlyingPlan, pp: dict, price) -> bool:

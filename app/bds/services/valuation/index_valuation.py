@@ -32,6 +32,9 @@ from server_fast.app.bds.config import Config as dbsCfg
 from server_fast.app.bds.models import (
     IndexConstituent, IndexConstituentSync, IndexValuation, TradeDate,
 )
+from server_fast.app.bds.services.valuation.percentile_stat import (
+    WINDOW_YEARS, stat_window,
+)
 from server_fast.common.db import SessionLocal
 
 logger = logging.getLogger("uvicorn.error")
@@ -62,8 +65,11 @@ MIN_COVERAGE = 0.98
 # 重算审计阈值（方案 §3.4）：任一历史行指标相对变动超过此比例即报警，不静默改数。
 AUDIT_CHANGE_PCT = 0.005
 
-# 分位窗口（自然日回溯）
-WINDOWS = {"pct_3y": 3 * 365, "pct_5y": 5 * 365, "pct_10y": 10 * 365}
+# 分位窗口（2026-11-04 起为**日历对日** 3/5/10 年，见 docs/估值分位按日落盘方案_2026-11-04.md §1）
+# 旧 WINDOWS = {pct_3y: 1095 天, pct_5y: 1825 天, pct_10y: 3650 天} 已废弃：
+# 10 个自然年含 2~3 个 2/29，3650 天比对日左界晚 2~3 天 ⇒ 窗口少取 1~2 个交易日样本。
+# 单一来源在公共内核 `percentile_stat.WINDOW_YEARS` / `shift_years`（本文件顶部 import），
+# 落表路径与个股分位同调一份，禁止再在这里写天数常量。
 
 # 按快照区间聚合：一条 SQL 覆盖该区间内所有交易日
 SQL_AGGREGATE = text("""
@@ -700,15 +706,19 @@ def list_paged(index_codes=None, start_date: Optional[date] = None,
 def get_percentiles(index_codes=None, metric: str = "pe_ttm") -> dict:
     """分位汇总：当前值 vs 全历史 / 10 年 / 5 年 / 3 年 + z-score + 极值。
 
-    **分位不落库**：窗口每天滑动、当前值每天新增，存下来当天有效次日即过期。
+    **历史分位已按 `as_of` 落 `bds_valuation_percentile`**（2026-11-04）；本函数保留实时计算，
+    供任意指数/指标分析与影子校验。原「窗口每天滑动、存下次日过期」的理由已被 `as_of`
+    参数化消解：分位是 `f(subject, metric, window, as_of)` 的纯函数，时间推移只追加新行。
 
-    窗口口径**唯一**：自然日回溯（3/5/10 年 = 1095/1825/3650 天），不是「最近 N 个交易日」；
-    锚点是该指数**最后一个有值的交易日**（不是 `today`）——数据陈旧时窗口左端不跟着漂，
-    同一份数据算出的分位可复现（评估 §四-2）。
+    窗口口径**唯一**：**日历对日**回溯 3/5/10 年（`as_of=2025-10-23` 的 10 年窗口左界
+    `2015-10-23`；2/29 clamp 到 2/28），不是「最近 N 个交易日」，也不是旧的
+    `1095/1825/3650 自然日`。锚点是该指数**最后一个有值的交易日**（不是 `today`）——
+    数据陈旧时窗口左端不跟着漂，同一份数据算出的分位可复现（评估 §四-2）。
+    公式在公共内核 `percentile_stat.stat_window`，落表路径同调一份。
 
     **陈旧提示**：`as_of` 是本项当前值所属交易日，`is_stale`/`stale_days` 表明它是否落后于
-    个股估值源末日（`bds_daily_valuation` 的 MAX(trade_date)）。旧实现只给 `last_date`、
-    不判断落后，页面会把 T-2 的值当"当前"展示（评估 P1-4）。
+    个股估值源末日（`bds_daily_valuation` 的 ORDER BY ... DESC LIMIT 1）。旧实现只给
+    `last_date`、不判断落后，页面会把 T-2 的值当"当前"展示（评估 P1-4）。
     """
     if metric not in METRICS:
         raise ValueError(f"metric 必须是 {METRICS} 之一")
@@ -750,29 +760,10 @@ def get_percentiles(index_codes=None, metric: str = "pe_ttm") -> dict:
                 continue
 
             last_date, current = rows[-1][0], float(rows[-1][1])
-            seq_all = [float(v) for _, v in rows]
 
-            def _stat(days: Optional[int]) -> dict:
-                if days is None:
-                    seq = seq_all
-                else:
-                    cut = last_date - timedelta(days=days)
-                    seq = [float(v) for d, v in rows if d >= cut]
-                if not seq:
-                    return {"pct": None, "min": None, "max": None, "median": None, "z": None,
-                            "n": 0}
-                n = len(seq)
-                srt = sorted(seq)
-                mean = sum(seq) / n
-                var = sum((x - mean) ** 2 for x in seq) / n if n > 1 else 0.0
-                std = var ** 0.5
-                return {
-                    "pct": round(sum(1 for x in seq if x <= current) / n * 100, 2),
-                    "min": round(srt[0], 4), "max": round(srt[-1], 4),
-                    "median": round((srt[(n - 1) // 2] + srt[n // 2]) / 2, 4),
-                    "z": round((current - mean) / std, 2) if std else None,
-                    "n": n,
-                }
+            # 公式统一走公共内核（含显式 as_of 上界）；`years=None` = 全历史 pct_all
+            def _stat(years: Optional[int]) -> dict:
+                return stat_window(rows, current, years, last_date)
 
             wm = wms.get(code)
             stale = bool(latest_available and last_date < latest_available)
@@ -787,9 +778,9 @@ def get_percentiles(index_codes=None, metric: str = "pe_ttm") -> dict:
                 "is_stale": stale,
                 "stale_days": (latest_available - last_date).days if stale else 0,
                 "pct_all": _stat(None),
-                "pct_10y": _stat(WINDOWS["pct_10y"]),
-                "pct_5y": _stat(WINDOWS["pct_5y"]),
-                "pct_3y": _stat(WINDOWS["pct_3y"]),
+                "pct_10y": _stat(WINDOW_YEARS["pct_10y"]),
+                "pct_5y": _stat(WINDOW_YEARS["pct_5y"]),
+                "pct_3y": _stat(WINDOW_YEARS["pct_3y"]),
                 # 成分新鲜度：分位的可信度取决于成分是否核查到末日
                 "last_change_date": wm.last_change_date.isoformat() if wm and wm.last_change_date else None,
                 "constituent_checked_to": wm.checked_to.isoformat() if wm and wm.checked_to else None,

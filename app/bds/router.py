@@ -86,6 +86,7 @@ from server_fast.app.bds.schemas import (
     OptionSyncPlanOut,
     SymbolInfoOut,
     TradeDateOut,
+    ValuationPctSyncRequest,
 )
 from server_fast.app.bds.services import (
     fetch_realtime_index_prices,
@@ -115,6 +116,7 @@ from server_fast.app.bds.services import (
 from server_fast.app.bds.config import Config
 from server_fast.app.bds.services.valuation import index_valuation
 from server_fast.app.bds.services.valuation import stock_valuation
+from server_fast.app.bds.services.valuation import percentile_store
 from server_fast.app.bds.services.market_data import option_info, option_market
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
@@ -2260,8 +2262,11 @@ def list_index_valuation_percentiles(
 ):
     """指数分位汇总（卡片/表格用）。
 
-    **分位不落库，实时算**：窗口每天滑动、当前值每天新增，存下来当天有效次日即过期。
-    窗口口径唯一：自然日回溯（3/5/10 年 = 1095/1825/3650 天），锚点是各指数最后一个有值的交易日。
+    **历史分位已按 `as_of` 落 `bds_valuation_percentile`**；本端点保留实时计算，
+    供任意指数 / 6 指标分析与影子校验。原「窗口每天滑动、存下次日过期」的理由
+    已被 `as_of` 参数化消解（分位是标的×日期的纯函数，时间推移只追加新行）。
+    窗口口径唯一：**日历对日**回溯 3/5/10 年（如 as_of=2025-10-23 的 10 年窗口
+    左界 2015-10-23；2/29 clamp 到 2/28），锚点是各指数最后一个有值的交易日。
 
     陈旧度：每项带 `as_of`（当前值所属交易日）、`is_stale`、`stale_days`，与顶层
     `latest_trade_date`（个股估值源末日）比较 —— 估值序列没跟上时必须让页面知道
@@ -2304,10 +2309,11 @@ def list_stock_valuation_percentiles(
 ):
     """个股分位汇总（`/irs/valuation-percent` 个股模式，卡片/表格用）。
 
-    **分位不落库，实时算**：单标的直接查 `bds_daily_valuation` 自身历史
-    （唯一键 symbol+trade_date 前缀），无聚合表、无回填任务。
-    窗口口径与 `/index-valuation-percentiles` 完全一致：自然日回溯 3/5/10 年，
-    锚点 = 该标的最后一个有值交易日。
+    **历史分位已按 `as_of` 落 `bds_valuation_percentile`**；本端点保留实时计算，
+    任意 1~10 只 A 股 × 5 指标均不受落表范围限制，同时作影子双跑的参照系。
+    单标的直接查 `bds_daily_valuation` 自身历史（唯一键 symbol+trade_date 前缀）。
+    窗口口径与 `/index-valuation-percentiles` 完全一致：**日历对日**回溯 3/5/10 年
+    （2/29 clamp 到 2/28），锚点 = 该标的最后一个有值交易日。
 
     与指数项的差异：无效当前值（亏损 PE / 负 PB / 负 PCF）不算分位，
     给 `status='loss'` + `status_note`；上市不足窗口期给 `windows_short`。
@@ -2405,6 +2411,129 @@ def sync_index_valuation(req: IndexValuationSyncRequest):
 
         return task
 
+    finally:
+        db.close()
+
+
+def _run_valuation_pct_thread(task_id: int, mode: str, subjects: list,
+                              from_date, total_count: int):
+    """后台线程：估值分位按日落盘重算，结束时把结构化审计写进 task.result。
+
+    与 `_run_valuation_thread` 同构：自建 SessionLocal、复用 `_stop_events`、
+    每轮 commit 刷新 `update_time`（防 5 分钟僵尸清理把长任务误判为 failed）。
+    审计只写 `result`，不写 `errors`（🔒4.8）；`no_data_count` 保持 0 不借用（🔒七·5）。
+    """
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).get(task_id)
+    try:
+        task.status = "running"
+        task.start_time = datetime.now()
+        db.commit()
+
+        def on_progress(done: int, total: int):
+            """逐 subject 刷进度；total_count 的语义是「待算 as_of 行数」。"""
+            ratio = done / total if total else 1.0
+            s = SessionLocal()
+            try:
+                t = s.query(BdsSyncTask).get(task_id)
+                t.done_count = int(ratio * total_count)
+                t.progress = round(ratio * 100, 2)
+                s.commit()
+            finally:
+                s.close()
+
+        stop_event = _stop_events.get(task_id)
+        result = percentile_store.rebuild(
+            mode=mode, subjects=subjects, from_date=from_date,
+            on_progress=on_progress)
+
+        task.status = "stopped" if (stop_event is not None and stop_event.is_set()) else "done"
+        task.done_count = total_count
+        task.success_count = result["rows_upserted"]
+        task.progress = 100
+        task.no_data_count = 0
+        task.error_count = 0
+        task.errors = None
+        task.result = result
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[valuation-pct #{task_id}] {task.status}：{result["rows_upserted"]} 行, '
+              f'跳过 {result.get("skipped_count", 0)} 个标的, '
+              f'变更 {result["audit"]["changed"]}, 孤儿 {result["orphans_deleted"]}, '
+              f'{result["duration_ms"]} ms')
+
+    except Exception as e:
+        logger.exception("估值分位落盘失败 #%s", task_id)
+        task.status = "failed"
+        task.errors = [{"symbol": "", "table": "valuation-percentile",
+                       "message": f"{type(e).__name__}: {e}"}]
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[valuation-pct #{task_id}] 失败: {e}')
+    finally:
+        _stop_events.pop(task_id, None)
+        db.close()
+
+
+@router.post("/sync/valuation-percentile", response_model=BdsSyncTaskOut)
+def sync_valuation_percentile(req: ValuationPctSyncRequest):
+    """启动估值分位按日落盘重算（后台任务），立即返回 task 供轮询。
+
+    **独立端点，不塞 SYNC_MAP / 一键同步 stage**：`bds_sync_task` 是全库一把锁
+    （任意一条 running 即 409，不按 scope），一键同步自己 running 时内部再建任务必然自撞。
+
+    ⚠️ 顺序（§7.4）：批量同步 → 成分增量 → 指数估值增量 → **本任务最后**。
+    系统没有 scheduler/cron，日频靠人工按序点卡片或外部定时调 HTTP。
+    停止：POST /bds/stop/batch-sync?task_id=<id>。
+
+    口径：`as_of` 按上游估值表实际交易日落行，窗口是**日历对日** 3/5/10 年，
+    4 指标 PE(TTM)/PB(MRQ)/PS(TTM)/股息率(%)；`pct_all` 仍由分位专页实时算、不落库。
+    口径由 365 天改对日属 **M2 全量重建强制触发事件**。
+    """
+    db = next(get_db())
+    try:
+        # 1. 参数校验（先于建任务，避免非法入参在任务表里留下垃圾记录）
+        try:
+            p = percentile_store.plan(
+                subjects=req.subjects, mode=req.mode, from_date=req.from_date)
+        except ValueError as ex:
+            raise HTTPException(status_code=400, detail=str(ex))
+        if p["total_count"] == 0:
+            raise HTTPException(status_code=400, detail="所选标的在估值源表里没有任何交易日")
+
+        # 2. 僵尸清理 + 全局互斥
+        _cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409,
+                                detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        # 3. 建任务（scope=valuation_pct，14 字符 ≤ String(16)）
+        task = BdsSyncTask(
+            scope="valuation_pct",
+            scope_params={
+                "mode": req.mode,
+                "subjects": p["subjects"],
+                "from_date": req.from_date.isoformat() if req.from_date else None,
+            },
+            tables=["valuation-percentile"],
+            status="running",
+            total_count=p["total_count"],
+            done_count=0, success_count=0, no_data_count=0, error_count=0,
+            progress=0, errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        # 4. 注册停止信号并启动后台线程
+        _stop_events[task.id] = threading.Event()
+        threading.Thread(
+            target=_run_valuation_pct_thread,
+            args=(task.id, req.mode, p["subjects"], req.from_date, p["total_count"]),
+            daemon=True,
+        ).start()
+        return task
     finally:
         db.close()
 

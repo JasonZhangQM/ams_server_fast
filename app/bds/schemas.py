@@ -849,3 +849,33 @@ class OptionMarketUpdate(BaseModel):
     delta_opt: Optional[Decimal] = Field(default=None, description="delta")
     volume: Optional[int] = Field(default=None, description="成交量")
     open_interest: Optional[int] = Field(default=None, description="持仓量")
+
+
+class ValuationPctSyncRequest(BaseModel):
+    """估值分位按日落盘重算请求体（POST /bds/sync/valuation-percentile，后台任务）。
+
+    2026-11-04 P2。与批量同步 / 成分 / 指数估值共用 `bds_sync_task`（全库一把锁），
+    必须排在「批量同步 → 成分增量 → 指数估值增量」之后；不塞 SYNC_MAP / 一键同步 stage。
+
+    `mode`：
+    - M2（默认、推荐）：6 subject 全历史重建，24 序列滑动窗口 + 幂等 upsert，
+      兜底新增交易日与上游历史修订，不需要脆弱的变更检测；
+    - M1：只补表内最新 as_of 之后的新增交易日；
+    - M3：从 `from_date` 起重算 `[from_date, 末日]`（上游历史补录 / 成分快照变化时）；
+    - auto：用 Python 侧源序列指纹 `input_fp` 自动选 skip / M1 / M3。
+      🔴 绝不用 `MAX(update_time)` 判修订（重复同步同一天会刷时间戳但值没变 ⇒ 误报）。
+
+    **口径变更（365 天 → 日历对日）属 M2 强制触发事件**：上线时必须全量重建，
+    只追加新行会让历史行仍是旧口径。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str = Field(
+        default="M2", description="重算模式: M1 / M2 / M3 / auto（默认 M2 全量重建）")
+    # 不传 = bds 侧 L1 常量（2 指数 + 4 个股）；显式传可在新增标的时覆盖，
+    # 避免在 bds 域 import irs（🔒4.12：bds 只能被依赖）
+    subjects: Optional[list[str]] = Field(
+        default=None, description="标的代码清单；不传 = L1 默认 6 个（2 指数 + 4 个股）")
+    from_date: Optional[date] = Field(
+        default=None, description="M3 的修订起始日（闭区间，含当日）；M3 必填")
