@@ -325,6 +325,11 @@ class GroupAcc(BaseModel, Base):
     cash_acc: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="资金余额")
     fm_acc: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="理财余额")
     cost_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="证券成本")
+    # 风险敞口：账户内各 Group.risk_exposure 之和，由 Group 编辑联动刷新；
+    # 合计行（account='合计'）= 全账户 Group 之和，同由联动刷新
+    # （同步汇总 df 不携带该列，不会被 upsert 覆盖）。NULL = 全部未设置
+    risk_exposure: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), comment="风险敞口（账户内 Group 汇总，合计行为全账户总和，编辑联动刷新；NULL=未设置）")
     value_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="证券市值")
     acc_aset: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="账户价值")
     pf_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="浮动盈亏")
@@ -334,11 +339,6 @@ class GroupAcc(BaseModel, Base):
     diff_dw: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="入金净额")
     diff_dwt: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="划转净额")
     status: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="校验")
-    # 风险敞口：账户内各 Group.risk_exposure 之和，由 Group 编辑联动刷新；
-    # 合计行（account='合计'）= 全账户 Group 之和，同由联动刷新
-    # （同步汇总 df 不携带该列，不会被 upsert 覆盖）。NULL = 全部未设置
-    risk_exposure: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 2), comment="风险敞口（账户内 Group 汇总，合计行为全账户总和，编辑联动刷新；NULL=未设置）")
 
     # ---- 保留的自定义类属性（原样保留，即使引用了其他模型字段）----
     fields_update = [
@@ -362,6 +362,11 @@ class GroupSymbol(Base, BaseModel):
     count: Mapped[int] = mapped_column(Integer, comment="交易次数")
     p_total: Mapped[Optional[int]] = mapped_column(Integer, comment="持仓量")
     cost_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="持仓成本")
+    # 风险敞口：不再人工维护——人工设置已上移到 Group（账户×分类×代码粒度），
+    # 本列 = 同 (category, symbol) 各 Group.risk_exposure 之和，由 Group 编辑联动刷新。
+    # 保留在本表仅供标的页展示；同步白名单不含它，重算不会覆盖。NULL = 全部未设置
+    risk_exposure: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), comment="风险敞口（同标的各 Group 汇总，编辑联动刷新；NULL=未设置）")
     price: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), comment="最新价")
     multiplier: Mapped[Optional[int]] = mapped_column(Integer, comment="乘数")
     value_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), comment="当前市值")
@@ -379,11 +384,6 @@ class GroupSymbol(Base, BaseModel):
     underlying_symbol: Mapped[Optional[str]] = mapped_column(
         String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
         comment="归属标的（irs_underlying_monitor.symbol）；融资融券与未归属为 NULL")
-    # 风险敞口：不再人工维护——人工设置已上移到 Group（账户×分类×代码粒度），
-    # 本列 = 同 (category, symbol) 各 Group.risk_exposure 之和，由 Group 编辑联动刷新。
-    # 保留在本表仅供标的页展示；同步白名单不含它，重算不会覆盖。NULL = 全部未设置
-    risk_exposure: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 2), comment="风险敞口（同标的各 Group 汇总，编辑联动刷新；NULL=未设置）")
 
     # ---- 保留的自定义类属性 ----
     unique_keys = ['category', 'symbol']
