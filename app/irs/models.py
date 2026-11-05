@@ -18,6 +18,7 @@ from sqlalchemy import (
     BigInteger,
     Index,
     Integer,
+    JSON,
     Numeric,
     String,
     Text,
@@ -479,3 +480,100 @@ class UnderlyingTarget(Base, BaseModel):
 
     def __str__(self):
         return f"{self.symbol}@{self.target_pct}%"
+
+
+class UmPercentile(Base, BaseModel):
+    """标的监测**最新**估值分位（对应表 irs_um_percentile，2026-11-05）。
+
+    与 `bds_valuation_percentile`（按日历史，26,816 行）分工：
+    - 历史表的唯一键含 `as_of`，一行 = 一标的一观察日，作存档与审计；
+      生产页面只读「每标的最新一行」，其余 2.6 万行零消费。
+    - 本表**一标的一行**（唯一键 subject_type + symbol），只存锚点（上游序列最后
+      交易日）那一行，供 `/irs/today`、`/irs/underlying-monitors`、详情抽屉、
+      证伪判定、档位纠偏读取。
+
+    口径与历史表**同源**：由 `irs.service.um_percentile` 调
+    `bds.services.valuation.percentile_store.build_rows(..., only_dates={anchor})`
+    生成 ⇒ 同一 `as_of` 行逐值相等，验收可直接两表 `==`。
+    列名 / 类型逐列照抄历史表（🔒4.4：DDL 与模型两步，只比列名/类型/可空）。
+
+    ⚠️ 范围固定 = `irs_underlying_monitor` 全部标的（自动剔除上游无估值数据的
+    SPX / GC00Y）；刷新时**删除**已不在监测表的行（纯镜像），与历史表「孤儿默认保留」
+    的策略相反 —— 撤销范围就必须撤掉行，否则页面会继续读到已移除的标的。
+    ⚠️ `note` 是人工列，**不在 `UPDATE_FIELDS` 白名单**，重算不得覆盖（🔒6.6 哨兵）。
+    """
+
+    __tablename__ = "irs_um_percentile"
+    __table_args__ = (
+        UniqueConstraint("subject_type", "symbol", name="uk_irsum"),
+        Index("k_irsum_calc", "calc_at"),
+    )
+
+    subject_type: Mapped[str] = mapped_column(String(8), nullable=False, comment="index / stock")
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="gm 格式代码")
+    as_of: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="锚点：该标的上游估值序列最后一个交易日")
+    source_as_of: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="该标的所属上游估值表末日，指数/个股各自")
+    first_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    raw_n: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    # 锚点当日原始值（个股未清洗，可为负 / NULL）
+    current_pe: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 4), nullable=True, comment="PE(TTM)")
+    current_pb: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 4), nullable=True, comment="PB(MRQ)")
+    current_ps: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 4), nullable=True, comment="PS(TTM)")
+    current_dy: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 4), nullable=True, comment="股息率(%)，百分数（4.7224=4.72%），非小数")
+
+    # 12 个分位列：4 指标 × 3 窗口（不落 pct_all）
+    pe_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pe_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pe_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pb_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pb_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    pb_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ps_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ps_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    ps_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    dy_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    dy_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    dy_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+
+    # 每指标 3 窗口的 {pct,min,max,median,z,n}
+    pe_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    pb_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    ps_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    dy_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # 每指标独立状态：个股可能仅 dy 无有效值，其余三个照常出分位
+    status_pe: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="ok", comment="ok/loss/no_data")
+    status_pb: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
+    status_ps: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
+    status_dy: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
+    status_note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    windows_short: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, comment="按 metric 分组的短窗口标记（n<250）")
+    windows_undercovered: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, comment="按 metric 分组的覆盖不足窗口（左界早于数据首日）")
+    window_cut: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, comment="锚点日的 3/5/10y 实际左界，口径审计用")
+
+    cleaned_n_pe: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cleaned_n_pb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cleaned_n_ps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cleaned_n_dy: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    input_fp: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, comment="4 指标源序列指纹（Python 侧 sha256）")
+    calc_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, comment="本次计算时刻（派生表必带）")
+    note: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, comment="人工标注（哨兵列，重算不覆盖）")
+
+    unique_keys = ["subject_type", "symbol"]
+
+    def __str__(self):
+        return f"{self.symbol}@{self.as_of}: pe={self.pe_pct_10y} pb={self.pb_pct_10y}"

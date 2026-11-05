@@ -800,7 +800,10 @@ class BdsSyncTask(Base, BaseModel):
     # option_info    = 期权合约字典（端点已删，历史任务仍在，前端 NON_BATCH_SCOPES 必须排除）
     # valuation_pct  = 估值分位按日落盘重算（POST /bds/sync/valuation-percentile，14 字符；
     #                   2026-11-04 P2 新增。全库一把锁 ⇒ 必须排在批量同步/成分/指数估值之后）
-    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill/index_valuation/macro_sync/bills_import/option_market/option_info/valuation_pct")
+    # um_pct_latest = 最新估值分位截面刷新（irs 域 POST /irs/sync/um-percentile，13 字符；
+    #                   2026-11-05 新增。范围固定=irs_underlying_monitor，一标的一行，
+    #                   供 /irs/today 与 /irs/underlying-monitors 读取）
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill/index_valuation/macro_sync/bills_import/option_market/option_info/valuation_pct/um_pct_latest")
     scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols} 或 {index_codes/start_date} 或 {stages}")
     tables: Mapped[list] = mapped_column(JSON, nullable=False, comment="要同步的表列表")
     mark_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", comment="全部成功后是否写 sync_at: 1=是 0=否")

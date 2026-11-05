@@ -49,22 +49,22 @@ def percentiles() -> dict:
 
     列表页 / 详情抽屉 / 今日页 / 证伪判定同样复用本函数补 pe_pct/pb_pct（口径唯一，🔒4.5）。
 
-    **2026-11-04 P2 起改读 `bds_valuation_percentile`**（G1 切换 + G2 收口）：
-    分位是按 `as_of` 恒定的纯函数，已由 bds 后台任务按日固化，请求链路不再同步
-    现算 PE/PB 分位（原每次 2.4 s，首屏并发放大到 6.3 s）。6 个消费方一行未改。
+    **2026-11-05 起改读 `irs_um_percentile`（最新截面表）**：一标的一行、≤8 行，
+    由 `POST /irs/sync/um-percentile` 刷新。上一版读 `bds_valuation_percentile`
+    （按日历史，26,816 行）中的「每标的最新一行」——那 2.6 万行对页面零价值，
+    读取侧还要按 15 天窗口回捞再分组，随标的扩容会线性变慢。
 
-    契约保持不变：仍是 0~100 数值、仍只取 `pe_ttm` / `pb_mrq` 两个 metric、
-    `status != ok` 或表空 / 过期 / 单 subject 缺失时该键不出现 ⇒ 页面显示 `—`。
-    **不回落实时计算**（§6.3）：那等于慢问题复发加双口径。
-    分位专页继续走 bds 实时计算，可作 G0b 影子双跑的参照系。
+    契约不变：仍是 0~100 数值、仍只取 `pe_ttm` / `pb_mrq` 两个 metric、
+    `status != ok` 或表空 / 单标的缺失时该键不出现 ⇒ 页面显示 `—`。
+    **不回落实时计算**：那等于慢问题复发加双口径。
+    分位专页继续走 bds 实时计算，可作影子双跑的参照系。
 
-    🔴 回滚：把本函数换回调用 `index_valuation.get_percentiles` /
-    `stock_valuation.get_percentiles` 两分支即可（本次改动均在工作区未提交）；
-    口径回滚还须同时把 `WINDOW_YEARS` 换回天数并重跑 M2，不能只切读取开关。
+    🔴 回滚：换回 `percentile_store.read_percentiles()`（历史表仍在、仍在更新），
+    或再往前换回 `index_valuation.get_percentiles` / `stock_valuation.get_percentiles`。
     """
     try:
-        from server_fast.app.bds.services.valuation import percentile_store
-        return percentile_store.read_percentiles()
+        from server_fast.app.irs.service import um_percentile
+        return um_percentile.read_map()
     except Exception:
         # 表不存在 / 连接异常时不拖垮今日页主链，宁可显示 —
         return {}

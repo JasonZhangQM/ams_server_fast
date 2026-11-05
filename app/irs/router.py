@@ -7,7 +7,9 @@
 - POST /irs/sync/{target}               按 target 触发对应 service 函数链（4 种 target）
 """
 from datetime import date, datetime
+import logging
 import re
+import threading
 from typing import Callable, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +19,9 @@ from sqlalchemy.orm import Session
 
 from server_fast.app.irs import service
 from server_fast.app.bds.config import Config as BdsCfg
+from server_fast.app.bds.models import BdsSyncTask
+from server_fast.app.bds.schemas import BdsSyncTaskOut
+from server_fast.app.bds.sync_task_utils import STOP_EVENTS, cleanup_zombies
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
@@ -52,10 +57,11 @@ from server_fast.app.irs.schemas import (
     UnderlyingTargetOut,
     UnderlyingTargetSave,
 )
-from server_fast.common.db import get_db
+from server_fast.common.db import get_db, SessionLocal
 from server_fast.common.pagination import PageResponse
 
 router = APIRouter(prefix="/irs", tags=["irs"])
+logger = logging.getLogger("uvicorn.error")
 
 
 # =========================================================================
@@ -1010,6 +1016,136 @@ def list_discount_options():
 # =========================================================================
 # POST 同步路由
 # =========================================================================
+
+# -------------------------------------------------------------------------
+# 最新估值分位截面表（irs_um_percentile，2026-11-05）
+# 🔴 必须注册在 `POST /sync/{target}` 之前：FastAPI 按注册顺序匹配，catch-all 在前
+#    会把 /sync/um-percentile 吃掉并返回「unknown target」。
+# -------------------------------------------------------------------------
+
+def _run_um_pct_thread(task_id: int, total: int, stop_event: threading.Event):
+    """后台线程：刷新最新分位截面表，结构化审计写进 task.result。
+
+    与 `_run_valuation_pct_thread`（bds）同构：自建 SessionLocal、复用共享
+    `STOP_EVENTS`（`POST /bds/stop/batch-sync` 可停）、每标的一次 commit 刷
+    `update_time`（防 5 分钟僵尸清理误判）。审计只写 `result`，不写 `errors`（🔒4.8）。
+    """
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).get(task_id)
+    try:
+        task.status = "running"
+        task.start_time = datetime.now()
+        db.commit()
+
+        def on_progress(done: int, total_: int):
+            s = SessionLocal()
+            try:
+                t = s.query(BdsSyncTask).get(task_id)
+                t.done_count = done
+                t.progress = round(done / total_ * 100, 2) if total_ else 100
+                s.commit()
+            finally:
+                s.close()
+
+        result = service.um_percentile.refresh(
+            on_progress=on_progress, should_stop=stop_event.is_set)
+
+        task.status = "stopped" if stop_event.is_set() else "done"
+        task.done_count = total
+        task.success_count = result["rows_upserted"]
+        task.progress = 100
+        task.no_data_count = 0
+        task.error_count = 0
+        task.errors = None
+        task.result = result
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[um-pct-latest #{task_id}] {task.status}：'
+              f'{result["rows_upserted"]} 行 / 删 {result["rows_deleted"]}，'
+              f'过滤无数据 {result["excluded_no_data"]}，{result["duration_ms"]} ms')
+    except Exception as e:
+        logger.exception("最新分位刷新失败 #%s", task_id)
+        task.status = "failed"
+        task.errors = [{"symbol": "", "table": "irs-um-percentile",
+                        "message": f"{type(e).__name__}: {e}"}]
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[um-pct-latest #{task_id}] 失败: {e}')
+    finally:
+        STOP_EVENTS.pop(task_id, None)
+        db.close()
+
+
+@router.post("/sync/um-percentile", response_model=BdsSyncTaskOut)
+def sync_um_percentile():
+    """刷新 `irs_um_percentile`（最新估值分位，一标的一行）。
+
+    **范围固定 = `irs_underlying_monitor` 全部标的**，无入参、无范围选择；上游两张
+    估值表都查不到的标的（SPX 走 CAPE、GC00Y 无 PE）自动剔除并记 `excluded_no_data`。
+    范围外（监测表已删）的行会被删除 —— 本表是监测表的纯镜像。
+
+    口径与 `bds_valuation_percentile` 同源（同一个 `build_rows`），只取锚点那一行；
+    全量重算（不做增量），6~8 标的约 2~4 s。
+
+    ⚠️ 与所有同步任务共用 `bds_sync_task` 全库一把锁：任意任务 running 时返回 409。
+    建议顺序：批量同步 → 成分增量 → 指数估值增量 → **本任务**（历史落盘可另行按需跑）。
+    停止：`POST /bds/stop/batch-sync?task_id=<id>`。
+    """
+    db = next(get_db())
+    try:
+        # 1. 先校验范围，避免非法状态在任务表留垃圾记录
+        symbols = service.um_percentile.monitor_symbols(db)
+        if not symbols:
+            raise HTTPException(status_code=400,
+                                detail="标的监测表为空，无处可刷（先在 /irs/underlying-monitors 加标的）")
+
+        # 2. 僵尸清理 + 全局互斥（与 bds 各同步端点同一把锁）
+        cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409,
+                                detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        # 3. 建任务（scope=um_pct_latest，13 字符 ≤ String(16)）
+        task = BdsSyncTask(
+            scope="um_pct_latest",
+            scope_params={
+                "subjects": symbols,
+                "subject_count": len(symbols),
+                "range_source": "irs_underlying_monitor",
+            },
+            tables=["irs-um-percentile"],
+            status="running",
+            total_count=len(symbols),
+            done_count=0, success_count=0, no_data_count=0, error_count=0,
+            progress=0, errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        # 4. 注册停止信号 + 起 daemon 线程
+        stop_event = threading.Event()
+        STOP_EVENTS[task.id] = stop_event
+        threading.Thread(
+            target=_run_um_pct_thread,
+            args=(task.id, len(symbols), stop_event),
+            daemon=True,
+        ).start()
+        return task
+    finally:
+        db.close()
+
+
+@router.get("/um-percentile/stats")
+def um_percentile_stats():
+    """最新分位表只读概览（行数 / calc_at / 各标的 as_of 与 pe、pb 10y 分位）。
+
+    供批量同步卡片展示「表是否新鲜」；**不参与页面读取链路**，列表页/今日页只读
+    `um_today.percentiles()`。
+    """
+    return service.um_percentile.stats()
+
 
 @router.post("/sync/{target}")
 def sync_data(target: str):

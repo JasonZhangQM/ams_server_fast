@@ -34,6 +34,7 @@ from server_fast.app.irs.service import (
     um_review,
     um_map,
     um_today,
+    um_percentile,
 )
 
 __all__ = [
@@ -58,4 +59,6 @@ __all__ = [
     'um_review',
     'um_map',
     'um_today',
+    # 2026-11-05：最新估值分位截面表（irs_um_percentile）
+    'um_percentile',
 ]
