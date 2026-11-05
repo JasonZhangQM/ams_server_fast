@@ -502,10 +502,13 @@ def plan(subjects: Optional[list[str]] = None, mode: str = "M2",
 def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             from_date: Optional[date] = None,
             prune_orphans: bool = False,
-            on_progress: Optional[Callable[[int, int], None]] = None) -> dict:
+            on_progress: Optional[Callable[[int, int], None]] = None,
+            should_stop: Optional[Callable[[], bool]] = None) -> dict:
     """执行重算，返回结构化审计（写进 bds_sync_task.result）。
 
     `on_progress(done, total)` 由后台线程传入，用于刷任务进度。
+    `should_stop()` 由后台线程传入停止信号；逐 subject 检查，命中即中止循环，
+    已算完的 subject 仍会落库（停止是「不再继续」而不是「丢弃已完成」）。
     `prune_orphans=True` 且 `subjects is None` 且 mode ∈ (M2, auto) 时才清理孤儿标的；
     默认关闭，单标的/子集重算永不删别人的历史行（P0-1）。
     """
@@ -555,6 +558,10 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
         source_by_subject: dict[str, Optional[date]] = {}
 
         for i, (t, s) in enumerate(pairs):
+            # 停止信号：逐 subject 检查（单个 subject 的全量重建是原子步骤，不做中途打断）
+            if should_stop is not None and should_stop():
+                logger.warning("估值分位重算收到停止信号，已处理 %s/%s 个标的", i, len(pairs))
+                break
             # P1-6：该 subject 所属源表的末日，不拿全局（个股表）末日判指数
             end_t = ends.get(t)
             source_by_subject[s] = end_t

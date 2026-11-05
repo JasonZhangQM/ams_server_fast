@@ -1050,10 +1050,13 @@ def _run_um_pct_thread(task_id: int, total: int, stop_event: threading.Event):
         result = service.um_percentile.refresh(
             on_progress=on_progress, should_stop=stop_event.is_set)
 
-        task.status = "stopped" if stop_event.is_set() else "done"
-        task.done_count = total
+        stopped = stop_event.is_set()
+        task.status = "stopped" if stopped else "done"
+        # 与批量同步一致：停止时进度停在最后一次 on_progress 的位置，不伪装成 100%
+        if not stopped:
+            task.done_count = total
+            task.progress = 100
         task.success_count = result["rows_upserted"]
-        task.progress = 100
         task.no_data_count = 0
         task.error_count = 0
         task.errors = None

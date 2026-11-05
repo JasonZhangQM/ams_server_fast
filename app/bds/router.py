@@ -2448,12 +2448,16 @@ def _run_valuation_pct_thread(task_id: int, mode: str,
         stop_event = _stop_events.get(task_id)
         result = percentile_store.rebuild(
             mode=mode, subjects=subjects, from_date=from_date,
-            prune_orphans=prune_orphans, on_progress=on_progress)
+            prune_orphans=prune_orphans, on_progress=on_progress,
+            should_stop=stop_event.is_set if stop_event is not None else None)
 
-        task.status = "stopped" if (stop_event is not None and stop_event.is_set()) else "done"
-        task.done_count = total_count
+        stopped = bool(stop_event is not None and stop_event.is_set())
+        task.status = "stopped" if stopped else "done"
+        # 与批量同步一致：停止时进度停在最后一次 on_progress 的位置，不伪装成 100%
+        if not stopped:
+            task.done_count = total_count
+            task.progress = 100
         task.success_count = result["rows_upserted"]
-        task.progress = 100
         task.no_data_count = 0
         task.error_count = 0
         task.errors = None
