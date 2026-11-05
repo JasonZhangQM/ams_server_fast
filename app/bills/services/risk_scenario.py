@@ -343,6 +343,26 @@ def _option_position(g: Group, contracts: dict, cfg_info: dict, market: dict,
             f"期权 {g.symbol} 的快照 {mkt.trade_date} 缺标的价 price_ud，"
             f"拒绝混用其它日期的标的价")
 
+    # ── 量纲闸（2026-11-05 事故后加，勿删）────────────────────────────
+    # au 的 price_ud 曾被写成期权自身价格 8.74（应为标的期货 867.46），与 K=840
+    # 差两个数量级：义务仓保证金高估 6.3 倍、M05 净值从 +16 万算成 −65 万，
+    # 而全链只留一句「IV 反解失败」的 warning，照样出数。
+    # 正常合约的 S/K 必落在 [0.2, 5]；越界只可能是取错了列。
+    k_num = float(spec.strike or 0)
+    if k_num > 0 and not (k_num * 0.2 <= S0 <= k_num * 5):
+        raise ValueError(
+            f"{g.symbol} 标的价与行权价量级不符：S0={S0:g}、K={k_num:g}"
+            f"（S/K={S0 / k_num:.4f}），疑似 {mkt.trade_date} 的 price_ud 写错，拒绝计算")
+
+    # 时间价值闸：无套利下权利金不可能低于内在价值。一旦为负，说明标的价与
+    # 权利金不同日或不同合约，后续 BS 重估与保证金公式全都没有意义。
+    cp_chk = (spec.cp or "P").upper()
+    iv0 = intrinsic(S0, k_num, cp_chk)
+    if px_equity - iv0 < 0:
+        raise ValueError(
+            f"{g.symbol} 权利金 {px_equity:g} 低于按 S0={S0:g} 计的内在价值 {iv0:g}，"
+            f"时间价值为负（{mkt.trade_date}），行情自相矛盾，拒绝计算")
+
     # shex 义务仓保证金要用标的期货的保证金率（scope='{交易所}.{品种}'）
     fut_m_rate = None
     if mtype == "shex":
