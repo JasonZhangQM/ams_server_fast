@@ -126,18 +126,22 @@ def groups_of(
     category: str | None = None,
     symbol: str | None = None,
 ) -> list[dict]:
-    """该标的的合约行分页（id 倒序）；分类精确、合约模糊。"""
+    """该标的的合约行分页（分类精确、合约模糊）。
+
+    排序：风险敞口倒序、id 倒序兜底，保证分页结果确定。
+    MySQL 中 NULL 被视为最小值，``DESC`` 天然把 NULL 排在最后，无需额外的 NULL 兜底键。
+    """
     conds, params = _group_filters(category, symbol)
     params.update({"s": underlying_symbol, "lim": limit, "off": offset})
     sql = text(f"""
         SELECT g.id, g.category, g.symbol, g.count, g.pf_total,
-               g.p_total, g.cost_total, g.price, g.multiplier,
+               g.p_total, g.cost_total, g.risk_exposure, g.price, g.multiplier,
                g.value_total, g.pl_all, g.pfl_all,
                (SELECT COUNT(*) FROM bills_bill b
                  WHERE b.category = g.category AND b.symbol = g.symbol) AS bill_rows
         FROM bills_group_symbol g
         WHERE g.underlying_symbol = :s{conds}
-        ORDER BY g.id DESC
+        ORDER BY g.risk_exposure DESC, g.id DESC
         LIMIT :lim OFFSET :off
     """)
     return [dict(r) for r in db.execute(sql, params).mappings().all()]
