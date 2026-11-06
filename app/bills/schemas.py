@@ -476,6 +476,68 @@ class RiskBoardFirstCallOut(BaseModel):
     margin: Optional[float] = None  # 临界点保证金
 
 
+class BudgetScopeOut(BaseModel):
+    """单个品种组的额度读数。"""
+
+    scope: str  # index_fut / gold / opt_short / etf_short / equity / other
+    name: str  # 中文名
+    margin: float  # 该组当前保证金占用
+    pct: Optional[float] = None  # 占账户净值比例
+    cap: Optional[float] = None  # 上限；null=未设上限（只报不判）
+    headroom: Optional[float] = None  # 额度 = net0 × cap − margin
+    per_lot: Optional[float] = None  # 该组当前每手保证金（组内最大）
+    lots: int = 0  # 还能开几手
+    status: str = "ok"  # ok / over / unknown
+
+
+class BudgetTotalOut(BaseModel):
+    """账户总闸（四档读数）。"""
+
+    cap: float  # 保证金占用上限（0.85）
+    reserve: float  # 其中只留给预设加仓点的一块（0.15）
+    usable: float  # 日常可开比例 = cap − reserve（0.70）
+    gate_now: float  # net0 × usable − margin(0)
+    gate_stress: float  # 判据：net(+stress) × usable − margin(+stress)
+    gate_stress_max: float  # 含加仓包的极限，仅展示不参与取 min
+    status: str  # ok / over / block / skip
+
+
+class BudgetAccountOut(BaseModel):
+    """单账户预算卡。"""
+
+    net0: float  # 模型盯市净值
+    book_net: float  # 账面净值（acc_aset − diff_br）
+    book_gap: float  # net0 − 账面净，非 0 时必须提示（BS 重估差）
+    margin: float
+    total: BudgetTotalOut
+    by_scope: list[BudgetScopeOut]
+    headroom: Optional[float] = None  # 取 min 后的可开额度
+    binding: str  # 取到 min 的约束：scope 名 / total@now / total@stress
+    lots: int = 0  # 可开手数
+    openable: bool = False  # 额度>0 且够一手才算能开
+    per_lot_margin: Optional[float] = None
+    verdict: str = "ok"  # block / over / ok / skip
+
+
+class BudgetSummaryOut(BaseModel):
+    """全账户汇总。"""
+
+    verdict: str
+    judged_accounts: int
+    blocked_accounts: list[str]
+    headroom_total: Optional[float] = None
+
+
+class BudgetOut(BaseModel):
+    """风险预算块（bills/services/budget.py）。"""
+
+    stress_drop: float  # 压力档，0.15 = 标的再跌 15%
+    mode: str  # 固定 sync
+    accounts: dict[str, BudgetAccountOut]
+    symbols: dict[str, dict[str, str]]  # 合约 → {acct, scope}，加仓点查额度用
+    summary: BudgetSummaryOut
+
+
 class RiskBoardOut(BaseModel):
     """风险看板完整响应（字段说明与 risk_scenario.compute() 一一对应）。"""
 
@@ -497,6 +559,7 @@ class RiskBoardOut(BaseModel):
     grid: dict[str, dict[str, dict[str, RiskBoardScenarioOut]]]  # [mode][drop_pct][account]
     first_call: dict[str, Optional[RiskBoardFirstCallOut]]  # [mode] 最近追保点
     first_call_all: dict[str, dict[str, Optional[RiskBoardFirstCallOut]]]  # [mode][account]
+    budget: BudgetOut  # 风险预算与加仓额度
     mode_names: dict[str, str]  # 情景模式中文名
     steps: list[float]  # 情景档位（负数=涨幅）
     upside_steps: list[float]  # 上行情景档位（负数=涨幅）

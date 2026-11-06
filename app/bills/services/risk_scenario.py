@@ -39,6 +39,7 @@ from server_fast.app.bills.models import (
     RiskParam,
     ScenarioGrid,
 )
+from server_fast.app.bills.services import budget
 from server_fast.common.db import SessionLocal
 
 ENGINE_VER = "v2.0"
@@ -124,7 +125,10 @@ def implied_vol(px: float, S: float, K: float, T: float, cp: str) -> Optional[fl
 def _load_params(db) -> dict:
     """读风险参数：{(scope, key): value}，同键取生效日 <= 今天中最新的一条。
 
-    v2.0 起只消费 `margin_rate`；quote/vol/underlying_price 已随 2026-10-28 清理删除。
+    消费两类键：
+    - `margin_rate`：保证金率（`CFFEX.IC` / `SHFE.au` …，见 `load_context`）
+    - `budget_*`：风险预算上限（`budget_pct:<品种组>` / `budget_total` / `budget_reserve`
+      / `budget_stress`，见 `services/budget.py`）。账户级 scope=账户名，全局 scope=`*`
     """
     today = date.today()
     rows = (
@@ -579,7 +583,9 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
             d1 = px * mult * qty * 0.01
             max_loss = abs(px * mult * qty)
             nominal = max_loss
-            extra = {}
+            # 期货 delta 恒 ±1（方向取持仓符号）：减仓排序要算「保证金效率」，
+            # 不给它就和期权不可比（2026-11-06，方案改造 5）
+            extra = {"delta": 1.0 if qty > 0 else -1.0}
         pos_detail.append({
             "acct": p["acct"], "symbol": p["name"], "kind": p["kind"],
             "und_key": p["und_key"], "qty": p["qty"], "nominal": round(nominal, 2),
@@ -591,10 +597,13 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
 
     # 情景矩阵：三模式 × (上涨三档 + 下跌七档) × 分账户
     grid = {}
+    raw_stress = None
     for mode in MODES:
         rows = {}
         for d in STEPS:
             r = run(ctx, mode, d, horizon, iv_mult)
+            if mode == "sync" and abs(d - budget.STRESS_DROP) < 1e-9:
+                raw_stress = r  # 预算主口径要未四舍五入的 net/margin，且与下面同一时点
             eq_total = sum(x["eq"] for x in r["accounts"].values())
             row = {"ALL": {
                 "loss": round(r["loss"], 2), "net": round(r["net"], 2),
@@ -646,6 +655,9 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
         }
 
     net_total = sum(net0.values())
+    if raw_stress is None:  # STEPS 里必须有压力档，否则预算主口径无从取数
+        raise ValueError(f"情景档位缺压力档 {budget.STRESS_DROP:.0%}，无法计算风险预算")
+
     return {
         "engine_ver": ENGINE_VER,
         "calc_date": ctx["calc_date"].isoformat(),
@@ -664,6 +676,8 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
         "grid": grid,
         "first_call": first_call,
         "first_call_all": first_call_all,
+        # 风险预算：在 grid/base 之上做后处理，判据取最严档（见 services/budget.py）
+        "budget": budget.evaluate(ctx, ctx["params"], base, raw_stress),
         "mode_names": MODE_NAMES,
         "steps": STEPS,
         "upside_steps": UPSIDE_STEPS,

@@ -16,7 +16,7 @@ import re
 import threading
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, or_, text
+from sqlalchemy import and_, column, func, or_, select, table, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -55,11 +55,15 @@ from server_fast.app.bills.schemas import (
     ProfitYearOut,
     RiskBoardOut,
 )
-from server_fast.app.irs.models import UnderlyingMonitor
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
 router = APIRouter(prefix="/bills", tags=["bills"])
+
+# irs_underlying_monitor.symbol 的子查询：用表名字符串构造，不 import irs 模型。
+# 依赖方向为 irs → bills 单向（🔒4.12），bills 侧跨模块取数一律走字符串表名，
+# 避免 models 互相 import 造成循环导入。
+_MONITOR_SYMBOL_SUBQ = select(column("symbol")).select_from(table("irs_underlying_monitor"))
 
 # 期权码尾部行权价的兜底解析（查表 miss 时用，覆盖 CFFEX `-P-4000` / SHFE `C1040`
 # 两种风格；ETF 8 位数字券商码不含行权价，不命中即 None）
@@ -431,13 +435,13 @@ def list_group_symbols(
                              GroupSymbol.symbol.notin_(sorted(VIRTUAL_SYMBOLS)),
                              or_(
                                  GroupSymbol.underlying_symbol.isnot(None),
-                                 GroupSymbol.symbol.in_(db.query(UnderlyingMonitor.symbol))))
+                                 GroupSymbol.symbol.in_(_MONITOR_SYMBOL_SUBQ)))
     elif mapped == "no":
         # 与 unmapped-count 同口径（constants.is_attachable）：排除资金流水行与同代码自动命中
         query = query.filter(GroupSymbol.category.in_(TRADE_CATS),
                              GroupSymbol.symbol.notin_(sorted(VIRTUAL_SYMBOLS)),
                              GroupSymbol.underlying_symbol.is_(None),
-                             ~GroupSymbol.symbol.in_(db.query(UnderlyingMonitor.symbol)))
+                             ~GroupSymbol.symbol.in_(_MONITOR_SYMBOL_SUBQ))
     # 过滤后总数（在 offset/limit 之前计算）
     total = query.count()
     items = query.offset(offset).limit(limit).all()
@@ -494,7 +498,8 @@ def count_unmapped_group_symbols(db: Session = Depends(get_db)):
 
     ⚠️ 必须声明在 `/group-symbols/{id_}` 之前，否则 "unmapped-count" 会被当成 id。
     """
-    underlying_symbols = {r[0] for r in db.query(UnderlyingMonitor.symbol).all()}
+    underlying_symbols = {r[0] for r in db.execute(
+        text("SELECT symbol FROM irs_underlying_monitor"))}
     rows = db.query(GroupSymbol.category, GroupSymbol.symbol, GroupSymbol.underlying_symbol).all()
     mapped_n = unmapped_n = excluded_n = 0
     for cat, sym, um in rows:
@@ -588,7 +593,10 @@ def update_group_symbol_vm(
             status_code=400,
             detail=f"{gs.category} / {gs.symbol} 是资金流水行，不参与标的归属")
     if payload.underlying_symbol:
-        exists = db.query(UnderlyingMonitor.symbol).filter(UnderlyingMonitor.symbol == payload.underlying_symbol).first()
+        exists = db.execute(
+            text("SELECT 1 FROM irs_underlying_monitor WHERE symbol = :s LIMIT 1"),
+            {"s": payload.underlying_symbol},
+        ).first()
         if exists is None:
             raise HTTPException(status_code=400,
                                 detail=f"标的 {payload.underlying_symbol} 不在标的监测里，请先新增标的")
@@ -784,13 +792,70 @@ def _cascade_risk_exposure(db: Session, group: Group) -> None:
 # 同步路由
 # =========================================================================
 
+def _finish_risk_task(task_id: int, status: str, result: dict) -> None:
+    """收尾：写任务状态与结构化结果（独立 session，run_and_persist 内部也自管 session）。"""
+    db = SessionLocal()
+    try:
+        t = db.get(BdsSyncTask, task_id)
+        if t is None:
+            return
+        t.status = status
+        t.end_time = datetime.now()
+        t.result = result
+        t.progress = Decimal(100) if status == "done" else Decimal(0)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _persist_risk_grid() -> dict:
+    """情景网格落库（挂在 /sync/group 末段，改造 6）。
+
+    🔒4.8 派生表重算必须任务化 + `bds_sync_task` 互斥：本步骤在共用任务表里登记
+    `scope=bills_risk`（与 bills_import 一起构成 bills 域的全局互斥）。
+
+    失败**不阻断**调用方：期权行情过期（T−2）是预期业务异常，不该连累账单净值汇总；
+    结果写进 `task.result` 与返回体，由前端提示。
+    """
+    from server_fast.app.bills.services import risk_scenario
+
+    db = SessionLocal()
+    try:
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running is not None:
+            return {"status": "skipped",
+                    "reason": f"已有任务 {running.id}({running.scope}) 在运行，本次不重算"}
+        task = BdsSyncTask(scope="bills_risk", tables=["bills_scenario_grid"],
+                           mark_synced=0, status="running",
+                           start_time=datetime.now(), progress=Decimal(0))
+        db.add(task)
+        db.commit()
+        task_id = task.id
+    finally:
+        db.close()
+
+    try:
+        out = risk_scenario.run_and_persist()
+    except Exception as e:  # noqa: BLE001 —— 网格只是曲线原料，不阻断同步
+        _finish_risk_task(task_id, "failed", {"error": str(e)})
+        return {"status": "failed", "task_id": task_id, "reason": str(e)}
+
+    b = out["board"]
+    summary = {"calc_date": b["calc_date"], "rows": out["rows_upserted"],
+               "disabled": len(out["disabled_contracts"]),
+               "verdict": b["budget"]["summary"]["verdict"]}
+    _finish_risk_task(task_id, "done", summary)
+    return {"status": "ok", "task_id": task_id, **summary}
+
+
 # 合并后的同步路由：顺序执行实时估值 → 持仓归零清空风险敞口 → 标的汇总 → 账户汇总
 @router.post("/sync/group")
 def sync_group():
-    """触发实时估值 + 标的汇总 + 账户汇总同步。
+    """触发实时估值 + 标的汇总 + 账户汇总同步，末段重算风险情景网格。
 
     顺序执行：value_float_em_sql → clear_zero_position_risk_sql
-    → upsert_group_symbol_sql → upsert_group_acc_sql。
+    → upsert_group_acc_sql → upsert_group_symbol_sql → persist_risk_grid。
+    末段失败不影响前四步结果（网格只服务「首个追保点趋势」曲线）。
     """
     from server_fast.app.bills.services.value_calc import value_float_em_sql
     from server_fast.app.bills.services.group_summary import (
@@ -802,6 +867,7 @@ def sync_group():
             ("clear_zero_position_risk_sql", clear_zero_position_risk_sql),
             ("upsert_group_acc_sql", upsert_group_acc_sql),
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
+            ("persist_risk_grid", _persist_risk_grid),
         ]
     )
 
