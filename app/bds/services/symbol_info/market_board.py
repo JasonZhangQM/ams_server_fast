@@ -14,6 +14,11 @@ em（东财 Excel）与 gm（get_instruments）两条通道都在落库前调用
 """
 from typing import Optional
 
+
+# 指数行业的唯一识别口径（来自 `bds_symbol_info.industry`，由东财 Excel 的
+# 「代码信息(手动添加).xlsx」写入；gm 通道不写该列）
+INDEX_INDUSTRY = "A股指数"
+
 # (交易所, 代码前 3 位) -> (市场, 板块)
 #
 # 采用【白名单】而非「按交易所推市场」：上证指数 SHSE.000001 形如 SHSE.xxxxxx，
@@ -53,3 +58,24 @@ def derive_market_board(symbol: str) -> tuple[Optional[str], Optional[str]]:
     if exchange == "BJSE":
         return BJSE_MARKET_BOARD
     return BOARD_PREFIX_MAP.get((exchange, code[:3]), (None, None))
+
+
+def resolve_sec_type(industry: Optional[str], market: Optional[str]) -> Optional[str]:
+    """按证券信息表字段判定标的类型：'index' / 'stock' / None（无法判定，跳过）。
+
+    ⚠️ 判定顺序不可调换：
+      1) `industry == 'A股指数'` → index（唯一可靠的指数判据）
+      2) `market` 非空 → stock
+      3) 其余 → None
+
+    ⚠️ **market 不能单独判指数**：4 只沪指与 SZSE.399006 的 `market` 同样是
+    「上交所/深交所」（非 NULL），先判 market 会把指数全部误判成个股。
+    实测 `market IS NULL` 只有 NDX100 一行，也不是 A 股指数。
+
+    参数为 `bds_symbol_info` 的 `industry` / `market` 两列原值（均可为 None）。
+    """
+    if industry == INDEX_INDUSTRY:
+        return "index"
+    if market:
+        return "stock"
+    return None

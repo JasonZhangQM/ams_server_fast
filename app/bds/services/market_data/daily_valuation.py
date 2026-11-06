@@ -26,19 +26,26 @@ logger = logging.getLogger("uvicorn.error")
 # 估值指标字段列表（gm API fields 参数，20个，不超过限制）
 DAILY_VALUATION_FIELDS = "pe_ttm,pe_lyr,pe_mrq,pe_ttm_cut,pe_lyr_cut,pe_mrq_cut,pb_lyr,pb_mrq,pcf_ttm_oper,pcf_ttm_ncf,pcf_lyr_oper,pcf_lyr_ncf,ps_ttm,ps_lyr,ps_mrq,peg_lyr,peg_1q,peg_3q,dy_ttm,dy_lfy"
 
-# 收盘时刻（A 股盘后数据通常 17:00 左右出齐）
-MARKET_CLOSE = time(17, 0)
+# 盘后估值/市值数据出齐时刻（gm 盘后整理通常 17:00 左右出齐）
+MARKET_CLOSE_DAILY = time(17, 0)
+# K 线日线收盘后出齐时刻（A 股 15:00 收盘，给 30 分钟缓冲）
+MARKET_CLOSE_KLINE = time(15, 30)
 
 
-def resolve_daily_end_date(now: datetime | None = None) -> date:
-    """确定「每日估值 / 每日市值」本轮同步的目标交易日（end_date）。
+def resolve_daily_end_date(now: datetime | None = None,
+                           close_time: time = MARKET_CLOSE_DAILY) -> date:
+    """确定本轮同步的目标交易日（end_date）。
 
-    规则（与 app/irs/service/option_monitor.py:111-128 等价，全项目统一口径）：
+    规则：
     1. latest = bds_trade_date 中 <= 当日的最大交易日；当日是交易日则为当日，
        否则为当日前最近交易日。
-    2. 若 latest == 当日（即当日为交易日）且当前时间 < 15:00（未收盘），
+    2. 若 latest == 当日（即当日为交易日）且当前时间 < close_time（数据源未出齐），
        则退化到当日之前的最近交易日。
     3. 日历表为空 / 无更早交易日 ⇒ 回落当日（容错）。
+
+    close_time：数据源出齐时刻。
+      - 估值/市值等盘后数据 ⇒ 17:00（MARKET_CLOSE_DAILY，默认）
+      - K 线日线历史 ⇒ 15:30（MARKET_CLOSE_KLINE）
 
     ⚠️ bds_trade_date 含未来交易日（MAX=2026-12-31、约 55 个），必须 `<= today` 截断。
     """
@@ -52,7 +59,7 @@ def resolve_daily_end_date(now: datetime | None = None) -> date:
         )
         if latest is None:
             return today
-        if latest == today and now.time() < MARKET_CLOSE:
+        if latest == today and now.time() < close_time:
             prev = (
                 db.query(func.max(TradeDate.trade_date))
                 .filter(TradeDate.trade_date < today)
@@ -105,8 +112,8 @@ def upsert_daily_valuation_sql(symbols):
     - 数据库无该 symbol 数据：从 EARLIEST_START_DATE（1901-01-01）全量获取，
       gm 会自动截断到该股首个交易日
 
-    目标交易日（end_date）：由 resolve_daily_end_date() 决定 —— 交易日且已收盘
-    （>=15:00）取当日，否则取前一交易日；库内已追平该日即跳过（steps=-2，不调 gm）。
+    目标交易日（end_date）：由 resolve_daily_end_date() 决定 —— 交易日且 ≥17:00
+    （盘后数据出齐）取当日，否则取前一交易日；库内已追平该日即跳过（steps=-2，不调 gm）。
 
     去重规则（按 symbol + trade_date 直接覆盖）：
     - 每日估值无修正概念，无需 pub_date 最新保留逻辑
@@ -120,7 +127,7 @@ def upsert_daily_valuation_sql(symbols):
     steps = {}
     errors = {}
     logger.info("估值指标数据获取并导入")
-    # 目标交易日：交易日且已收盘(>=15:00)取当日，否则取前一交易日
+    # 目标交易日：交易日且 ≥17:00（盘后数据出齐）取当日，否则取前一交易日
     end_date_dt = resolve_daily_end_date()
     end_date = end_date_dt.strftime("%Y-%m-%d")
     for symbol in symbols:

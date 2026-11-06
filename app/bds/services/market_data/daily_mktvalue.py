@@ -17,7 +17,7 @@ from server_fast.app.bds.models import DailyMktvalue
 # 复用 fund_data 的标量清洗工具，避免重复实现
 from server_fast.app.bds.services.fund_data.fund_reports import _clean_scalar, _to_date
 from server_fast.common.utils import call_with_timeout
-# 目标交易日规则与每日估值共用（交易日且已收盘取当日，否则取前一交易日）
+# 目标交易日规则与每日估值共用（交易日且 ≥17:00 盘后数据出齐取当日，否则取前一交易日）
 from server_fast.app.bds.services.market_data.daily_valuation import resolve_daily_end_date
 
 logger = logging.getLogger("uvicorn.error")
@@ -70,8 +70,8 @@ def upsert_daily_mktvalue_sql(symbols):
     - 数据库无该 symbol 数据：从 EARLIEST_START_DATE（1901-01-01）全量获取，
       gm 会自动截断到该股首个交易日
 
-    目标交易日（end_date）：由 resolve_daily_end_date() 决定 —— 交易日且已收盘
-    （>=15:00）取当日，否则取前一交易日；库内已追平该日即跳过（steps=-2，不调 gm）。
+    目标交易日（end_date）：由 resolve_daily_end_date() 决定 —— 交易日且 ≥17:00
+    （盘后数据出齐）取当日，否则取前一交易日；库内已追平该日即跳过（steps=-2，不调 gm）。
 
     去重规则（按 symbol + trade_date 直接覆盖）：
     - 每日市值无修正概念，无需 pub_date 最新保留逻辑
@@ -85,7 +85,7 @@ def upsert_daily_mktvalue_sql(symbols):
     steps = {}
     errors = {}
     logger.info("市值指标数据获取并导入")
-    # 目标交易日：交易日且已收盘(>=15:00)取当日，否则取前一交易日
+    # 目标交易日：交易日且 ≥17:00（盘后数据出齐）取当日，否则取前一交易日
     end_date_dt = resolve_daily_end_date()
     end_date = end_date_dt.strftime("%Y-%m-%d")
     for symbol in symbols:

@@ -55,12 +55,15 @@ class SymbolInfoOut(BaseModel):
 
 
 class IndexHistoryOut(BaseModel):
-    """指数历史行情响应 Schema（对应 bds.IndexHistory 模型）。"""
+    """历史行情响应 Schema（对应 bds.IndexHistory 模型：个股 + 指数）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int  # 主键
     symbol: str  # 代码
+    # 2026-11-06 之前的存量行为 NULL；接口统一按 'index' 返回（升级前本表只存指数）
+    sec_type: Optional[str] = None  # 标的类型: stock/index
+    adjust: Optional[str] = None  # 复权口径: post=后复权(个股)/none=不复权(指数)
     trade_date: date  # 交易日期
     open: Optional[Decimal] = None  # 开盘价
     high: Optional[Decimal] = None  # 最高价
@@ -69,7 +72,7 @@ class IndexHistoryOut(BaseModel):
     amount: Optional[Decimal] = None  # 成交额
     volume: Optional[Decimal] = None  # 成交量
     position: Optional[Decimal] = None  # 持仓量
-    sec_name: Optional[str] = None  # 指数名称（从 Config.INDEX_CODE 查找，不存数据库）
+    sec_name: Optional[str] = None  # 名称（证券信息表优先，Config 兜底）
     create_time: datetime  # 创建时间
     update_time: datetime  # 更新时间
 
@@ -442,6 +445,19 @@ class BatchSyncRequest(BaseModel):
                     "fund-cashflow/finance-deriv）。True=不比对 bds_symbol_info.latest_rpt_date，"
                     "强制调用 gm 接口；False=库内 MAX(rpt_date) 已追平则直接跳过，省 gm 请求",
     )
+
+
+class HistoryTargetsResolveRequest(BaseModel):
+    """历史行情目标校验请求（POST /bds/sync/targets/resolve）。
+
+    只做**只读校验**，不触发同步：供「监测标的」与「手写清单」在启动前预览，
+    提前暴露「代码不存在 / 类型无法判定 / 本轮明确跳过」三类不可用标的。
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    symbols: list[str] = Field(default_factory=list, description="待校验的标的代码清单")
+    scope: str = Field(default='explicit', description="watch=监测标的 / explicit=手写清单（仅影响提示文案）")
 
 
 class MacroSyncRequest(BaseModel):

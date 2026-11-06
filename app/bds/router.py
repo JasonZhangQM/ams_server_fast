@@ -70,6 +70,7 @@ from server_fast.app.bds.schemas import (
     FundCashflowOut,
     FundIncomeOut,
     GoldReserveOut,
+    HistoryTargetsResolveRequest,
     IndexConstituentOut,
     IndexConstituentSyncRequest,
     IndexHistoryOut,
@@ -90,7 +91,9 @@ from server_fast.app.bds.schemas import (
     ValuationPctSyncRequest,
 )
 from server_fast.app.bds.services import (
+    check_index_config_consistency,
     fetch_realtime_index_prices,
+    get_index_infos_from_symbol_info,
     insert_trade_date_em_sql,
     refresh_table_stat,
     resolve_total,
@@ -108,11 +111,13 @@ from server_fast.app.bds.services import (
     upsert_index_constituent_sql,
     upsert_index_history_sql,
     sync_one_index,
+    sync_symbol_history,
     sync_symbol_info_all,
     upsert_symbol_info_excel_sql,
     upsert_symbol_info_gm_sql,
     upsert_daily_indicator_sql,
     plan_index_constituent_backfill,
+    validate_history_targets,
 )
 from server_fast.app.bds.config import Config
 from server_fast.app.bds.services.valuation import index_valuation
@@ -458,6 +463,48 @@ def mark_synced(
     }
 
 
+@router.post("/sync/targets/resolve")
+def resolve_history_targets(req: HistoryTargetsResolveRequest):
+    """校验历史行情目标清单（**只读**，不触发同步）。
+
+    供「监测标的」（scope=watch）与「手写清单」（scope=explicit）启动前预览：
+    返回每个代码是否存在、标的类型（stock/index），以及不可用原因
+    （信息表无此代码 / 类型无法判定 / 本轮明确跳过）。
+
+    注意：解析「监测标的」清单本身由前端调 `GET /irs/underlying-monitors` 完成，
+    bds 不跨层读 irs 表；本端点只做 bds 侧（证券信息表）的校验。
+    """
+    result = validate_history_targets(req.symbols)
+    result['scope'] = req.scope
+    return result
+
+
+@router.post("/sync/history")
+def sync_symbol_history_endpoint(
+    symbol: str = Query(..., description="单个标的代码（个股或指数），精确匹配"),
+):
+    """同步**单个标的**的历史行情：个股后复权（post）、指数不复权（none）。
+
+    这是批量同步 `table='history'` 的落点（`sync_runner` 逐标的 POST 本端点）。
+    返回 status ∈ success/no_data/skipped/error：
+    - `skipped` = 按规则确定性不处理（类型无法判定 / 上市日为空 / 明确跳过清单），
+      带 `reason` 字段；批量侧把它写入任务 errors，保证「跳过原因入库」。
+    - `error` 命中 gm 终端断连时附加 `fatal=true`，供批量熔断。
+
+    标的类型由证券信息表判定（industry='A股指数' → 指数；market 非空 → 个股），
+    不依赖 Config.INDEX_CODE 白名单。
+    """
+    if not symbol:
+        return {"status": "error", "message": "symbol 不能为空"}
+    res = sync_symbol_history(symbol)
+    if res.get("status") == "error":
+        raw = res.get("message", "")
+        if _is_gm_fatal(raw):
+            res["fatal"] = True
+            res["gm_code"] = _extract_gm_code(raw)
+    return res
+
+
 @router.post("/sync/index-history")
 def sync_index_history():
     """同步指数历史行情数据到数据库。
@@ -474,11 +521,15 @@ def sync_index_history():
     - 捕获所有异常并抛出 HTTP 500 错误，返回异常详情
     """
     try:
+        # Config.INDEX_CODE 与信息表 industry='A股指数' 的一致性只告警、不阻断同步
+        consistency_warnings = check_index_config_consistency()
         # 调用底层服务函数执行同步，返回各 symbol 的获取条数字典
         steps, _errors = upsert_index_history_sql()
         # 统计实际有更新数据的 symbol 数量（获取条数 > 0 表示有新增数据）
         updated_count = sum(1 for count in steps.values() if count > 0)
-        return {"status": "ok", "message": "index-history synced", "updated_count": updated_count}
+        return {"status": "ok", "message": "index-history synced",
+                "updated_count": updated_count,
+                "consistency_warnings": consistency_warnings}
     except Exception as e:
         # 捕获异常并转换为 HTTP 500 错误响应
         raise HTTPException(status_code=500, detail=str(e))
@@ -487,29 +538,64 @@ def sync_index_history():
 @router.get("/index-histories", response_model=PageResponse[IndexHistoryOut])
 def list_index_histories(
     symbol: Optional[str] = Query(None, description="代码精确匹配"),
+    keyword: Optional[str] = Query(None, description="代码 / 名称模糊搜索（远程搜索用）"),
+    sec_type: Optional[str] = Query(
+        None, pattern="^(stock|index)$", description="标的类型筛选: stock=个股/index=指数，不传=全部"),
     start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询指数历史行情，支持代码单选精确匹配和日期范围筛选。
+    """查询历史行情（**个股 + 指数**），支持代码精确匹配、类型筛选、关键字搜索和日期范围筛选。
 
-    响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
+    - 名称：优先取 `bds_symbol_info.name`（个股/指数同名口径），取不到再回退
+      `Config.INDEX_CODE.sec_name`（兼容配置里保留的展示名）。
+    - `sec_type` 过滤兼容存量行：升级前写入的行 `sec_type IS NULL`，语义上全部是指数
+      （2026-11-06 前本表只存指数），故筛选 index 时把 NULL 一并纳入，**不修改存量数据**。
+    - 排序 `trade_date DESC, id DESC`：同日有数千行，必须有 id 兜底才是全序，
+      翻页才不会重复/漏行；该顺序与 `k_ih_td`（二级索引末尾隐含主键）方向一致，
+      可走反向索引扫描，避免深翻页 filesort。
     """
     query = db.query(IndexHistory)
     if symbol:
         query = query.filter(IndexHistory.symbol == symbol)
+    if keyword:
+        kw = f"%{keyword}%"
+        # 名称匹配走子查询（bds_symbol_info.name），避免在 2000 万行的大表上 JOIN 放大代价
+        name_hit = db.query(SymbolInfo.symbol).filter(SymbolInfo.name.like(kw))
+        query = query.filter(or_(IndexHistory.symbol.like(kw), IndexHistory.symbol.in_(name_hit)))
+    if sec_type == "index":
+        # 存量行（NULL）= 升级前的指数行情
+        query = query.filter(or_(IndexHistory.sec_type == "index", IndexHistory.sec_type.is_(None)))
+    elif sec_type == "stock":
+        query = query.filter(IndexHistory.sec_type == "stock")
     if start_date:
         query = query.filter(IndexHistory.trade_date >= start_date)
-    total = query.count()
-    items = query.order_by(IndexHistory.trade_date.desc()).offset(offset).limit(limit).all()
-    # 附加 sec_name 字段（从 Config.INDEX_CODE 查找，不存数据库）
+    total, total_estimated = resolve_total(
+        db, query, IndexHistory, bool(symbol or keyword or sec_type or start_date))
+    items = (
+        query.order_by(IndexHistory.trade_date.desc(), IndexHistory.id.desc())
+        .offset(offset).limit(limit).all()
+    )
+
+    # 名称映射：只查本页涉及的 symbol（一次 IN 查询），不逐行回表
+    symbols = {item.symbol for item in items}
+    name_map = {}
+    if symbols:
+        name_map = {
+            s: n for s, n in
+            db.query(SymbolInfo.symbol, SymbolInfo.name)
+            .filter(SymbolInfo.symbol.in_(symbols)).all()
+        }
     items_dict = []
     for item in items:
         d = item.to_dict()
-        d["sec_name"] = Config.INDEX_CODE.get(item.symbol, {}).get("sec_name")
+        d["sec_type"] = item.sec_type or "index"  # 存量行按指数解读
+        d["sec_name"] = (name_map.get(item.symbol)
+                         or Config.INDEX_CODE.get(item.symbol, {}).get("sec_name"))
         items_dict.append(d)
-    return {"items": items_dict, "total": total, "limit": limit, "offset": offset}
+    return {"items": items_dict, "total": total, "limit": limit, "offset": offset,
+            "total_is_estimated": total_estimated}
 
 
 @router.get("/index-codes")
@@ -998,7 +1084,7 @@ def list_finance_derivs(
 def sync_daily_valuation(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
     """同步估值指标数据，接收单个股票代码，获取并入库。
 
-    目标交易日取「交易日且已收盘(>=15:00)的当日，否则前一交易日」；
+    目标交易日取「交易日且 ≥17:00（盘后数据出齐）的当日，否则前一交易日」；
     库内已追平则跳过、返回 no_data（未调 gm）。
     """
     if not symbol:
@@ -1050,7 +1136,7 @@ def list_daily_valuations(
 def sync_daily_mktvalue(symbol: str = Query(..., description="股票代码，精确匹配单个标的")):
     """同步每日市值数据，接收单个股票代码，获取并入库。
 
-    目标交易日取「交易日且已收盘(>=15:00)的当日，否则前一交易日」；
+    目标交易日取「交易日且 ≥17:00（盘后数据出齐）的当日，否则前一交易日」；
     库内已追平则跳过、返回 no_data（未调 gm）。
     """
     if not symbol:
@@ -1441,7 +1527,7 @@ def _sync_stage_items(stage: str) -> list:
 
     - trade_date：原子操作（一年只在跨年时真写库），整体 1 项
     - symbol_info：东财 Excel / gm 两条通道各 1 项（与 sync_symbol_info_all 的步骤划分一致）
-    - index_history：按 Config.INDEX_CODE 逐指数
+    - index_history：按证券信息表的行业「A股指数」逐指数（Config 仅在信息表为空时兜底）
     - option_market：按「品种 × 到期月」逐组（= 一次接口请求），与 /option-market/sync 的分组口径一致；
       清单为空时给一个 `__no_config__` 伪项，让失败明细能说清原因，而不是 0 项静默通过
     - wscn：service 内部按自然月分批（首次全量 141 批起）**不可切分** ⇒ 整体 1 项
@@ -1452,7 +1538,9 @@ def _sync_stage_items(stage: str) -> list:
     if stage == "symbol_info":
         return [("excel", "东财Excel"), ("gm", "gm证券信息")]
     if stage == "index_history":
-        return [(code, info.get("sec_name") or code) for code, info in Config.INDEX_CODE.items()]
+        # 来源：证券信息表 industry='A股指数'（Config.INDEX_CODE 仅在信息表为空时兜底）
+        return [(code, info.get("sec_name") or code)
+                for code, info in get_index_infos_from_symbol_info().items()]
     if stage == "option_info":
         # 整批刷新只算 1 项：25,910 行是一次 HTTP + 一批 UPSERT，拆成「按品种」计项
         # 只会让进度条显得很长而实际没有可并行的东西。
@@ -1492,10 +1580,8 @@ def _run_sync_item(stage: str, key: str) -> int:
                 return upsert_symbol_info_excel_sql()
             return upsert_symbol_info_gm_sql()
         if stage == "index_history":
-            info = Config.INDEX_CODE.get(key)
-            if not info:
-                return -1
-            return sync_one_index(key, info)
+            # info=None → 服务内按证券信息表 industry='A股指数' 解析，Config 兜底
+            return sync_one_index(key)
         if stage == "option_info":
             # 返回「本次解析并写入的行数」；桶水位（哨兵跳过、撞码）写进服务的 log
             st = option_info.fetch_and_store()
@@ -1720,7 +1806,7 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
         db.commit()
 
         # 3. 定义进度回调
-        def on_progress(symbol, table, status, done_count, total):
+        def on_progress(symbol, table, status, done_count, total, message=''):
             # 每次回调都开独立 session，避免长事务
             s = SessionLocal()
             try:
@@ -1728,7 +1814,9 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
                 t.done_count = done_count
                 if status == "success":
                     t.success_count += 1
-                elif status == "no_data":
+                elif status in ("no_data", "skipped"):
+                    # skipped = 按规则确定性不处理（类型无法判定 / 上市日为空 / 明确跳过清单），
+                    # 不是失败：计入 no_data 计数，原因在收尾统一写入 errors
                     t.no_data_count += 1
                 else:
                     t.error_count += 1
@@ -1764,6 +1852,11 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
                                    "message": f"[gm 异常] 疑似终端断连，未达熔断阈值：{r.get('message', '')}"})
             elif r["status"] == "error":
                 errors.append({"symbol": r["symbol"], "table": r["table"], "message": r.get("message", "")})
+            elif r["status"] == "skipped":
+                # 跳过原因入库（用户要求）：与失败明细同表存放，[跳过] 前缀区分；
+                # 不计入 error_count，任务终态也不因它变 failed。
+                errors.append({"symbol": r["symbol"], "table": r["table"],
+                               "message": f"[跳过] {r.get('message') or r.get('reason') or ''}"})
 
         # 6. 结束终态判断（优先级：gm 断连 > 用户停止 > 正常完成）
         if fatal_hit:
@@ -2063,7 +2156,7 @@ def run_batch_sync(req: BatchSyncRequest):
             raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
         # scope 参数校验
-        if req.scope not in ("all", "index", "industry", "explicit"):
+        if req.scope not in ("all", "index", "industry", "explicit", "watch"):
             raise HTTPException(status_code=400, detail=f"非法 scope: {req.scope}")
         if req.scope == "index":
             # 指数多选：index_codes 为准，index_code 单值写法兼容折成列表；
@@ -2083,6 +2176,11 @@ def run_batch_sync(req: BatchSyncRequest):
             raise HTTPException(status_code=400, detail="scope=industry 时 industry 必填")
         if req.scope == "explicit" and not req.symbols:
             raise HTTPException(status_code=400, detail="scope=explicit 时 symbols 必填")
+        if req.scope == "watch" and not req.symbols:
+            raise HTTPException(
+                status_code=400,
+                detail="scope=watch 时 symbols 必填（前端先调 /irs/underlying-monitors 取监测清单）",
+            )
         # 退市口径校验（schema 未加 pattern ⇒ 由这里统一返 400，与 scope 的校验方式保持一致）
         if req.trading_status not in ("trading", "delisted", "all"):
             raise HTTPException(
@@ -2099,6 +2197,10 @@ def run_batch_sync(req: BatchSyncRequest):
             scope_params["industry_name"] = req.industry
         elif req.scope == "explicit":
             scope_params["symbols"] = req.symbols
+        elif req.scope == "watch":
+            # 监测标的：清单由前端从 irs 取，这里原样留存（source 仅作审计线索）
+            scope_params["symbols"] = req.symbols
+            scope_params["source"] = "irs.underlying-monitors"
         # 行为参数存进 JSON 而不是新增表列：历史任务缺该键 ⇒ 一律按 False（不跳过）解读，
         # 无需 DDL、无需回填历史行；前端「运行中回填」也从这里还原开关状态
         scope_params["skip_latest_rpt_check"] = bool(req.skip_latest_rpt_check)

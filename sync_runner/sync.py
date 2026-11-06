@@ -7,7 +7,8 @@
 import random
 import time
 
-from .config import API_BASE, REQUEST_TIMEOUT, MAX_ATTEMPTS, RETRY_BACKOFF, SESSION
+from .config import (API_BASE, REQUEST_TIMEOUT, HISTORY_TIMEOUT,
+                     MAX_ATTEMPTS, RETRY_BACKOFF, SESSION, HISTORY_TABLE)
 
 
 # gm 终端连接断开 / 终端不可用 的致命错误关键词
@@ -44,13 +45,15 @@ def sync_one(symbol, table, force_fund=False):
     bds_symbol_info.latest_rpt_date 的比对，强制调 gm 接口。其余表不受影响。
     '''
     url = f'{API_BASE}/bds/sync/{table}'
+    # history 全量取数慢，客户端超时需放宽（后端 gm 上限 150s，这里留 30s 余量）
+    timeout = HISTORY_TIMEOUT if table == HISTORY_TABLE else REQUEST_TIMEOUT
     params = {'symbol': symbol}
     if force_fund and table in FUND_TABLES:
         params['force'] = 'true'
     last_err = ''
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            r = SESSION.post(url, params=params, timeout=REQUEST_TIMEOUT)
+            r = SESSION.post(url, params=params, timeout=timeout)
             if r.status_code == 200:
                 body = r.json()
                 # 后端明确标记 fatal=true → gm 终端断连，立即返回不重试
@@ -59,8 +62,11 @@ def sync_one(symbol, table, force_fund=False):
                             'message': body.get('message', 'gm 终端不可用')}
                 st = body.get('status')
                 msg = body.get('message', '')
-                if st in ('success', 'no_data'):
-                    return {'status': st, 'message': msg}
+                # skipped：按规则确定性不处理（类型无法判定/上市日为空/明确跳过清单），
+                # 不是失败，不重试；reason 由调用方写入任务 errors（跳过原因入库）
+                if st in ('success', 'no_data', 'skipped'):
+                    return {'status': st, 'message': msg,
+                            'reason': body.get('reason', '')}
                 last_err = msg or 'sync error'  # status == error
             else:
                 # HTTPException：body 为 {'detail': ...}

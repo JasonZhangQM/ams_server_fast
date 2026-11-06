@@ -19,9 +19,13 @@ from server_fast.app.bds.services.symbol_info import (
     upsert_symbol_info_gm_sql,
 )
 from server_fast.app.bds.services.market_data import (
+    check_index_config_consistency,
     fetch_realtime_index_prices,
+    get_index_infos_from_symbol_info,
     sync_one_index,
+    sync_symbol_history,
     upsert_index_history_sql,
+    validate_history_targets,
     upsert_daily_valuation_sql,
     upsert_daily_mktvalue_sql,
 )
@@ -58,9 +62,13 @@ __all__ = [
     'upsert_symbol_info_excel_sql',
     'upsert_symbol_info_gm_sql',
     # 行情数据
+    'check_index_config_consistency',
     'fetch_realtime_index_prices',
+    'get_index_infos_from_symbol_info',
     'sync_one_index',
+    'sync_symbol_history',
     'upsert_index_history_sql',
+    'validate_history_targets',
     'upsert_daily_valuation_sql',
     'upsert_daily_mktvalue_sql',
     # 指数成分

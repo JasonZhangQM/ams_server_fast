@@ -10,7 +10,7 @@ import random
 import pandas as pd
 
 from .config import (SLEEP_MIN, SLEEP_MAX, FAIL_STREAK_LIMIT, FAIL_STREAK_SLEEP,
-                     FATAL_STREAK_LIMIT, FATAL_STREAK_SLEEP)
+                     FATAL_STREAK_LIMIT, FATAL_STREAK_SLEEP, MARK_EXCLUDED_TABLES)
 from .sync import sync_one, mark_synced
 
 
@@ -47,17 +47,19 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
     stopped = False
     gm_down = False
     for sym, tables in by_symbol.items():
+        # 只有「参与标记」的表才决定 sync_at；history 恒不计入（见 config.MARK_EXCLUDED_TABLES）
         sym_statuses = []
         for table in tables:
             i += 1
             res = sync_one(sym, table, force_fund=force_fund)
             results.append({'symbol': sym, 'table': table, **res})
-            sym_statuses.append(res['status'])
+            if table not in MARK_EXCLUDED_TABLES:
+                sym_statuses.append(res['status'])
 
             # 实时进度回调（供后端后台线程写 DB）
             if on_progress is not None:
                 try:
-                    on_progress(sym, table, res['status'], i, total)
+                    on_progress(sym, table, res['status'], i, total, res.get('message', ''))
                 except Exception as exc:
                     # 回调异常不影响主流程（DB 挂了也要继续同步）
                     print(f'  [警告] on_progress 回调异常: {exc}')
@@ -84,7 +86,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
                     time.sleep(FATAL_STREAK_SLEEP)
                 continue
 
-            if res['status'] in ('success', 'no_data'):
+            if res['status'] in ('success', 'no_data', 'skipped'):
                 fail_streak = 0
                 fatal_streak = 0
             else:
@@ -99,7 +101,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
             # 按状态分档限速：no_data 是后端预判跳过（纯 DB 查询，未调外部 API），
             # 无需 1~3s 限速；time.sleep(0) 让出 CPU 时间片给 FastAPI 主线程处理停止请求，
             # 但不引入硬等，全量跳过场景可大幅提速。
-            if res['status'] == 'no_data':
+            if res['status'] in ('no_data', 'skipped'):
                 time.sleep(0)
             else:
                 pause = random.uniform(SLEEP_MIN, SLEEP_MAX)
@@ -118,8 +120,11 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
         if gm_down or stopped:
             break
 
-        # 该 symbol 全部表都非 error → 标记当日已同步
-        if mark_synced_when_done and all(st in ('success', 'no_data') for st in sym_statuses):
+        # 该 symbol 全部「参与标记」的表都非 error → 标记当日已同步。
+        # ⚠️ history 已被排除：sym_statuses 为空（只勾了历史行情）时**不标记**，
+        #    避免「单跑 history」污染 sync_at 导致财务表次日被误跳过。
+        if mark_synced_when_done and sym_statuses and all(
+                st in ('success', 'no_data') for st in sym_statuses):
             mk = mark_synced(sym)
             if mk['status'] == 'ok':
                 marked += 1

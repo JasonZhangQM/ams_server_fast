@@ -63,7 +63,8 @@ def resolve_symbols(scope, explicit=None, industry='', index_code='', max_symbol
 
     已同步判定由后端 /bds/symbol-infos?exclude_synced_since=YYYY-MM-DD 完成，
     依据是 bds_symbol_info.sync_at >= 该日期（sync_at 为空或早于该日期者保留）。
-    scope: explicit | all | industry | index
+    scope: explicit | watch | all | industry | index
+    watch: 监测标的（前端从 /irs/underlying-monitors 取清单后随 symbols 提交，bds 不跨层读表）
     index_code: scope=index 时用。str=单指数；list=多指数**取成分合集**（各取自己最新快照求并集）。
       多个指数下 max_symbols 作用于合集（并集内按指数顺序截断）。
     exclude_synced_since: datetime.date 或 None。None=不跳过；
@@ -72,9 +73,9 @@ def resolve_symbols(scope, explicit=None, industry='', index_code='', max_symbol
       生效范围（见 docs/批量同步退市股过滤方案_2026-10-16.md §3.3）：
         - all / industry → 条件直接透传给列表端点分页查询
         - index          → 成分接口无该字段，取全表集合求交
-        - explicit       → **不参与过滤**（手写清单 = 用户显式意图，系统不二次过滤）
-    仅 A 股个股：除 explicit 外一律只取 market 非空的标的，剔除 5 只指数
-      （SHSE.000001/000300/000852/000905、SZSE.399006）与美股/黄金（market 恒 NULL）。
+        - explicit/watch → **不参与过滤**（用户显式意图，系统不二次过滤）
+    仅 A 股个股：除 explicit/watch 外一律只取 market 非空的标的，剔除 6 只指数
+      （SHSE.000001/000300/000688/000852/000905、SZSE.399006）与美股/黄金（market 恒 NULL）。
     '''
 
     if trading_status not in ('trading', 'delisted', 'all'):
@@ -92,6 +93,13 @@ def resolve_symbols(scope, explicit=None, industry='', index_code='', max_symbol
         # 手写清单 = 用户显式意图：不做退市过滤、不做当日去重、也不剔指数（保持既有行为不变）
         raw = list(explicit or [])
         note = '手写清单（不做退市过滤）'
+
+    elif scope == 'watch':
+        # 监测标的：前端调 GET /irs/underlying-monitors 取列表后随 symbols 提交，
+        # bds 不跨层读 irs 表。语义同「手写清单」（用户显式意图），但**保留指数**
+        # ——监测池里可能同时有指数与个股，后续按各标的类型自动选复权口径。
+        raw = list(explicit or [])
+        note = '监测标的（前端从 irs.underlying-monitors 提交，不做退市过滤）'
 
     elif scope == 'all':
         raw = [it['symbol'] for it in

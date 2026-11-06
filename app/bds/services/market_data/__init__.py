@@ -6,8 +6,12 @@
 与 `services/valuation/index_valuation` 的处理方式一致。
 """
 from server_fast.app.bds.services.market_data.index_history import (
+    check_index_config_consistency,
+    get_index_infos_from_symbol_info,
     sync_one_index,
+    sync_symbol_history,
     upsert_index_history_sql,
+    validate_history_targets,
 )
 from server_fast.app.bds.services.market_data.index_realtime import (
     fetch_realtime_index_prices,
@@ -20,8 +24,12 @@ from server_fast.app.bds.services.market_data.daily_mktvalue import (
 )
 
 __all__ = [
+    'check_index_config_consistency',
+    'get_index_infos_from_symbol_info',
     'sync_one_index',
+    'sync_symbol_history',
     'upsert_index_history_sql',
+    'validate_history_targets',
     'fetch_realtime_index_prices',
     'upsert_daily_valuation_sql',
     'upsert_daily_mktvalue_sql',

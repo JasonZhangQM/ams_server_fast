@@ -166,11 +166,25 @@ class TradeDate(Base, BaseModel):
 
 
 class IndexHistory(Base, BaseModel):
-    """指数历史行情模型（对应表 bds_index_history）。"""
+    """历史行情模型（对应表 bds_index_history）：**个股 + 指数**共用一张表。
+
+    2026-11-06 升级前本表只存指数；升级后个股行也用本表（表名保留不改）。
+    两类标的的差异只体现在两列上：
+    - `sec_type`：stock / index。历史行（升级前写入）为 NULL，语义上按 index 解读，
+      列表接口据此兼容，**不对存量数据做 UPDATE**（用户 2026-11-06 拍板）。
+    - `adjust`：个股 post（后复权）/ 指数 none（不复权，指数无后复权概念）。
+    """
 
     __tablename__ = "bds_index_history"
 
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="代码")
+    # 两个新列只写入「本次升级后新增的行」；存量行保持 NULL
+    sec_type: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, comment="标的类型: stock=个股/index=指数；历史行为 NULL（按 index 解读）"
+    )
+    adjust: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, comment="复权口径: post=后复权(个股)/none=不复权(指数)；历史行为 NULL"
+    )
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
     open: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="开盘价")
     high: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 4), nullable=True, comment="最高价")
@@ -180,10 +194,12 @@ class IndexHistory(Base, BaseModel):
     volume: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="成交量")
     position: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="持仓量")
 
-    # 联合唯一约束 + 单列索引
-    # symbol 是 uk(symbol, trade_date) 的最左前缀，单独 k_symbol 冗余已移除
+    # 联合唯一约束 + trade_date 单列索引
+    # symbol 是 uk(symbol, trade_date) 的最左前缀，单独 k_symbol 冗余已移除；
+    # k_ih_td 支撑「跨标的按日期倒序」的列表页（uk 最左前缀是 symbol，帮不上）
     __table_args__ = (
         UniqueConstraint("symbol", "trade_date", name="uk_bds_index_history_symbol_date"),
+        Index("k_ih_td", "trade_date"),
     )
 
     # BaseModel 工具方法所需元数据
