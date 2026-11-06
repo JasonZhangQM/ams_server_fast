@@ -45,7 +45,7 @@ def sync_one(symbol, table, force_fund=False):
     bds_symbol_info.latest_rpt_date 的比对，强制调 gm 接口。其余表不受影响。
     '''
     url = f'{API_BASE}/bds/sync/{table}'
-    # history 全量取数慢，客户端超时需放宽（后端 gm 上限 150s，这里留 30s 余量）
+    # history_market 全量取数慢，客户端超时需放宽（后端 gm 上限 150s，这里留 30s 余量）
     timeout = HISTORY_TIMEOUT if table == HISTORY_TABLE else REQUEST_TIMEOUT
     params = {'symbol': symbol}
     if force_fund and table in FUND_TABLES:

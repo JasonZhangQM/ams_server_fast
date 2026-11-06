@@ -165,17 +165,17 @@ class TradeDate(Base, BaseModel):
         return f"交易日:{self.trade_date}"
 
 
-class IndexHistory(Base, BaseModel):
-    """历史行情模型（对应表 bds_index_history）：**个股 + 指数**共用一张表。
+class HistoryMarket(Base, BaseModel):
+    """历史行情模型（对应表 bds_history_market）：**个股 + 指数**共用一张表。
 
-    2026-11-06 升级前本表只存指数；升级后个股行也用本表（表名保留不改）。
+    2026-11-06 升级前本表只存指数；升级后个股行也用本表。
     两类标的的差异只体现在两列上：
     - `sec_type`：stock / index。历史行（升级前写入）为 NULL，语义上按 index 解读，
       列表接口据此兼容，**不对存量数据做 UPDATE**（用户 2026-11-06 拍板）。
     - `adjust`：个股 post（后复权）/ 指数 none（不复权，指数无后复权概念）。
     """
 
-    __tablename__ = "bds_index_history"
+    __tablename__ = "bds_history_market"
 
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="代码")
     # 两个新列只写入「本次升级后新增的行」；存量行保持 NULL
@@ -198,7 +198,7 @@ class IndexHistory(Base, BaseModel):
     # symbol 是 uk(symbol, trade_date) 的最左前缀，单独 k_symbol 冗余已移除；
     # k_ih_td 支撑「跨标的按日期倒序」的列表页（uk 最左前缀是 symbol，帮不上）
     __table_args__ = (
-        UniqueConstraint("symbol", "trade_date", name="uk_bds_index_history_symbol_date"),
+        UniqueConstraint("symbol", "trade_date", name="uk_bds_history_market_symbol_date"),
         Index("k_ih_td", "trade_date"),
     )
 
@@ -330,7 +330,7 @@ class IndexValuation(Base, BaseModel):
     index_code: Mapped[str] = mapped_column(String(32), nullable=False, comment="指数代码")
     trade_date: Mapped[date] = mapped_column(Date, nullable=False, comment="交易日期")
     close: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(12, 4), nullable=True, comment="指数收盘价（来自 bds_index_history）")
+        Numeric(12, 4), nullable=True, comment="指数收盘价（来自 bds_history_market）")
     pe_ttm: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 4), nullable=True, comment="整体法 PE_TTM（亏损计入，主口径）")
     pe_median: Mapped[Optional[Decimal]] = mapped_column(

@@ -122,7 +122,7 @@ SELECT trade_date, AVG(pe_ttm) AS pe_median
 """)
 
 SQL_CLOSE = text("""
-SELECT trade_date, close FROM bds_index_history
+SELECT trade_date, close FROM bds_history_market
  WHERE symbol = :idx AND trade_date >= :start AND trade_date < :end
 """)
 

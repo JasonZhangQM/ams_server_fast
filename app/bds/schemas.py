@@ -54,8 +54,8 @@ class SymbolInfoOut(BaseModel):
     update_time: datetime  # 更新时间
 
 
-class IndexHistoryOut(BaseModel):
-    """历史行情响应 Schema（对应 bds.IndexHistory 模型：个股 + 指数）。"""
+class HistoryMarketOut(BaseModel):
+    """历史行情响应 Schema（对应 bds.HistoryMarket 模型：个股 + 指数）。"""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -463,7 +463,7 @@ class HistoryTargetsResolveRequest(BaseModel):
 class MacroSyncRequest(BaseModel):
     """一键同步请求体（POST /bds/sync/macro）—— 基础数据 + 宏观数据。
 
-    七段**固定按 trade_date → symbol_info → index_history → option_market → wscn → daily → gold
+    七段**固定按 trade_date → symbol_info → history_market → option_market → wscn → daily → gold
     顺序执行**（基础在下游依赖之前，整体快 → 慢），只跑 stages 里勾选的段。
     执行在后台线程，返回 task 供前端轮询进度（与 /bds/run/batch-sync 同一套任务表）。
     """
@@ -471,10 +471,10 @@ class MacroSyncRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     stages: list[str] = Field(
-        default_factory=lambda: ['symbol_info', 'index_history', 'option_market', 'wscn', 'daily'],
-        description="要同步的段（顺序固定 trade_date→symbol_info→index_history→option_market→"
+        default_factory=lambda: ['symbol_info', 'history_market', 'option_market', 'wscn', 'daily'],
+        description="要同步的段（顺序固定 trade_date→symbol_info→history_market→option_market→"
                     "wscn→daily→gold）：trade_date=交易日历 / symbol_info=证券信息 / "
-                    "index_history=指数行情 / option_market=期权行情（按「品种 × 到期月」逐组） / "
+                    "history_market=历史行情 / option_market=期权行情（按「品种 × 到期月」逐组） / "
                     "wscn=经济指标（华尔街见闻）/ daily=美债收益率（FRED）/ gold=黄金储备（IMF）。"
                     "不传 ⇔ 前端默认勾选（不含 trade_date 与 gold：前者一年只需跑一次，后者 IMF 接口 502）",
     )
@@ -543,7 +543,7 @@ class IndexValuationRow(BaseModel):
     index_code: str  # 指数代码
     sec_name: Optional[str] = None  # 指数名称（不入库，从 Config.INDEX_CODE 查找）
     trade_date: date  # 交易日期
-    close: Optional[Decimal] = None  # 指数收盘价（来自 bds_index_history）
+    close: Optional[Decimal] = None  # 指数收盘价（来自 bds_history_market）
     pe_ttm: Optional[Decimal] = None  # 整体法 PE_TTM（亏损计入，主口径）
     pe_median: Optional[Decimal] = None  # 成分 PE 横截面中位数（仅 PE>0 样本）
     pb_mrq: Optional[Decimal] = None  # 整体法 PB_MRQ

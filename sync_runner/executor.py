@@ -47,7 +47,7 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
     stopped = False
     gm_down = False
     for sym, tables in by_symbol.items():
-        # 只有「参与标记」的表才决定 sync_at；history 恒不计入（见 config.MARK_EXCLUDED_TABLES）
+        # 只有「参与标记」的表才决定 sync_at；history_market 恒不计入（见 config.MARK_EXCLUDED_TABLES）
         sym_statuses = []
         for table in tables:
             i += 1
@@ -121,8 +121,8 @@ def run_tasks(tasks, mark_synced_when_done=True, on_progress=None, stop_event=No
             break
 
         # 该 symbol 全部「参与标记」的表都非 error → 标记当日已同步。
-        # ⚠️ history 已被排除：sym_statuses 为空（只勾了历史行情）时**不标记**，
-        #    避免「单跑 history」污染 sync_at 导致财务表次日被误跳过。
+        # ⚠️ history_market 已被排除：sym_statuses 为空（只勾了历史行情）时**不标记**，
+        #    避免「单跑 history_market」污染 sync_at 导致财务表次日被误跳过。
         if mark_synced_when_done and sym_statuses and all(
                 st in ('success', 'no_data') for st in sym_statuses):
             mk = mark_synced(sym)

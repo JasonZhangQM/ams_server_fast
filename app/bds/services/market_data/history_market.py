@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""历史行情同步：gm/yfinance 获取 K 线并入库（**个股 + 指数**共用 `bds_index_history`）。
+"""历史行情同步：gm/yfinance 获取 K 线并入库（**个股 + 指数**共用 `bds_history_market`）。
 
 个股走后复权（ADJUST_POST）、指数走不复权（ADJUST_NONE）；标的类型由证券信息表判定，
 不再依赖 `Config.INDEX_CODE` 白名单（见 `resolve_sec_type`）。
@@ -16,7 +16,7 @@ from server_fast.config import settings
 from server_fast.common.utils import call_with_timeout, upsert_df_to_db, df_init_model
 from server_fast.common.db import SessionLocal
 from server_fast.app.bds.config import Config as dbsCfg
-from server_fast.app.bds.models import IndexHistory, SymbolInfo
+from server_fast.app.bds.models import HistoryMarket, SymbolInfo
 from server_fast.app.bds.services.market_data.daily_valuation import (
     resolve_daily_end_date,
     MARKET_CLOSE_KLINE,
@@ -64,7 +64,7 @@ def _get_target_trade_date() -> date:
     return v
 
 
-def _fetch_index_history_from_yfinance(symbol, info, start_time, end_time):
+def _fetch_history_market_from_yfinance(symbol, info, start_time, end_time):
     """通过 yfinance 拉取指数历史行情，返回标准化 DataFrame。
 
     yfinance 返回的 DataFrame 列映射：
@@ -149,9 +149,9 @@ def _sync_one_index_detail(symbol: str, info: dict):
     - gm 调用的 end_time 也用这个值。
     """
     _engine = settings.DB_ENGINE
-    _mdl = IndexHistory
+    _mdl = HistoryMarket
     try:
-        # 本轮目标交易日（与 sync_symbol_history 共用缓存，不会重复查 trade_date 表）
+        # 本轮目标交易日（与 sync_history_market 共用缓存，不会重复查 trade_date 表）
         target_trade_date = _get_target_trade_date()
         # 查询数据库中该 symbol 的最新 trade_date
         with SessionLocal() as session:
@@ -174,7 +174,7 @@ def _sync_one_index_detail(symbol: str, info: dict):
         end_time = target_trade_date
         # 根据 data_source 选择数据源：yfinance 走新路径，默认走 gm
         if info.get('data_source') == 'yfinance':
-            df = _fetch_index_history_from_yfinance(symbol, info, start_time, end_time)
+            df = _fetch_history_market_from_yfinance(symbol, info, start_time, end_time)
         else:
             # 调用 gm 接口获取历史行情（带超时保护，防止 gm 终端未启动时阻塞）
             # fields 包含 amount/volume 用于量价分析；position 为期货专用字段，
@@ -236,7 +236,7 @@ def get_index_infos_from_symbol_info() -> dict:
         cfg = dbsCfg.INDEX_CODE.get(r.symbol) or {}
         infos[r.symbol] = {
             'sec_name': r.name,
-            # 上市日为空时用 Config 的 listed_date 兜底（个股不做兜底，见 sync_symbol_history）
+            # 上市日为空时用 Config 的 listed_date 兜底（个股不做兜底，见 sync_history_market）
             'listed_date': r.online_date or cfg.get('listed_date'),
             'data_source': 'gm',
         }
@@ -258,7 +258,7 @@ def sync_one_index(symbol: str, info: dict | None = None) -> int:
     return count
 
 
-def upsert_index_history_sql():
+def upsert_history_market_sql():
     """同步全部「A股指数」的历史行情并 upsert 入库。
 
     标的来源改为证券信息表 `industry='A股指数'`（不再是 Config.INDEX_CODE 白名单），
@@ -277,7 +277,7 @@ def upsert_index_history_sql():
 
 
 # ============================================================================
-# 个股 + 指数：单标的历史行情同步（POST /bds/sync/history）
+# 个股 + 指数：单标的历史行情同步（POST /bds/sync/history-market）
 # ============================================================================
 
 def _resolve_history_start(info, sec_type: str, max_date, target_trade_date: date):
@@ -303,7 +303,7 @@ def _resolve_history_start(info, sec_type: str, max_date, target_trade_date: dat
     return start, None
 
 
-def sync_symbol_history(symbol: str) -> dict:
+def sync_history_market(symbol: str) -> dict:
     """同步**单个标的**的历史行情：个股后复权、指数不复权。
 
     返回 `{status, message, reason?, count?}`，status ∈ success/no_data/skipped/error：
@@ -349,8 +349,8 @@ def sync_symbol_history(symbol: str) -> dict:
                 return {'status': 'skipped', 'message': f'{symbol} 跳过：{reason}',
                         'reason': reason}
             max_date = (
-                session.query(func.max(IndexHistory.trade_date))
-                .filter(IndexHistory.symbol == symbol)
+                session.query(func.max(HistoryMarket.trade_date))
+                .filter(HistoryMarket.symbol == symbol)
                 .scalar()
             )
 
@@ -391,13 +391,13 @@ def sync_symbol_history(symbol: str) -> dict:
 
         df['eob'] = pd.to_datetime(df['eob']).dt.date
         df = df.rename(columns={'eob': 'trade_date'})
-        df = df_init_model(df, IndexHistory)
+        df = df_init_model(df, HistoryMarket)
         # 两列由同步链路写入（不在 cols_map_fields 里），必须在字段过滤之后补
         df['sec_type'] = sec_type
         df['adjust'] = adjust_label
         df = df.replace({np.nan: None})
-        result = upsert_df_to_db(df, IndexHistory.__table__.name,
-                                 settings.DB_ENGINE, IndexHistory.unique_keys)
+        result = upsert_df_to_db(df, HistoryMarket.__table__.name,
+                                 settings.DB_ENGINE, HistoryMarket.unique_keys)
         logger.info(f"->{symbol} 成功（{sec_type}/{adjust_label}）：{result}")
         return {'status': 'success', 'count': len(df),
                 'message': f'{symbol} 导入 {len(df)} 条（{sec_type}/{adjust_label}）'}

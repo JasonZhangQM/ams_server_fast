@@ -8,7 +8,7 @@ bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项�
 - GET  /bds/trade-dates             查询交易日历
 - GET  /bds/symbol-infos            查询证券信息
 - GET  /bds/symbol-industries       行业下拉选项
-- GET  /bds/index-histories         指数历史行情
+- GET  /bds/history-markets         历史行情
 - GET  /bds/index-codes             指数代码下拉
 - GET  /bds/index-constituents      指数成分股
 - GET  /bds/index-cum-returns       指数累计收益率
@@ -49,9 +49,9 @@ from server_fast.app.bds.models import (
     FundCashflow, 
     FundIncome, 
     GoldReserve, 
+    HistoryMarket,
     IndexConstituent, 
     IndexConstituentSync,
-    IndexHistory, 
     OptionConfig,
     OptionInfo,
     OptionMarket,
@@ -70,10 +70,10 @@ from server_fast.app.bds.schemas import (
     FundCashflowOut,
     FundIncomeOut,
     GoldReserveOut,
+    HistoryMarketOut,
     HistoryTargetsResolveRequest,
     IndexConstituentOut,
     IndexConstituentSyncRequest,
-    IndexHistoryOut,
     IndexValuationRow,
     IndexValuationSyncRequest,
     MacroSyncRequest,
@@ -109,9 +109,9 @@ from server_fast.app.bds.services import (
     upsert_fund_income_sql,
     upsert_gold_reserve_sql,
     upsert_index_constituent_sql,
-    upsert_index_history_sql,
+    upsert_history_market_sql,
     sync_one_index,
-    sync_symbol_history,
+    sync_history_market,
     sync_symbol_info_all,
     upsert_symbol_info_excel_sql,
     upsert_symbol_info_gm_sql,
@@ -479,13 +479,13 @@ def resolve_history_targets(req: HistoryTargetsResolveRequest):
     return result
 
 
-@router.post("/sync/history")
-def sync_symbol_history_endpoint(
+@router.post("/sync/history-market")
+def sync_history_market_endpoint(
     symbol: str = Query(..., description="单个标的代码（个股或指数），精确匹配"),
 ):
     """同步**单个标的**的历史行情：个股后复权（post）、指数不复权（none）。
 
-    这是批量同步 `table='history'` 的落点（`sync_runner` 逐标的 POST 本端点）。
+    这是批量同步 `table='history_market'` 的落点（`sync_runner` 逐标的 POST 本端点）。
     返回 status ∈ success/no_data/skipped/error：
     - `skipped` = 按规则确定性不处理（类型无法判定 / 上市日为空 / 明确跳过清单），
       带 `reason` 字段；批量侧把它写入任务 errors，保证「跳过原因入库」。
@@ -496,7 +496,7 @@ def sync_symbol_history_endpoint(
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
-    res = sync_symbol_history(symbol)
+    res = sync_history_market(symbol)
     if res.get("status") == "error":
         raw = res.get("message", "")
         if _is_gm_fatal(raw):
@@ -505,11 +505,11 @@ def sync_symbol_history_endpoint(
     return res
 
 
-@router.post("/sync/index-history")
-def sync_index_history():
+@router.post("/sync/history-market-index")
+def sync_history_market_index():
     """同步指数历史行情数据到数据库。
 
-    触发底层 upsert_index_history_sql() 函数，遍历配置中所有指数代码，
+    触发底层 upsert_history_market_sql() 函数，遍历配置中所有指数代码，
     通过 GM 接口获取历史行情并执行 upsert 操作。
 
     返回值说明：
@@ -524,10 +524,10 @@ def sync_index_history():
         # Config.INDEX_CODE 与信息表 industry='A股指数' 的一致性只告警、不阻断同步
         consistency_warnings = check_index_config_consistency()
         # 调用底层服务函数执行同步，返回各 symbol 的获取条数字典
-        steps, _errors = upsert_index_history_sql()
+        steps, _errors = upsert_history_market_sql()
         # 统计实际有更新数据的 symbol 数量（获取条数 > 0 表示有新增数据）
         updated_count = sum(1 for count in steps.values() if count > 0)
-        return {"status": "ok", "message": "index-history synced",
+        return {"status": "ok", "message": "history-market-index synced",
                 "updated_count": updated_count,
                 "consistency_warnings": consistency_warnings}
     except Exception as e:
@@ -535,8 +535,8 @@ def sync_index_history():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/index-histories", response_model=PageResponse[IndexHistoryOut])
-def list_index_histories(
+@router.get("/history-markets", response_model=PageResponse[HistoryMarketOut])
+def list_history_markets(
     symbol: Optional[str] = Query(None, description="代码精确匹配"),
     keyword: Optional[str] = Query(None, description="代码 / 名称模糊搜索（远程搜索用）"),
     sec_type: Optional[str] = Query(
@@ -556,25 +556,25 @@ def list_index_histories(
       翻页才不会重复/漏行；该顺序与 `k_ih_td`（二级索引末尾隐含主键）方向一致，
       可走反向索引扫描，避免深翻页 filesort。
     """
-    query = db.query(IndexHistory)
+    query = db.query(HistoryMarket)
     if symbol:
-        query = query.filter(IndexHistory.symbol == symbol)
+        query = query.filter(HistoryMarket.symbol == symbol)
     if keyword:
         kw = f"%{keyword}%"
         # 名称匹配走子查询（bds_symbol_info.name），避免在 2000 万行的大表上 JOIN 放大代价
         name_hit = db.query(SymbolInfo.symbol).filter(SymbolInfo.name.like(kw))
-        query = query.filter(or_(IndexHistory.symbol.like(kw), IndexHistory.symbol.in_(name_hit)))
+        query = query.filter(or_(HistoryMarket.symbol.like(kw), HistoryMarket.symbol.in_(name_hit)))
     if sec_type == "index":
         # 存量行（NULL）= 升级前的指数行情
-        query = query.filter(or_(IndexHistory.sec_type == "index", IndexHistory.sec_type.is_(None)))
+        query = query.filter(or_(HistoryMarket.sec_type == "index", HistoryMarket.sec_type.is_(None)))
     elif sec_type == "stock":
-        query = query.filter(IndexHistory.sec_type == "stock")
+        query = query.filter(HistoryMarket.sec_type == "stock")
     if start_date:
-        query = query.filter(IndexHistory.trade_date >= start_date)
+        query = query.filter(HistoryMarket.trade_date >= start_date)
     total, total_estimated = resolve_total(
-        db, query, IndexHistory, bool(symbol or keyword or sec_type or start_date))
+        db, query, HistoryMarket, bool(symbol or keyword or sec_type or start_date))
     items = (
-        query.order_by(IndexHistory.trade_date.desc(), IndexHistory.id.desc())
+        query.order_by(HistoryMarket.trade_date.desc(), HistoryMarket.id.desc())
         .offset(offset).limit(limit).all()
     )
 
@@ -788,7 +788,7 @@ def list_index_cum_returns(
     """查询指数累计收益率。
 
     逻辑说明：
-    1. 查询 bds_index_history 表中 trade_date >= start_date 且 symbol 在
+    1. 查询 bds_history_market 表中 trade_date >= start_date 且 symbol 在
        Config.INDEX_CODE 字典键中的全部记录。symbols 多值参数可进一步子集过滤。
     2. 用 pandas 透视数据：行索引为 trade_date（升序），列名为通过
        Config.INDEX_CODE[symbol]['sec_name'] 映射的指数名称，值为 close 收盘价。
@@ -816,10 +816,10 @@ def list_index_cum_returns(
 
     # 查询满足条件的全部指数历史记录
     rows = (
-        db.query(IndexHistory)
+        db.query(HistoryMarket)
         .filter(
-            IndexHistory.trade_date >= start_date,
-            IndexHistory.symbol.in_(allowed),
+            HistoryMarket.trade_date >= start_date,
+            HistoryMarket.symbol.in_(allowed),
         )
         .all()
     )
@@ -1480,7 +1480,7 @@ def sync_daily_indicators_all():
 # 方案：docs/基础数据并入同步卡片方案_2026-10-22.md
 #       docs/宏观同步合并一键顺序执行方案_2026-10-21.md（初版，仅宏观三段）
 #
-# 与各单段端点（/sync/trade-date、/sync/symbol-info、/sync/index-history、
+# 与各单段端点（/sync/trade-date、/sync/symbol-info、/sync/history-market-index、
 # /sync/economic-indicator-wscn、/sync/daily-indicators-all、/sync/gold-reserves-all）
 # 的关系：那些端点**原样保留**（各自列表页仍在用），这里只是把它们内部的
 # **单项函数**按固定顺序再串一遍，并逐项写进度。
@@ -1490,18 +1490,18 @@ def sync_daily_indicators_all():
 # ============================================================================
 
 # 固定执行顺序：基础在前（下游依赖）+ 快 → 慢
-# 实测耗时（2026-10-22 盘前）：trade_date 0.17s / symbol_info 8.5s / index_history 0.22s
+# 实测耗时（2026-10-22 盘前）：trade_date 0.17s / symbol_info 8.5s / history_market 0.22s
 #                             option_market 3 组约 5s（2026-10-26 实测，6 合约）
 #                             wscn 约 15s / daily 约 13s / gold 20 国约 5.5min（每国 16.4s）
 #
 # 🔴 option_info 必须排在 option_market **之前**：行情同步要从字典取「逐合约乘数」
 #    与「权威到期日」，当天新挂牌的合约若还没进字典，行情会 MISS 跳过。
-SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "index_history", "option_info",
+SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "history_market", "option_info",
                     "option_market", "wscn", "daily", "gold"]
 SYNC_STAGE_NAMES = {
     "trade_date": "交易日历",
     "symbol_info": "证券信息",
-    "index_history": "指数行情",
+    "history_market": "历史行情",
     "option_info": "期权合约字典",
     "option_market": "期权行情",
     "wscn": "经济指标（华尔街见闻）",
@@ -1513,7 +1513,7 @@ SYNC_STAGE_NAMES = {
 SYNC_STAGE_GROUPS = {
     "trade_date": "basic",
     "symbol_info": "basic",
-    "index_history": "basic",
+    "history_market": "basic",
     "option_info": "basic",
     "option_market": "basic",
     "wscn": "macro",
@@ -1527,7 +1527,7 @@ def _sync_stage_items(stage: str) -> list:
 
     - trade_date：原子操作（一年只在跨年时真写库），整体 1 项
     - symbol_info：东财 Excel / gm 两条通道各 1 项（与 sync_symbol_info_all 的步骤划分一致）
-    - index_history：按证券信息表的行业「A股指数」逐指数（Config 仅在信息表为空时兜底）
+    - history_market：按证券信息表的行业「A股指数」逐指数（Config 仅在信息表为空时兜底）
     - option_market：按「品种 × 到期月」逐组（= 一次接口请求），与 /option-market/sync 的分组口径一致；
       清单为空时给一个 `__no_config__` 伪项，让失败明细能说清原因，而不是 0 项静默通过
     - wscn：service 内部按自然月分批（首次全量 141 批起）**不可切分** ⇒ 整体 1 项
@@ -1537,7 +1537,7 @@ def _sync_stage_items(stage: str) -> list:
         return [("trade_date", "交易日历")]
     if stage == "symbol_info":
         return [("excel", "东财Excel"), ("gm", "gm证券信息")]
-    if stage == "index_history":
+    if stage == "history_market":
         # 来源：证券信息表 industry='A股指数'（Config.INDEX_CODE 仅在信息表为空时兜底）
         return [(code, info.get("sec_name") or code)
                 for code, info in get_index_infos_from_symbol_info().items()]
@@ -1565,7 +1565,7 @@ def _sync_stage_items(stage: str) -> list:
 def _run_sync_item(stage: str, key: str) -> int:
     """执行单项，返回条数（-1=失败）。
 
-    各 service 单项函数内部已 try/except（宏观三个返回 -1，index_history 的
+    各 service 单项函数内部已 try/except（宏观三个返回 -1，history_market 的
     sync_one_index 同样返回 -1）；这里再兜一层：任何意外异常都只算该项失败，
     不得中断整段或整个任务。
 
@@ -1579,7 +1579,7 @@ def _run_sync_item(stage: str, key: str) -> int:
             if key == "excel":
                 return upsert_symbol_info_excel_sql()
             return upsert_symbol_info_gm_sql()
-        if stage == "index_history":
+        if stage == "history_market":
             # info=None → 服务内按证券信息表 industry='A股指数' 解析，Config 兜底
             return sync_one_index(key)
         if stage == "option_info":
@@ -1704,11 +1704,11 @@ def _run_sync_thread(task_id: int, stages: list):
 def sync_macro(req: MacroSyncRequest):
     """一键同步（后台线程异步执行，返回 task 供轮询进度）。
 
-    请求体：`{"stages": ["symbol_info", "index_history", "wscn", "daily"]}`，只跑传入的段。
-    **执行顺序固定 trade_date → symbol_info → index_history → wscn → daily → gold**，
+    请求体：`{"stages": ["symbol_info", "history_market", "wscn", "daily"]}`，只跑传入的段。
+    **执行顺序固定 trade_date → symbol_info → history_market → wscn → daily → gold**，
     不按入参数组顺序（基础数据是下游依赖，且整体快 → 慢，中途停止的代价最小）。
 
-    进度：`total_count` = 各段条目数之和（trade_date 1 + symbol_info 2 + index_history 每指数 1
+    进度：`total_count` = 各段条目数之和（trade_date 1 + symbol_info 2 + history_market 每指数 1
     + wscn 1 + daily 每指标 1 + gold 每国 1），每完成一项 `done_count` +1。
     `result.stages` 存各段 total/done/ok/no_data/error/rows（含 group 供前端分组），
     `result.stage` 存当前段 —— wscn 首轮全量时进度条会停在该段，靠它显示"正在跑哪一段"。

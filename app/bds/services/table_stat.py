@@ -10,10 +10,10 @@ bds 列表端点用 `query.count()` 取分页 total。在两张 600 万行级日
 方案（L1-b）：用一张小表缓存「每张表的总行数」，无筛选时直接读（O(1)）；
 有筛选时仍走精确 `COUNT(*)`（走索引，毫秒级）。写入时机 = 批量同步收尾重算。
 
-覆盖范围：只登记「无筛选 count 慢到需要缓存」的表（两张 6M 日频表 + history）。
+覆盖范围：只登记「无筛选 count 慢到需要缓存」的表（两张 6M 日频表 + history_market）。
 其余 bds 列表表（最大 11.5 万行）count 本就是毫秒级，纳入只会把精确总数换成
 可能陈旧的值，零收益 ⇒ 不登记。要扩只需在 STAT_TABLES 加一行（刷新自动纳入）。
-⚠️ history（`bds_index_history`，个股全量回填后可达 2000 万行级）在批量同步收尾
+⚠️ history_market（`bds_history_market`，个股全量回填后可达 2000 万行级）在批量同步收尾
 重算时会做一次全表 COUNT，耗时较长但发生在任务提交之后，不阻塞界面。
 
 用法：
@@ -28,14 +28,14 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from server_fast.app.bds.models import BdsTableStat, DailyMktvalue, DailyValuation, IndexHistory
+from server_fast.app.bds.models import BdsTableStat, DailyMktvalue, DailyValuation, HistoryMarket
 
 # 同步目标名（= sync_runner.config.TABLES 的取值）→ ORM 模型
-# history：个股+指数历史行情，回填后可达 2000 万行级，无筛选 COUNT(*) 显著变慢，纳入缓存
+# history_market：个股+指数历史行情，回填后可达 2000 万行级，无筛选 COUNT(*) 显著变慢，纳入缓存
 STAT_TABLES: dict[str, type] = {
     "daily-valuation": DailyValuation,
     "daily-mktvalue": DailyMktvalue,
-    "history": IndexHistory,
+    "history_market": HistoryMarket,
 }
 
 # 缓存有效期：超过则视为过旧 → 回落 information_schema 估算（并让前端标 ≈）。
