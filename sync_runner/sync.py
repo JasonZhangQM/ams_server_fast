@@ -44,7 +44,10 @@ def sync_one(symbol, table, force_fund=False):
     force_fund=True 时，财务四张表带 force=true 参数：跳过库内 MAX(rpt_date) 与
     bds_symbol_info.latest_rpt_date 的比对，强制调 gm 接口。其余表不受影响。
     '''
-    url = f'{API_BASE}/bds/sync/{table}'
+    # 表 key 与端点路径的映射：其余表 key 本身就是端点段（连字符），
+    # 仅 history_market（下划线 key）对应连字符端点 history-market
+    endpoint = 'history-market' if table == HISTORY_TABLE else table
+    url = f'{API_BASE}/bds/sync/{endpoint}'
     # history_market 全量取数慢，客户端超时需放宽（后端 gm 上限 150s，这里留 30s 余量）
     timeout = HISTORY_TIMEOUT if table == HISTORY_TABLE else REQUEST_TIMEOUT
     params = {'symbol': symbol}
