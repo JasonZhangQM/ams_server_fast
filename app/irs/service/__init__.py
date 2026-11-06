@@ -35,6 +35,7 @@ from server_fast.app.irs.service import (
     um_map,
     um_today,
     um_percentile,
+    um_budget,
 )
 
 __all__ = [
@@ -61,4 +62,6 @@ __all__ = [
     'um_today',
     # 2026-11-05：最新估值分位截面表（irs_um_percentile）
     'um_percentile',
+    # 2026-11-06：加仓点 × 风险预算（额度唯一实现在 bills/services/budget.py）
+    'um_budget',
 ]

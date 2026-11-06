@@ -208,6 +208,20 @@ def list_all_plans(db: Session = Depends(get_db)):
     return service.um_plan.list_all(db)
 
 
+@router.get("/um-budget")
+def get_um_budget(
+    symbol: str = Query(..., description="标的代码，如 SHSE.000300 / GC00Y / SHSE.510300"),
+    account: Optional[str] = Query(None, description="账户；不传则取该品种组有保证金占用的账户"),
+):
+    """标的是否还有加仓额度（改造 4）。
+
+    额度唯一实现在 `bills/services/budget.py`，本端点只做「标的 → 品种组」导航。
+    与风险看板走同一套 `load_context/run/evaluate`，但**是另一次计算**——
+    要看同一时点的数就回看板，不要拿这里的数去和半小时前的看板对比。
+    """
+    return service.um_budget.feasibility(symbol, account)
+
+
 @router.get("/underlying-monitors", response_model=PageResponse[UnderlyingMonitorOut])
 def list_underlying_monitors(
     symbol: Optional[str] = Query(None, description="代码精确匹配"),
