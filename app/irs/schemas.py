@@ -433,3 +433,166 @@ class TodayItem(BaseModel):
     current_pct: Optional[float] = None
     drift: Optional[float] = None              # 当前 − 目标
     priority: int = 5                          # 1 证伪置顶 / 2 剧本命中 / 3 裸仓 / 4 复核 / 5 其余
+
+
+# =========================================================================
+# 风险看板（GET /irs/risk-board，对应 risk_scenario.compute() 输出）
+# 2026-11-08 自 bills/schemas.py 整体迁入
+# =========================================================================
+class RiskBoardAccountOut(BaseModel):
+    """账户风险卡（净值口径）。"""
+
+    net0: float  # 基准净值（模型盯市修正后）
+    fin: float  # 融资余额
+    eq: float  # 客户权益 = net0 + 融资
+    margin: float  # 保证金占用
+    real: Optional[float] = None  # 真实风险度 = 保证金 / 净资产
+    exch: Optional[float] = None  # 交易所风险度 = 保证金 / 客户权益
+    coverage: Optional[float] = None  # 自有资金保证金覆盖率 = 净资产 / 保证金
+    breached: bool = False  # 是否已触发追保（交易所口径）
+
+
+class RiskBoardPositionOut(BaseModel):
+    """逐仓持仓明细。"""
+
+    acct: str  # 账户
+    symbol: str  # 交易代码
+    kind: str  # fut / call / put / sec
+    und_key: Optional[str] = None  # 情景分组键
+    qty: int  # 持仓数量（带符号，期权为张数）
+    nominal: float  # 名义市值
+    max_loss: Optional[float] = None  # 最大亏损；null=卖认购理论上行无上限
+    drop1_loss: float  # 标的变动 1% 的盈亏敏感度
+    margin_now: float  # 当前保证金
+    cp: Optional[str] = None  # C=认购 / P=认沽（仅期权）
+    side: Optional[str] = None  # long=买方 / short=卖方（仅期权）
+    strike: Optional[float] = None  # 行权价（仅期权）
+    expiry: Optional[str] = None  # 到期日 ISO 字符串（仅期权）
+    days: Optional[int] = None  # 剩余天数（仅期权）
+    px: Optional[float] = None  # 盯市单价（仅期权）
+    sigma: Optional[float] = None  # 隐含波动率（仅期权）
+    delta: Optional[float] = None  # delta（仅期权）
+
+
+class RiskBoardDetailOut(BaseModel):
+    """单情景下的逐仓保证金/亏损（保证金结构图用）。"""
+
+    name: str  # 交易代码
+    acct: str  # 账户
+    kind: str  # fut / call / put / sec
+    mtype: Optional[str] = None  # 保证金公式族：cffex / etf / shex
+    und_key: Optional[str] = None  # 情景分组键
+    margin: float  # 该情景下的保证金
+    loss: float  # 该情景下的盈亏（正=亏）
+
+
+class RiskBoardScenarioOut(BaseModel):
+    """单个情景 × 账户的推演结果。"""
+
+    loss: float  # 组合亏损（正=亏，负=盈）
+    net: float  # 剩余净值
+    margin: float  # 保证金占用
+    real: Optional[float] = None  # 真实风险度
+    exch: Optional[float] = None  # 交易所风险度
+    breached: bool = False  # 是否追保
+    detail: Optional[List[RiskBoardDetailOut]] = None  # 逐仓明细（仅 ALL 行且 detail=true）
+
+
+class RiskBoardFirstCallOut(BaseModel):
+    """追保临界点。"""
+
+    account: str  # 账户
+    drop: float  # 临界跌幅；负数=上涨侧触发
+    direction: str  # down / up / now
+    net: Optional[float] = None  # 临界点剩余净值
+    margin: Optional[float] = None  # 临界点保证金
+
+
+class BudgetScopeOut(BaseModel):
+    """单个品种组的额度读数。"""
+
+    scope: str  # index_fut / gold / opt_short / etf_short / equity / other
+    name: str  # 中文名
+    margin: float  # 该组当前保证金占用
+    pct: Optional[float] = None  # 占账户净值比例
+    cap: Optional[float] = None  # 上限；null=未设上限（只报不判）
+    headroom: Optional[float] = None  # 额度 = net0 × cap − margin
+    per_lot: Optional[float] = None  # 该组当前每手保证金（组内最大）
+    lots: int = 0  # 还能开几手
+    status: str = "ok"  # ok / over / unknown
+
+
+class BudgetTotalOut(BaseModel):
+    """账户总闸（四档读数）。"""
+
+    cap: float  # 保证金占用上限（0.85）
+    reserve: float  # 其中只留给预设加仓点的一块（0.15）
+    usable: float  # 日常可开比例 = cap − reserve（0.70）
+    gate_now: float  # net0 × usable − margin(0)
+    gate_stress: float  # 判据：net(+stress) × usable − margin(+stress)
+    gate_stress_max: float  # 含加仓包的极限，仅展示不参与取 min
+    status: str  # ok / over / block / skip
+
+
+class BudgetAccountOut(BaseModel):
+    """单账户预算卡。"""
+
+    net0: float  # 模型盯市净值
+    book_net: float  # 账面净值（acc_aset − diff_br）
+    book_gap: float  # net0 − 账面净，非 0 时必须提示（BS 重估差）
+    margin: float
+    total: BudgetTotalOut
+    by_scope: List[BudgetScopeOut]
+    headroom: Optional[float] = None  # 取 min 后的可开额度
+    binding: str  # 取到 min 的约束：scope 名 / total@now / total@stress
+    lots: int = 0  # 可开手数
+    openable: bool = False  # 额度>0 且够一手才算能开
+    per_lot_margin: Optional[float] = None
+    verdict: str = "ok"  # block / over / ok / skip
+
+
+class BudgetSummaryOut(BaseModel):
+    """全账户汇总。"""
+
+    verdict: str
+    judged_accounts: int
+    blocked_accounts: List[str]
+    headroom_total: Optional[float] = None
+
+
+class BudgetOut(BaseModel):
+    """风险预算块（irs/service/budget.py）。"""
+
+    stress_drop: float  # 压力档，0.15 = 标的再跌 15%
+    mode: str  # 固定 sync
+    accounts: Dict[str, BudgetAccountOut]
+    symbols: Dict[str, Dict[str, str]]  # 合约 → {acct, scope}，加仓点查额度用
+    summary: BudgetSummaryOut
+
+
+class RiskBoardOut(BaseModel):
+    """风险看板完整响应（字段说明与 risk_scenario.compute() 一一对应）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    engine_ver: str  # 引擎版本
+    calc_date: str  # 计算日
+    data_as_of: Optional[str] = None  # 期权行情快照日
+    stale_days: int  # 行情滞后交易日数（0=当日，1=T−1）
+    horizon: str  # now=即期 / expiry=到期
+    iv_mult: float  # IV 冲击倍数
+    net_total: float  # 组合净资产
+    margin_total: float  # 组合保证金
+    real_total: Optional[float] = None  # 组合真实风险度
+    max_exposure: float  # 数学最大亏损合计（不含无上限合约）
+    max_exposure_unbounded: bool  # 是否存在理论上行无上限的卖认购
+    accounts: Dict[str, RiskBoardAccountOut]  # 分账户风险卡
+    positions: List[RiskBoardPositionOut]  # 逐仓明细
+    grid: Dict[str, Dict[str, Dict[str, RiskBoardScenarioOut]]]  # [mode][drop_pct][account]
+    first_call: Dict[str, Optional[RiskBoardFirstCallOut]]  # [mode] 最近追保点
+    first_call_all: Dict[str, Dict[str, Optional[RiskBoardFirstCallOut]]]  # [mode][account]
+    budget: BudgetOut  # 风险预算与加仓额度
+    mode_names: Dict[str, str]  # 情景模式中文名
+    steps: List[float]  # 情景档位（负数=涨幅）
+    upside_steps: List[float]  # 上行情景档位（负数=涨幅）
+    warnings: List[str]  # 数据降级/兜底提示

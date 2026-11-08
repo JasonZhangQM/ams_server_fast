@@ -7,7 +7,7 @@
 三个入口：
 - load_context():      读持仓/账户/合约字典/行情快照/保证金率，构造计算上下文
 - compute():           全量计算（持仓明细 + 情景矩阵 + 首个追保点），不写库
-- run_and_persist():   compute + UPSERT bills_scenario_grid（任务化重算，铁律 4.8）
+- run_and_persist():   compute + UPSERT irs_scenario_grid（任务化重算，铁律 4.8）
 
 五个口径（v2.1 修订，勿在未通读方案前改动）：
 
@@ -33,13 +33,9 @@ from sqlalchemy import func
 
 from server_fast.app.bds.models import OptionConfig, OptionInfo, OptionMarket, TradeDate
 from server_fast.app.bds.services.market_data import option_market, option_info
-from server_fast.app.bills.models import (
-    Group,
-    GroupAcc,
-    RiskParam,
-    ScenarioGrid,
-)
-from server_fast.app.bills.services import budget
+from server_fast.app.bills.models import Group, GroupAcc
+from server_fast.app.irs.models import RiskParam, ScenarioGrid
+from server_fast.app.irs.service import budget
 from server_fast.common.db import SessionLocal
 
 ENGINE_VER = "v2.0"
@@ -267,7 +263,7 @@ def load_context() -> dict:
                 und_key = FUT_UND_KEY.get(root, root)
                 mrate = params.get((f"{g.symbol.split('.')[0]}.{root}", "margin_rate"))
                 if mrate is None:
-                    raise ValueError(f"期货 {g.symbol} 缺保证金率参数（bills_risk_param）")
+                    raise ValueError(f"期货 {g.symbol} 缺保证金率参数（irs_risk_param）")
                 positions.append({
                     "kind": "fut", "acct": g.account, "name": g.symbol,
                     "mult": int(g.multiplier or 1), "qty": int(g.p_total),
@@ -375,7 +371,7 @@ def _option_position(g: Group, contracts: dict, cfg_info: dict, market: dict,
         if fut_m_rate is None:
             raise ValueError(
                 f"{g.symbol} 缺期货保证金率参数"
-                f"（bills_risk_param: {g.symbol.split('.')[0]}.{und_code}）")
+                f"（irs_risk_param: {g.symbol.split('.')[0]}.{und_code}）")
 
     cp = (spec.cp or "P").upper()
     sign = -1 if float(g.cost_total or 0) < 0 else 1
@@ -708,7 +704,7 @@ def expire_configs() -> list[str]:
 
 
 def run_and_persist() -> dict:
-    """compute + UPSERT bills_scenario_grid（任务化重算入口，审计进 result）。"""
+    """compute + UPSERT irs_scenario_grid（任务化重算入口，审计进 result）。"""
     disabled = expire_configs()
     board = compute()
     db = SessionLocal()

@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """bills 应用的 SQLAlchemy 2.0 模型定义。
 
-共 9 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / BillNote / ProfitYear /
-RiskParam / ScenarioGrid。
+共 7 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / BillNote / ProfitYear。
+
+（RiskParam / ScenarioGrid 已于 2026-11-08 随风险看板整体迁至 app/irs/models.py，
+表改名 irs_risk_param / irs_scenario_grid。）
 
 - 继承 (Base, BaseModel)，BaseModel 提供 id/create_time/update_time 及通用方法
 - 外键列名以 _id 结尾
@@ -460,64 +462,4 @@ class ProfitYear(Base, BaseModel):
 
     def __str__(self) -> str:
         return f'年度收益-{self.year}'
-
-
-class RiskParam(Base, BaseModel):
-    """风险参数（v2.0 起只保留保证金率），人工维护 + 日结单反解。"""
-
-    __tablename__ = "bills_risk_param"
-
-    scope: Mapped[str] = mapped_column(String(16), comment="品种或账户")
-    param_key: Mapped[str] = mapped_column(String(32), comment="margin_rate/underlying_price")
-    # margin_rate:保证金率
-    param_value: Mapped[Decimal] = mapped_column(Numeric(12, 6), comment="参数值")
-    source: Mapped[str] = mapped_column(String(16), comment="manual/statement/calc")
-    # manual:人工按交易所公式常量录入；statement:从券商日结单反解；calc:预留（程序计算回写，目前无代码写入）
-    effective_on: Mapped[date] = mapped_column(Date, comment="生效日")
-    note: Mapped[Optional[str]] = mapped_column(String(200), comment="备注")
-
-    __table_args__ = (
-        UniqueConstraint('scope', 'param_key', 'effective_on', name='uk_param'),
-    )
-
-    def __str__(self) -> str:
-        return f'风险参数-{self.scope}-{self.param_key}'
-
-
-class ScenarioGrid(Base, BaseModel):
-    """情景压力测试矩阵（任务化重算，铁律 4.8）。
-
-    - loss_amt 负=亏；net_after = 组合净值 − loss；
-    - risk_ratio 穿仓时写 9999（DECIMAL 存不了 inf）；
-    - account='ALL' 是组合行，其余是分账户行（分账户必看，铁律 §七-6）。
-    """
-
-    __tablename__ = "bills_scenario_grid"
-
-    calc_date: Mapped[date] = mapped_column(Date, comment="计算基准日")
-    # ⚠️ 16 而不是 8：MODES 的键是 sync / astock_only（11 字符）/ index_only（10 字符），
-    # 原先 String(8) 装不下，`run_and_persist` 一写就 `Data too long for column 'mode'`。
-    # 只因 category 精确匹配缺陷让 compute() 从未产出过有效 grid，这条路径没被走到。
-    mode: Mapped[str] = mapped_column(String(16), comment="sync/astock_only/index_only")
-    drop_pct: Mapped[Decimal] = mapped_column(
-        Numeric(6, 4), comment="情景档位,跌幅；负数=涨幅（v2.0 起含上行情景档）")
-    account: Mapped[str] = mapped_column(String(16), comment="账户；ALL=组合")
-    loss_amt: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="亏损额（正=亏，负=盈）")
-    net_after: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="情景后净值")
-    margin_req: Mapped[Decimal] = mapped_column(Numeric(14, 2), comment="保证金需求")
-    # 真实风险度 = 保证金 / 情景后净值。净值为 0/负时算不出来，写 9999 兜底（DECIMAL 存不了 inf/None）
-    risk_ratio_real: Mapped[Decimal] = mapped_column(Numeric(10, 4), comment="真实口径风险度")
-    # 交易所风险度 = 保证金 / (情景后净值 + 融资余额)。 追保判定只用这个口径 ；同样 9999 兜底
-    risk_ratio_exch: Mapped[Decimal] = mapped_column(Numeric(10, 4), comment="交易所口径风险度")
-    breached: Mapped[int] = mapped_column(Integer, default=0, comment="1=已追保/穿仓")
-    engine_ver: Mapped[str] = mapped_column(String(16), comment="公式版本")
-
-    __table_args__ = (
-        UniqueConstraint('calc_date', 'mode', 'drop_pct', 'account', name='uk_grid'),
-        Index('k_grid_date', 'calc_date'),
-        {'comment': '情景压力测试矩阵'},
-    )
-
-    def __str__(self) -> str:
-        return f'情景-{self.calc_date}-{self.mode}-{self.drop_pct}-{self.account}'
 

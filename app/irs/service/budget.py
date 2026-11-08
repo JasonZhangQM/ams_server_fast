@@ -21,7 +21,7 @@
    减仓归手册 R4 管，与 R2（不许开新的）分家。
 3. 现货-only 账户跳过预算判定：M03 持仓率 100% 但没有追保风险，红标只会钝化告警。
 4. 前端不得自行拼装额度：两次请求跨时点 = 10-23 错误的微缩版。irs 侧要额度，
-   一律 `from server_fast.app.bills.services.budget import headroom_of`（🔒4.12 允许）。
+   一律 `from server_fast.app.irs.service.budget import headroom_of`（🔒4.12 允许）。
 """
 import math
 import re
@@ -283,7 +283,7 @@ def evaluate_live() -> dict:
     ⚠️ 与 `compute()` 走的是同一套 `load_context` / `run` / `evaluate`，
     口径不会漂移；但两次调用的行情时点可能不同，跨时点比较没有意义。
     """
-    from server_fast.app.bills.services import risk_scenario
+    from server_fast.app.irs.service import risk_scenario
 
     ctx = risk_scenario.load_context()
     now = risk_scenario.run(ctx, "sync", 0.0)
@@ -336,7 +336,7 @@ def headroom_of(symbol: str, acct: Optional[str] = None) -> dict:
     `lots` = 该品种组还能开几手（按该组当前每手保证金）；新开一个「该组还没有的品种」
     时 per_lot 未知，此时 lots=0 并注明原因，不猜。
     """
-    from server_fast.app.bills.services import risk_scenario
+    from server_fast.app.irs.service import risk_scenario
 
     ctx = risk_scenario.load_context()
     blk = evaluate(ctx, ctx["params"],

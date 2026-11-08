@@ -43,7 +43,7 @@ def feasibility(symbol: str, acct: Optional[str] = None) -> dict:
     返回 `{symbol, scopes: [...], binding, verdict, note}`；
     `binding` 取各组里最严的一条（额度最小），因为「能不能加」由最紧的那条决定。
     """
-    from server_fast.app.bills.services import budget as bills_budget
+    from server_fast.app.irs.service import budget as bills_budget
 
     scopes = scopes_of(symbol)
     if not scopes:
