@@ -444,8 +444,17 @@ def _net0(ctx: dict, horizon: str, iv_mult: float) -> dict[str, float]:
 
 
 def run(ctx: dict, mode: str, drop: float, horizon: str = "now",
-        iv_mult: float = 1.0) -> dict:
-    """单模式单情景推演。drop<0 表示上涨；horizon∈{now, expiry}。"""
+        iv_mult: float = 1.0, shifts: Optional[dict] = None) -> dict:
+    """单模式单情景推演。drop<0 表示上涨；horizon∈{now, expiry}。
+
+    shifts（2026-11-08 新增，标的到档情景用）：按持仓精确指定跌幅，
+    键为 ``(acct, symbol)``，值为该持仓的跌幅（正数=下跌）。
+    给定时忽略 mode/drop，未列出的持仓 shift=0 —— 价格冻结，但保证金
+    仍按基准价计入账户分母（漏算会把账户风险度严重低估）。
+    默认 None ⇒ 走原来的「全组同跌」语义，风险看板 / budget / compute 零回归。
+
+    注意两种语义互斥：这里是「单标的驱动、其它不动」，不是 MODES 的分组联动。
+    """
     f = MODES[mode]
     accs = ctx["accounts"]
     net0 = _net0(ctx, horizon, iv_mult)
@@ -453,7 +462,11 @@ def run(ctx: dict, mode: str, drop: float, horizon: str = "now",
     margin = {a: 0.0 for a in accs}
     detail = []
     for p in ctx["positions"]:
-        shift = drop * f.get(p["und_key"], 0)
+        if shifts is not None:
+            # 单标的到档情景：按 (账户, 合约) 精确施加跌幅，其余持仓冻结。
+            shift = shifts.get((p["acct"], p.get("symbol")), 0.0)
+        else:
+            shift = drop * f.get(p["und_key"], 0)
         if p["kind"] in ("call", "put"):
             S = p["S0"] * (1 - shift)
             v0 = p["sign"] * _option_value(p, p["S0"], horizon, iv_mult) * p["mult"] * p["qty"]

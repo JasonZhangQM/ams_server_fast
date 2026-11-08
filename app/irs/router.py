@@ -341,6 +341,34 @@ def get_underlying_monitor_detail(id_: int, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/underlying-monitors/{id_}/level-scenario")
+def get_underlying_monitor_level_scenario(
+    id_: int,
+    horizon: str = Query("now", pattern="^(now|expiry)$",
+                         description="时点口径：now=即期 BS / expiry=到期内在价值"),
+    iv_mult: float = Query(1.0, ge=0.5, le=3.0, description="IV 倍数（首版固定 1.0）"),
+    db: Session = Depends(get_db),
+):
+    """标的到档情景（只读现算，不落库）。
+
+    五档并列、假设到价：只把该标的项下持仓平移到档位涨跌幅，其余持仓价格冻结
+    但保证金仍计入账户分母。返回逐持仓 Δ盈亏 / 逐档保证金、标的合计、
+    账户与组合层风险指标、另一时点汇总、以及全部口径告警。
+
+    与 /irs/risk-board 的区别：那边是「全组同跌」，这里是「单标的驱动」。
+    行情陈旧 / 合约未认领 / 归属未命中等 ValueError 统一转 409。
+    """
+    um = db.get(UnderlyingMonitor, id_)
+    if um is None:
+        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
+    try:
+        return service.um_level_scenario.build(db, um.symbol, horizon, iv_mult)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"到档情景计算失败：{str(e)}")
+
+
 @router.get("/underlying-monitors/{id_}/groups")
 def list_underlying_monitor_groups(
     id_: int,

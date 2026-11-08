@@ -38,6 +38,7 @@ from server_fast.app.irs.service import (
     um_budget,
     budget,
     risk_scenario,
+    um_level_scenario,
 )
 
 __all__ = [
@@ -69,4 +70,6 @@ __all__ = [
     # 2026-11-08：风险看板（自 bills 模块整体迁入）
     'budget',
     'risk_scenario',
+    # 2026-11-08：标的监测抽屉「到档情景」（复用 risk_scenario.run 的 shifts）
+    'um_level_scenario',
 ]
