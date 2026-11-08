@@ -251,3 +251,48 @@ def stats() -> dict:
             "source_as_of": {r.symbol: (r.source_as_of.isoformat()
                                         if r.source_as_of else None) for r in rows},
         }
+
+
+def read_row(symbol: str, db: Optional[Session] = None) -> Optional[dict]:
+    """读取**单标的**最新分位整行，供标的监测抽屉「估值与走势」Tab 展示。
+
+    2026-11-08 新增。只做字段搬运：不计算、不回落实时公式、不从
+    `bds_valuation_percentile` 历史表派生（🔒 分位读取唯一入口是本表）。
+    `status != ok` 的行照常返回，由前端标灰并说明原因（不静默抹掉）。
+    """
+    own = db is None
+    session = SessionLocal() if own else db
+    try:
+        r = session.query(UmPercentile).filter(UmPercentile.symbol == symbol).first()
+        if r is None:
+            return None
+
+        def f(v):
+            return None if v is None else round(float(v), 4)
+
+        current, pct, status = {}, {}, {}
+        for metric, pre in PCT_PREFIX.items():
+            current[metric] = f(getattr(r, f"current_{pre}"))
+            status[metric] = getattr(r, f"status_{pre}")
+            pct[metric] = {
+                "3y": f(getattr(r, f"{pre}_pct_3y")),
+                "5y": f(getattr(r, f"{pre}_pct_5y")),
+                "10y": f(getattr(r, f"{pre}_pct_10y")),
+            }
+        return {
+            "symbol": r.symbol,
+            "subject_type": r.subject_type,
+            "as_of": r.as_of.isoformat() if r.as_of else None,
+            "source_as_of": r.source_as_of.isoformat() if r.source_as_of else None,
+            "calc_at": r.calc_at.strftime("%Y-%m-%d %H:%M:%S") if r.calc_at else None,
+            "first_date": r.first_date.isoformat() if r.first_date else None,
+            "raw_n": r.raw_n,
+            "status_note": r.status_note,
+            "current": current,
+            "pct": pct,
+            "status": status,
+        }
+    finally:
+        if own:
+            session.close()
+

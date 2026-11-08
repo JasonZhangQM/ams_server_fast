@@ -223,6 +223,26 @@ def get_um_budget(
     return service.um_budget.feasibility(symbol, account)
 
 
+@router.get("/um-market-stats")
+def get_um_market_stats(
+    symbol: str = Query(..., description="标的代码（= irs_underlying_monitor.symbol）"),
+    range_: str = Query("5y", alias="range", pattern="^(1y|3y|5y|10y|ytd|all)$",
+                        description="区间：默认 5 年；ytd=年初至今，all=全史"),
+    metric: str = Query("pe_ttm", pattern="^(pe_ttm|pb_mrq|ps_ttm|dy_ttm)$",
+                        description="估值指标，默认 PE(TTM)"),
+    db: Session = Depends(get_db),
+):
+    """标的档案抽屉「估值与走势」Tab（2026-11-08）。
+
+    一次返回四块：最新估值分位（`irs_um_percentile` 唯一入口）、估值原始序列、
+    累计收益率、回撤。口径全在后端算，前端零计算、不补实时价。
+    无估值/行情的标的（GC00Y / SPX）返回 coverage=false + 主表字段降级，不猜价。
+
+    ⚠️ 关联键一律用 symbol：主表 id 会漂移。
+    """
+    return service.um_market_stats.build(symbol, range_, metric, db)
+
+
 @router.get("/underlying-monitors", response_model=PageResponse[UnderlyingMonitorOut])
 def list_underlying_monitors(
     symbol: Optional[str] = Query(None, description="代码精确匹配"),

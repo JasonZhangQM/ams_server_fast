@@ -124,6 +124,7 @@ from server_fast.app.bds.services.valuation import index_valuation
 from server_fast.app.bds.services.valuation import stock_valuation
 from server_fast.app.bds.services.valuation import percentile_store
 from server_fast.app.bds.services.market_data import option_info, option_market
+from server_fast.app.bds.services.market_data.cum_return import cum_return_drawdown
 from server_fast.common.db import SessionLocal, get_db
 from server_fast.common.pagination import PageResponse
 
@@ -885,14 +886,9 @@ def list_index_cum_returns(
     # 列名由 symbol 映射为 sec_name（指数名称）
     df = df.rename(columns={k: v["sec_name"] for k, v in Config.INDEX_CODE.items()})
 
-    # 累计净值：当日收盘价 / 首日收盘价
-    cum = df / df.iloc[0]
-    # 累计收益率：(累计净值 - 1) * 100，保留两位小数
-    cum_df = ((cum - 1) * 100).round(2)
-
-    # 最大回撤：当日累计净值 / 截至当日历史峰值 - 1，结果为非正值（≤0）
-    running_max = cum.expanding().max()
-    max_drawdown_df = ((cum / running_max - 1) * 100).round(2)
+    # 累计收益率 / 回撤：口径唯一实现在 market_data/cum_return.py
+    # （2026-11-08 抽出，irs 标的监测抽屉共用；此处行为不变）
+    _, cum_df, max_drawdown_df = cum_return_drawdown(df)
 
     # 日期字符串列表（YYYY-MM-DD 格式）
     trade_dates = [d.strftime("%Y-%m-%d") for d in cum_df.index]
