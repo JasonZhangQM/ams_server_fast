@@ -226,8 +226,8 @@ def get_um_budget(
 @router.get("/um-market-stats")
 def get_um_market_stats(
     symbol: str = Query(..., description="标的代码（= irs_underlying_monitor.symbol）"),
-    range_: str = Query("5y", alias="range", pattern="^(1y|3y|5y|10y|ytd|all)$",
-                        description="区间：默认 5 年；ytd=年初至今，all=全史"),
+    range_: str = Query("10y", alias="range", pattern="^(1y|3y|5y|10y|ytd|all)$",
+                        description="区间：默认 10 年；ytd=年初至今，all=全史"),
     metric: str = Query("pe_ttm", pattern="^(pe_ttm|pb_mrq|ps_ttm|dy_ttm)$",
                         description="估值指标，默认 PE(TTM)"),
     db: Session = Depends(get_db),

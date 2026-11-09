@@ -53,7 +53,7 @@ def _start_date(range_key: str, today: date) -> Optional[date]:
         return None
     if range_key == "ytd":
         return date(today.year, 1, 1)
-    return shift_years(today, RANGE_YEARS.get(range_key, 5))
+    return shift_years(today, RANGE_YEARS.get(range_key, 10))
 
 
 def _latest_trade_date(db: Session) -> Optional[date]:
@@ -169,9 +169,13 @@ def _arr(series: pd.Series) -> list:
     return [None if pd.isna(v) else float(v) for v in series]
 
 
-def build(symbol: str, range_key: str = "5y", metric: str = "pe_ttm",
+def build(symbol: str, range_key: str = "10y", metric: str = "pe_ttm",
           db: Optional[Session] = None) -> dict:
-    """一次返回四块数据。`symbol` 是业务主键（id 会漂移，禁用 id 关联）。"""
+    """一次返回四块数据。`symbol` 是业务主键（id 会漂移，禁用 id 关联）。
+
+    默认区间近 10 年（2026-11-09 改，原 5 年）、默认指标 PE(TTM)；
+    与路由 `Query("10y")`、前端 `range` 初值三处必须同步。
+    """
     own = db is None
     session = SessionLocal() if own else db
     try:
