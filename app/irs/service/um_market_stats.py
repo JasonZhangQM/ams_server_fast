@@ -213,7 +213,14 @@ def build(symbol: str, range_key: str = "5y", metric: str = "pe_ttm",
         price_as_of = (perf or {}).get("summary", {}).get("end_date")
         stale_days = None
         if latest_td and price_as_of:
-            stale_days = (latest_td - date.fromisoformat(price_as_of)).days
+            # 交易日口径：0=当日、1=T−1、2=T−2（按 bds_trade_date 数交易日）。
+            # 与风险看板/风险引擎共用 risk_scenario._stale_days，禁止用日历天差
+            # ——跨周末会凭空虚高 2 天，也禁止在本模块另写一套计数。
+            # 函数内导入：避开 service 包初始化顺序（同 um_percentile）。
+            from server_fast.app.irs.service import risk_scenario
+
+            stale_days = risk_scenario._stale_days(
+                session, date.fromisoformat(price_as_of), latest_td)
 
         if not coverage["valuation"] and not coverage["price"]:
             message = "该标的暂无估值与日频行情落表数据（外盘 / 商品类），下方仅展示主表行情字段，不构成累计收益率或回撤。"
