@@ -45,7 +45,10 @@ FIXED_NOTES = [
     "账户层净值、保证金、风险度是账户全部持仓口径（含本情景中价格冻结的其它持仓），"
     "不是该标的单项口径。",
     "到档浮盈 = 系统账面浮动盈亏 + 模型盯市口径 Δ盈亏，属混合口径 [推算]；"
-    "逐仓盈亏只报模型口径的 Δ盈亏。",
+    "逐仓与分账户并列展示账面「当前盈亏」和模型口径 Δ盈亏，两者基准不同，不可相加对账。",
+    "分账户「当前盈亏」= 账户层面全部持仓账面浮盈（bills_group_acc.pf_total，排除 account='合计'），"
+    "与该标的项下口径无关；五档表与逐仓「当前盈亏」仍只统计该标的项下持仓，"
+    "三处同名列口径不同，不可互相相加或作对账。",
 ]
 
 
@@ -71,6 +74,46 @@ def _owned_rows(db: Session, symbol: str) -> list[dict]:
         ORDER BY g.symbol
     """)
     return [dict(r) for r in db.execute(sql, {"s": symbol}).mappings().all()]
+
+
+def _pf_by_account(db: Session) -> dict:
+    """账户层面全部持仓的账面浮盈：直接读账户汇总表 bills_group_acc.pf_total。
+
+    与标的归属无关（用户 2026-11-09 定：分账户「当前盈亏」按账户层面取数）。
+    只读探针已核对：该值与 bills_group 按 account 汇总 pf_total 逐账户差 0，
+    账户键与 load_context() 的 acct 完全对齐。必须排除 account='合计'（🔒1.5），
+    该行是各账户之和，重复计会把整表放大一倍。
+    """
+    sql = text("""
+        SELECT account, pf_total
+        FROM bills_group_acc
+        WHERE account <> '合计'
+    """)
+    return {r["account"]: _f(r["pf_total"])
+            for r in db.execute(sql).mappings().all()}
+
+
+def _pf_by_position(db: Session, symbol: str) -> dict:
+    """该标的项下在仓持仓的账面浮盈按 (账户, 合约) 拆分。
+
+    bills_group 唯一键 account+category+symbol、每行带 pf_total；按 (account, symbol)
+    求和后与 load_context() 的 (acct, symbol) 键一一对应（只读探针已核对：无重复键、
+    全命中）。过滤条件必须与 _pf_by_account 完全一致，保证
+    Σ逐仓 == Σ分账户 == 标的合计 pf_now。
+    """
+    sql = text(f"""
+        SELECT b.account, b.symbol, SUM(b.pf_total) AS pf_now
+        FROM bills_group b
+        JOIN bills_group_symbol g
+          ON g.category = b.category AND g.symbol = b.symbol
+        WHERE (g.underlying_symbol = :s OR g.symbol = :s)
+          AND {attachable_sql('g')}
+          AND b.account <> '合计'
+          AND b.p_total IS NOT NULL AND b.p_total <> 0
+        GROUP BY b.account, b.symbol
+    """)
+    return {(r["account"], r["symbol"]): _f(r["pf_now"])
+            for r in db.execute(sql, {"s": symbol}).mappings().all()}
 
 
 def _unmapped_in_position(db: Session) -> dict:
@@ -213,6 +256,18 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         )
     if not target_positions:
         warnings.append(f"标的 {symbol} 当前无在仓持仓，仅展示档位价，盈亏与保证金为空。")
+    # 分账户账面浮盈：账户层面口径，与标的归属无关，故不再与 pf_now_total 对账
+    pf_by_acct = _pf_by_account(db)
+    pf_now_total = sum(_f(r["pf_total"]) for r in owned if _f(r["p_total"]) != 0)
+    # 逐仓账面浮盈：只统计真正进入风险上下文的键，漏配/未认领会显式报差
+    pf_by_pos = _pf_by_position(db, symbol)
+    pf_pos_gap = round(sum(v for k, v in pf_by_pos.items() if k in shift_keys)
+                       - pf_now_total, 2)
+    if abs(pf_pos_gap) > 0.01:
+        warnings.append(
+            f"逐持仓账面浮盈合计与标的账面浮盈相差 {pf_pos_gap} 元，"
+            "部分在仓归属行可能未进入风险上下文，逐仓「当前盈亏」仅供参考。"
+        )
     if len(levels_pp) < len(LEVELS):
         warnings.append("部分档位价为空，这些档位不参与计算。")
 
@@ -223,9 +278,11 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         for h in HORIZONS
     }
 
-    def assemble(res: dict, base: dict, pp: float, pct: float, h: str) -> dict:
+    def assemble(res: dict, base: dict, res_other: dict, pf_by_acct: dict,
+                 pf_by_pos: dict, pp: float, pct: float, h: str) -> dict:
         dm = _detail_map(res)
         bd = _detail_map(base)
+        dm_other = _detail_map(res_other)
         positions = []
         for p in target_positions:
             key = (p["acct"], p["name"])
@@ -234,6 +291,9 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
             if d is None:
                 warnings.append(f"持仓 {p['acct']}/{p.get('symbol')} 未出现在情景明细中，已跳过。")
                 continue
+            if key not in dm_other:
+                warnings.append(
+                    f"持仓 {p['acct']}/{p.get('symbol')} 未出现在另一时点明细中，对照 Δ盈亏按 0 处理。")
             margin_at = _f(d["margin"])
             margin_base = _f(b["margin"]) if b else 0.0
             g = owned_by_symbol.get(p.get("symbol"), {})
@@ -255,7 +315,9 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
                 "price_now": p.get("S0") if p["kind"] in ("call", "put") else p.get("px"),
                 "price_at": ((p.get("S0") if p["kind"] in ("call", "put") else p.get("px")) or 0) * (1 + pct),
                 "value_now": round(_f(p.get("sys_value")), 2),
+                "pf_now": _r2(pf_by_pos.get((p["acct"], p.get("symbol")), 0.0)),
                 "delta_pnl": _r2(-_f(d["loss"])),
+                "other_delta_pnl": _r2(-_f(dm_other.get(key, {}).get("loss"))),
                 "margin_at": round(margin_at, 2),
                 "margin_delta": round(margin_at - margin_base, 2),
                 "risk_exposure": _f(g.get("risk_exposure")) or None,
@@ -267,6 +329,24 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         pf_now = sum(_f(r["pf_total"]) for r in in_pos)
         exposure = sum(_f(r["risk_exposure"]) for r in in_pos)
         pf_at = pf_now + delta_pnl
+
+        # 逐账户 Δ 盈亏：只聚合该标的项下的持仓（其余持仓 shift=0，loss 恒 0）
+        target_keys = {(p["acct"], p["name"]) for p in target_positions}
+
+        def _acct_deltas(detail: list[dict]) -> dict:
+            out: dict = {}
+            for d in detail:
+                if (d["acct"], d["name"]) in target_keys:
+                    out[d["acct"]] = out.get(d["acct"], 0.0) - _f(d["loss"])
+            return out
+
+        main_acct = _acct_deltas(res["detail"])
+        other_acct = _acct_deltas(res_other["detail"])
+        accounts = _account_rows(res)
+        for a in accounts:
+            a["pf_now"] = _r2(pf_by_acct.get(a["account"], 0.0))
+            a["delta_pnl"] = _r2(main_acct.get(a["account"], 0.0))
+            a["other_delta_pnl"] = _r2(other_acct.get(a["account"], 0.0))
         return {
             "pp": round(pp, 4),
             "pct": round(pct, 6),
@@ -284,7 +364,7 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
                 "pf_at_note": "[推算] 账面浮盈 + 模型口径 Δ盈亏，混合口径",
             },
             "combo": _combo(res),
-            "accounts": _account_rows(res),
+            "accounts": accounts,
         }
 
     def summary(res: dict, base: dict, pp: float, h: str) -> dict:
@@ -314,7 +394,8 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
                                     iv_mult=iv_mult, shifts=shifts)
         res_other = risk_scenario.run(ctx, "sync", 0.0, horizon=other,
                                      iv_mult=iv_mult, shifts=shifts)
-        item = assemble(res_main, base_by_horizon[horizon], pp, pct, horizon)
+        item = assemble(res_main, base_by_horizon[horizon], res_other, pf_by_acct,
+                        pf_by_pos, pp, pct, horizon)
         item["label"] = label
         levels[key] = item
         compare[key] = {
