@@ -3338,6 +3338,9 @@ def _run_option_market_thread(task_id: int, group_total: int):
 #        und_key                          ← Config.OPTION_VARIETIES[option_name]['und_key']
 #        underlying_symbol                ← 品种表 `_opt_meta_by_name`
 #        expiry_date                      ← bds_option_info.last_trade_date（10-27 五次变更加回）
+#        option_type                      ← bds_option_info.cp（11-10 加回，C→call/P→put）
+#        days_left                        ← 到期日 − **今天**（11-10 加回，非行情日口径）
+#        strike                           ← bds_option_info.strike（11-10 二次加回，交易所原始值）
 #    ⇒ `POST /option-config/backfill-spec` 已删除（没有可回填的列了）。
 #    设计与验收见 `docs/bds期权合约字典方案_2026-10-27.md` §5。
 #
@@ -3346,9 +3349,17 @@ def _run_option_market_thread(task_id: int, group_total: int):
 #    is_enabled 两个人字段，其余全是身份与入参。
 #
 # ⚠️ 2026-10-27 三次变更：`cp` / `strike` / `multiplier` / `margin_type` / `expiry_date`
-#    这五个派生字段**已从响应体删除**。它们唯一的消费者是前端「规格（来自合约字典）」列，
-#    而那列 10-27 已整列下线（原因见 `schemas.OptionConfigOut` 文档）。规格要看
-#    `GET /option-info`，本接口回到纯「同步意图」清单，顺手省掉每次列表的字典 join 计算。
+#    这五个派生字段**已从响应体删除**（前端「规格」列整列下线，原因见
+#    `schemas.OptionConfigOut` 文档），本接口回到纯「同步意图」清单。
+#    🔄 2026-11-10 例外：`cp`（→ `option_type`）与 `expiry_date`（→ `days_left`）
+#    按**只读派生**重新回到响应体 —— 清单要按合约ID 看方向与「还剩几天」。
+#    仍然不落库、PUT 仍然改不了，权威依旧在 `bds_option_info`。
+#    🔴 `days_left` 基准是**今天**，与行情表 `days_left`（基准 = trade_date）
+#    口径不同，别把两处数字对齐。
+#    🔄 2026-11-10 二次变更：`strike`（→「行权价」列）也按只读派生加回，同时前端
+#    「到期月」列下线 —— 到期月可由到期日推出，行权价才是选合约真正要看的。
+#    ⚠️ 字典 `strike` 与行情表 `price_strike`（当日接口口径）来源不同，别强行对齐。
+#    乘数 / 保证金族等其余规格要看请走 `GET /option-info`。
 #
 # ⚠️ 2026-10-27 二次变更：`symbol` → `contract_id`。config 的身份换成 openctp 合约ID 后，
 #    ETF「跨标的同码」在结构上消失（不同标的的同码合约 contract_id 不同），
@@ -3369,14 +3380,21 @@ def _info_map_for(rows: list[OptionConfig]) -> dict[str, Optional[dict]]:
 def _config_out(row: OptionConfig, info: Optional[dict]) -> OptionConfigOut:
     """config 行 + 字典行 → 响应体（标准码与品种级字段只读派生）。
 
-    `info` 用来取 `symbol` 与 `last_trade_date`（→ `expiry_date`，10-27 五次变更
-    单独加回，同步清单要看「哪天到期」）；其余规格（cp/strike/multiplier）与
-    `margin_type` 仍不回传（后者是品种级派生，不是字典字段）。
+    `info` 用来取 `symbol`、`cp`、`strike` 与 `last_trade_date`：
+    - `expiry_date`（10-27 五次变更加回）：清单要看「哪天到期」；
+    - `option_type`（11-10）：ETF 的 8 位数字 contract_id 不含方向，只能取字典 `cp`；
+    - `days_left`（11-10）：`last_trade_date − 今天`，**基准是今天**，与行情表
+      `days_left`（`last_trade_date − trade_date`）口径不同，别去对齐那个数；
+    - `strike`（11-10 二次）：字典的交易所原始行权价，**不从标准码解析**（A 类调整
+      合约拼出来会错），与行情表 `price_strike`（当日接口口径）来源不同。
+    其余规格（multiplier）与 `margin_type` 仍不回传（后者是品种级派生）。
     """
     try:
         meta = _opt_meta_by_name(row.option_name)
     except HTTPException:
         meta = {}                       # 品种已下架：派生字段留空，不让列表整体 500
+    # 字典缺该合约时三个派生值一律留空，不让整页 500（前端显示 '-'）
+    expiry = info.get("last_trade_date") if info else None
     return OptionConfigOut(
         id=row.id,
         contract_id=row.contract_id,
@@ -3387,7 +3405,10 @@ def _config_out(row: OptionConfig, info: Optional[dict]) -> OptionConfigOut:
         option_name=row.option_name,
         end_month=row.end_month,
         is_enabled=row.is_enabled,
-        expiry_date=info["last_trade_date"] if info else None,
+        expiry_date=expiry,
+        option_type=_CALL_PUT.get(info.get("cp")) if info else None,
+        days_left=(expiry - date.today()).days if expiry else None,
+        strike=info.get("strike") if info else None,
         create_time=row.create_time,
         update_time=row.update_time,
     )
@@ -3398,23 +3419,38 @@ def list_option_config(
     is_enabled: Optional[int] = Query(default=None, description="1=仅启用 0=仅停用"),
     db: Session = Depends(get_db),
 ):
-    """同步清单（**按到期日倒序**，越早到期的越靠后，续月时最该先看的在最上面）。
+    """同步清单（**到期日 → 品种 → 行权价 三键倒序**，字典缺行的排最后）。
 
     🔄 2026-10-27 由「品种+到期月+合约ID」改为到期日倒序：清单页已展示「到期日」列
-    （join 字典的 `last_trade_date`），排序跟着展示走。outer join 字典排序，
-    字典里查不到的合约（`last_trade_date` 为 NULL）排最后，不让它们消失。
+    （join 字典的 `last_trade_date`），排序跟着展示走。
+
+    🔄 2026-11-10 三次变更：到期日之后再加「品种、行权价」两个倒序键。清单已上线
+    「行权价」列，同一到期日的合约要按品种聚组、组内按行权价从高到低排，
+    实值/虚值一眼分清。三个键都是 DESC ⇒ ⚠️ **最快到期的排在最后**，
+    临期续月要看末页（本次按用户指定的倒序实现；要临期在前只需把日期改 ASC）。
+    到期日 / 行权价取自 outer join 的字典，品种取自 config 表；
+    MySQL 无 NULLS LAST，用「IS NULL」布尔位把字典查不到的排最后、不让它们消失，
+    最后用 contract_id 升序稳定兜底（同品种+到期日+行权价的 call/put 两行）。
 
     `symbol` 是 join `bds_option_info` 的**只读派生值**，为 None 说明字典里查不到
     这个合约（没刷新字典 / 该合约已退市被清），不是数据错误。
-    规格（方向/行权价/乘数）不再随本接口返回，要看请用 `GET /option-info`。
+    11-10 起另返回 `option_type`（字典 `cp`）、`days_left`（到期日 − 今天）、
+    `strike`（字典行权价）三个只读派生值；⚠️ `days_left` 与行情表同名列口径不同
+    （那边基准是 `trade_date`），`strike` 与 `price_strike` 来源也不同。
+    其余规格（乘数 / 保证金族）要看请用 `GET /option-info`。
     """
     query = (db.query(OptionConfig)
              .outerjoin(OptionInfo, OptionInfo.contract_id == OptionConfig.contract_id))
     if is_enabled is not None:
         query = query.filter(OptionConfig.is_enabled == is_enabled)
-    # MySQL 无 NULLS LAST：用「IS NULL」布尔位（0=有日期在前，1=NULL 在后）+ 日期降序
+    # 三键倒序（11-10）：到期日 DESC → 品种 DESC → 行权价 DESC。
+    # 布尔位把「字典查不到（last_trade_date IS NULL）」顶到最后；
+    # DECIMAL 的 NULL 在 MySQL DESC 下本就排最后，不必再兜一层。
+    # 末尾 contract_id ASC 只做稳定兜底：同品种+到期日+行权价还有 call/put 两行。
     rows = query.order_by(OptionInfo.last_trade_date.is_(None).asc(),
                           OptionInfo.last_trade_date.desc(),
+                          OptionConfig.option_name.desc(),
+                          OptionInfo.strike.desc(),
                           OptionConfig.contract_id.asc()).all()
     infos = _info_map_for(rows)
     return [_config_out(r, infos.get(r.contract_id)) for r in rows]
@@ -3515,9 +3551,10 @@ def update_option_config(cfg_id: int, req: OptionConfigUpdate, db: Session = Dep
     - 身份字段（`contract_id` / `option_name` / `end_month`）：改了就是另一个合约
       ⇒ 先 DELETE 再 POST，别在原地改
     - 规格字段（`cp` / `strike` / `multiplier` / `margin_type` / `expiry_date`）：
-      **本表物理上没有这些列，响应体 10-27 起也不再返回**。权威在 `bds_option_info`，
+      **本表物理上没有这些列，PUT 一律改不了**。权威在 `bds_option_info`，
       要修它只有一条路——刷新字典（批量同步的 `option_info` 段）。人工修正恰是历史上
       填错到期日的成因（`au2612P840` 手填 11-23，权威值 11-24），这条通道已关闭。
+      11-10 起响应体只读返回 `option_type` / `days_left` / `strike` 三个派生值，同样不可改。
 
     `broker_symbol` 原先只能新增时写死，写错只能删行重建；现在可改，**传空串即清空**。
     ⚠️ 清空它等于让该合约**退出风险情景推演**（`risk_scenario` 用券商码匹配账单持仓，

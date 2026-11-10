@@ -690,6 +690,28 @@ class OptionConfigOut(BaseModel):
     规格五字段删的时候它跟着走了，但「这合约哪天到期、该不该续月」是清单页自己的
     决策信息（到期月 YYYYMM 看不出具体哪天），故按只读派生恢复 —— 10-27 删的是
     「逐行抄进本表」的物理列，不是这个事实本身。权威仍是 `bds_option_info.last_trade_date`。
+
+    🔄 **2026-11-10 再加回 `option_type` / `days_left` 两个只读派生值**（仍不落库）。
+    清单页要按合约ID 直接看出认购/认沽、以及「还剩几天」，而 ETF 的 8 位数字
+    contract_id 根本不含方向 ⇒ 只能取字典 `cp`（与 `OptionMarketOut.option_type`
+    同一个 `_CALL_PUT` 映射）。
+
+    ⚠️ **`days_left` 与行情表「剩余天」的口径故意不同**：
+
+    | 位置 | 公式 | 基准 | 回答的问题 |
+    |---|---|---|---|
+    | 同步清单（本 Schema） | `last_trade_date − 今天` | 服务器当日（自然日） | 现在还剩几天、该不该续月 |
+    | `/option-market` 行情表 | `last_trade_date − trade_date` | 该行行情日 | 那天快照上的剩余天 |
+
+    清单是「当前」的决策视图，不锚任何历史行情；行情表是按日累积的事实快照，
+    每一行都不许用今天覆盖。两者数字天然不同 ⇒ 前端列头/tooltip 必须标清基准，
+    否则会被当成算错。负数 = 已到期。
+
+    🔄 **2026-11-10 二次变更：`strike` 也加回**（清单「到期月」列下线、「行权价」列上线）。
+    权威是 `bds_option_info.strike`（交易所原始值，A 类调整合约已调整），**不从标准码
+    解析**：ETF 标准码 `P2612A07000` 的 A 后缀就是调整标记，拼出来的数会与交易所口径
+    不符。⚠️ 它与 `OptionMarketOut.price_strike`（当日行情接口口径）来源不同，
+    对账时别要求两者必须相等。乘数 / 保证金族等其余规格仍不回传，看 `GET /option-info`。
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -712,6 +734,20 @@ class OptionConfigOut(BaseModel):
         default=None,
         description="到期日【只读派生：bds_option_info.last_trade_date，权威值】；"
                     "None = 字典里查不到该合约（先刷新合约字典）")
+    option_type: Optional[str] = Field(
+        default=None,
+        description="call / put【只读派生：bds_option_info.cp，C→call / P→put】；"
+                    "None = 字典里查不到该合约")
+    days_left: Optional[int] = Field(
+        default=None,
+        description="剩余自然日 = 到期日 − 今天【只读派生】；"
+                    "与行情表 days_left（到期日 − 行情日）口径不同，负数=已到期；"
+                    "None = 字典里查不到该合约")
+    strike: Optional[Decimal] = Field(
+        default=None,
+        description="行权价【只读派生：bds_option_info.strike，交易所原始值】；"
+                    "与行情表 price_strike（当日接口口径）来源不同；"
+                    "None = 字典里查不到该合约")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
 
