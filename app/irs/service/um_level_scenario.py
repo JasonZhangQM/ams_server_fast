@@ -44,8 +44,8 @@ FIXED_NOTES = [
     "真实/交易所风险度与 breached 均为模型口径，不构成追保结论。",
     "账户层净值、保证金、风险度是账户全部持仓口径（含本情景中价格冻结的其它持仓），"
     "不是该标的单项口径。",
-    "到档浮盈 = 系统账面浮动盈亏 + 模型盯市口径 Δ盈亏，属混合口径 [推算]；"
-    "逐仓与分账户并列展示账面「当前盈亏」和模型口径 Δ盈亏，两者基准不同，不可相加对账。",
+    "到档浮盈 = 系统账面浮动盈亏 + 模型盯市口径Δ盈亏，属混合口径 [推算]；"
+    "逐仓与分账户并列展示账面「当前盈亏」和模型口径Δ盈亏，两者基准不同，不可相加对账。",
     "分账户「当前盈亏」= 账户层面全部持仓账面浮盈（bills_group_acc.pf_total，排除 account='合计'），"
     "与该标的项下口径无关；五档表与逐仓「当前盈亏」仍只统计该标的项下持仓，"
     "三处同名列口径不同，不可互相相加或作对账。",
@@ -293,7 +293,7 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
                 continue
             if key not in dm_other:
                 warnings.append(
-                    f"持仓 {p['acct']}/{p.get('symbol')} 未出现在另一时点明细中，对照 Δ盈亏按 0 处理。")
+                    f"持仓 {p['acct']}/{p.get('symbol')} 未出现在另一时点明细中，对照Δ盈亏按 0 处理。")
             margin_at = _f(d["margin"])
             margin_base = _f(b["margin"]) if b else 0.0
             g = owned_by_symbol.get(p.get("symbol"), {})
@@ -361,7 +361,7 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
                 "margin_delta": round(target_margin - base_margin, 2),
                 "risk_exposure": round(exposure, 2) if exposure else None,
                 "drawdown_ratio": (round(abs(pf_at) / exposure, 4) if exposure > 0 else None),
-                "pf_at_note": "[推算] 账面浮盈 + 模型口径 Δ盈亏，混合口径",
+                "pf_at_note": "[推算] 账面浮盈 + 模型口径Δ盈亏，混合口径",
             },
             "combo": _combo(res),
             "accounts": accounts,

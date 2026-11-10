@@ -450,6 +450,7 @@ class RiskBoardAccountOut(BaseModel):
     exch: Optional[float] = None  # 交易所风险度 = 保证金 / 客户权益
     coverage: Optional[float] = None  # 自有资金保证金覆盖率 = 净资产 / 保证金
     breached: bool = False  # 是否已触发追保（交易所口径）
+    pf_now: float = 0.0  # 账户层面全部持仓的账面浮盈（bills_group_acc.pf_total，排除合计）
 
 
 class RiskBoardPositionOut(BaseModel):
@@ -464,6 +465,7 @@ class RiskBoardPositionOut(BaseModel):
     max_loss: Optional[float] = None  # 最大亏损；null=卖认购理论上行无上限
     drop1_loss: float  # 标的变动 1% 的盈亏敏感度
     margin_now: float  # 当前保证金
+    pf_now: float = 0.0  # 该合约在本账户的账面浮盈（bills_group.pf_total，按账户×合约聚合）
     cp: Optional[str] = None  # C=认购 / P=认沽（仅期权）
     side: Optional[str] = None  # long=买方 / short=卖方（仅期权）
     strike: Optional[float] = None  # 行权价（仅期权）
@@ -484,6 +486,7 @@ class RiskBoardDetailOut(BaseModel):
     und_key: Optional[str] = None  # 情景分组键
     margin: float  # 该情景下的保证金
     loss: float  # 该情景下的盈亏（正=亏）
+    loss_other: Optional[float] = None  # 另一时点（now ⇄ expiry）逐仓盈亏（正=亏），仅 detail=true
 
 
 class RiskBoardScenarioOut(BaseModel):
@@ -586,6 +589,7 @@ class RiskBoardOut(BaseModel):
     real_total: Optional[float] = None  # 组合真实风险度
     max_exposure: float  # 数学最大亏损合计（不含无上限合约）
     max_exposure_unbounded: bool  # 是否存在理论上行无上限的卖认购
+    pf_now_total: float = 0.0  # 组合账面浮盈（ALL 视角 = 各账户之和，已排除合计行）
     accounts: Dict[str, RiskBoardAccountOut]  # 分账户风险卡
     positions: List[RiskBoardPositionOut]  # 逐仓明细
     grid: Dict[str, Dict[str, Dict[str, RiskBoardScenarioOut]]]  # [mode][drop_pct][account]

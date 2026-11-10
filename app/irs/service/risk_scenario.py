@@ -213,6 +213,9 @@ def load_context() -> dict:
             accounts[a.account] = {
                 "system_net": acc_aset - diff_br,  # 铁律 1.6
                 "fin": diff_br,
+                # 账户层面全部持仓的账面浮盈（bills_group_acc.pf_total，已排除合计行）。
+                # 静态存量，与模型盯市 Δ 盈亏不同源，仅作对照列，不可相加对账。
+                "pf_now": float(a.pf_total or 0),
             }
 
         # 同步清单：账单原始码 → 配置行（只判断「这张合约要不要算」，不承载规格）
@@ -244,7 +247,8 @@ def load_context() -> dict:
         und_px: dict[str, float] = {}
         for g in pos_rows:
             if g.account not in accounts:
-                accounts[g.account] = {"system_net": 0.0, "fin": 0.0}
+                # 账单有在仓行但账户汇总表缺行：账面浮盈按 0 兜底，不猜数
+                accounts[g.account] = {"system_net": 0.0, "fin": 0.0, "pf_now": 0.0}
             # ⚠️ 必须前缀匹配：库里实值是「期权交易 / 期货交易 / 证券交易」
             if g.category.startswith("期权"):
                 p = _option_position(g, contracts, cfg_info, market, params,
@@ -277,6 +281,9 @@ def load_context() -> dict:
                     "mult": 1, "qty": int(g.p_total), "px": float(g.price or 0),
                     "und_key": SEC_UND_KEY.get(code, "astock"), "symbol": g.symbol,
                 })
+            # 该账单行的账面浮动盈亏：三个分支都 append 了一条持仓后统一挂上。
+            # 已到期被剔除的行走 continue，不会执行到这里。
+            positions[-1]["pf_now"] = float(g.pf_total or 0)
 
         # 新鲜度哨兵：所有在仓期权必须同一天，且不早于允许的最早行情日
         data_as_of = stale = None
@@ -569,6 +576,12 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
 
     # 持仓明细：1% 敏感度、名义市值、最大亏损
     margin_now = {(d["acct"], d["name"]): d["margin"] for d in base["detail"]}
+    # 逐仓账面浮盈按 (账户, 合约) 聚合：bills_group 唯一键含 category，
+    # 同合约理论上可能出现多行，聚合口径与到档情景 _pf_by_position() 一致。
+    pf_pos: dict = {}
+    for p in ctx["positions"]:
+        key = (p["acct"], p["name"])
+        pf_pos[key] = pf_pos.get(key, 0.0) + float(p.get("pf_now") or 0.0)
     pos_detail = []
     unbounded = False
     for p in ctx["positions"]:
@@ -601,16 +614,25 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
             "max_loss": (round(max_loss, 2) if max_loss is not None else None),
             "drop1_loss": round(d1, 2),
             "margin_now": round(margin_now.get((p["acct"], p["name"]), 0.0), 2),
+            "pf_now": round(pf_pos.get((p["acct"], p["name"]), 0.0), 2),
             **extra,
         })
 
     # 情景矩阵：三模式 × (上涨三档 + 下跌七档) × 分账户
     grid = {}
     raw_stress = None
+    # 对照时点 now ⇄ expiry：只在要逐仓明细时多跑一遍 run()，
+    # 日终重算（include_detail=False）零额外开销。不写库、不改 run() 签名。
+    other_horizon = "expiry" if horizon == "now" else "now"
     for mode in MODES:
         rows = {}
         for d in STEPS:
             r = run(ctx, mode, d, horizon, iv_mult)
+            other_loss = {}
+            if include_detail:
+                r_other = run(ctx, mode, d, other_horizon, iv_mult)
+                other_loss = {(x["acct"], x["name"]): x["loss"]
+                              for x in r_other["detail"]}
             if mode == "sync" and abs(d - budget.STRESS_DROP) < 1e-9:
                 raw_stress = r  # 预算主口径要未四舍五入的 net/margin，且与下面同一时点
             eq_total = sum(x["eq"] for x in r["accounts"].values())
@@ -620,7 +642,10 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
                 "exch": (r["margin"] / eq_total if eq_total > 0 else None),
                 "breached": any(x["breached"] for x in r["accounts"].values()),
                 "detail": ([{**d, "margin": round(d["margin"], 2),
-                             "loss": round(d["loss"], 2)} for d in r["detail"]]
+                             "loss": round(d["loss"], 2),
+                             # 另一时点逐仓亏损（正=亏），供逐张合约表做对照列
+                             "loss_other": round(other_loss.get((d["acct"], d["name"]), 0.0), 2)}
+                            for d in r["detail"]]
                            if include_detail else None),
             }}
             for a, x in r["accounts"].items():
@@ -661,8 +686,11 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
             "eq": round(x["eq"], 2), "margin": round(x["margin"], 2),
             "real": x["real"], "exch": x["exch"],
             "coverage": (round(cov, 4) if cov is not None else None),
+            "pf_now": round(ctx["accounts"][a].get("pf_now", 0.0), 2),
         }
 
+    # 组合视角（ALL）的账面浮盈 = 各账户之和；'合计' 行已在 load_context 排除（🔒1.5）
+    pf_now_total = round(sum(x["pf_now"] for x in acct_cards.values()), 2)
     net_total = sum(net0.values())
     if raw_stress is None:  # STEPS 里必须有压力档，否则预算主口径无从取数
         raise ValueError(f"情景档位缺压力档 {budget.STRESS_DROP:.0%}，无法计算风险预算")
@@ -680,6 +708,7 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
         "max_exposure": round(sum(p["max_loss"] for p in pos_detail
                                   if p["max_loss"] is not None), 2),
         "max_exposure_unbounded": unbounded,
+        "pf_now_total": pf_now_total,
         "accounts": acct_cards,
         "positions": pos_detail,
         "grid": grid,
