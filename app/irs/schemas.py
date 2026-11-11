@@ -600,3 +600,15 @@ class RiskBoardOut(BaseModel):
     steps: List[float]  # 情景档位（负数=涨幅）
     upside_steps: List[float]  # 上行情景档位（负数=涨幅）
     warnings: List[str]  # 数据降级/兜底提示
+
+
+class SimulateIn(BaseModel):
+    """推演工作台入参（POST /irs/simulate）。
+
+    overrides：{标的代码: 假设价}，每标的一个假设价；空 dict = 全部现价（0% 基准）。
+    响应无固定 response_model（结构与 level-scenario 同风格，dict 原样透出）。
+    """
+
+    overrides: Dict[str, float] = {}
+    horizon: str = "now"  # now=即期 / expiry=到期
+    iv_mult: float = 1.0  # IV 冲击倍数

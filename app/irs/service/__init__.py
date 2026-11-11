@@ -40,6 +40,7 @@ from server_fast.app.irs.service import (
     risk_scenario,
     um_level_scenario,
     um_market_stats,
+    um_simulate,
 )
 
 __all__ = [
@@ -75,4 +76,6 @@ __all__ = [
     'um_level_scenario',
     # 2026-11-08：标的监测抽屉「估值与走势」（分位 + 估值 + 收益 + 回撤）
     'um_market_stats',
+    # 2026-11-11：推演工作台（多标的假设价 × 组合联动推演）
+    'um_simulate',
 ]

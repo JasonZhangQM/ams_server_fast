@@ -57,6 +57,7 @@ from server_fast.app.irs.schemas import (
     UnderlyingTargetOut,
     UnderlyingTargetSave,
     RiskBoardOut,
+    SimulateIn,
 )
 from server_fast.common.db import get_db, SessionLocal
 from server_fast.common.pagination import PageResponse
@@ -1248,6 +1249,22 @@ def get_risk_board(
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"风险看板计算失败：{str(e)}")
+
+
+@router.post("/simulate")
+def simulate_workbench(body: SimulateIn, db: Session = Depends(get_db)):
+    """推演工作台：多标的假设价 → 组合风险/收益联动推演（只读，不落库）。
+
+    overrides：{标的代码: 假设价}；空 dict = 全部现价（0% 基准）。
+    非法标的/价格/上下文不可用 → 400；与风险看板、level-scenario 双锚点同口径
+    （探针 scripts/_probe_um_simulate.py 验收）。
+    """
+    try:
+        return service.um_simulate.build(db, body.overrides, body.horizon, body.iv_mult)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"推演计算失败：{str(e)}")
 
 
 @router.post("/run/risk-board")
