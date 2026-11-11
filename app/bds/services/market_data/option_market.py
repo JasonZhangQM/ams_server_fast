@@ -13,6 +13,12 @@
    `irs_option_monitor` 把三者挤在一列，导致 au 存收盘价 11.50 而真实结算价 12.18。
 5. **降级链只在本文件一处**：结算价缺失时下游按 `COALESCE(settle, pre_settle, price)` 降级。
    展示层如实留空——拿前结价冒充结算价会误导。
+6. **标的价带时间锚**（2026-11-11）：`price_ud` 不再一律绑死「同步时点的现价」，而由
+   行情戳的**交易日归属**决定能不能写。盘前（<9:15）实时通道返回的就是 T-1 收盘价
+   （实测新浪 `sh000300` 戳 2026-11-10 15:35:39 / 4059.1105、`sh510500` 戳
+   2026-11-10 15:34:59 / 6.670），与 `trade_date=T-1` 一致 ⇒ 按上一交易日落盘；
+   9:15 集合竞价后戳归今天、trade_date 仍是 T-1 ⇒ 拒绝写入。历史行**只填空不覆盖**，
+   `volume` 继续冻结，商品期权维持原逻辑。详见 `_ud_matches_trade_date`。
 
 三个数据源的能力差异（实测 2026-10-26，这是表设计的第一约束）：
 
@@ -63,16 +69,19 @@ _SHFE_HEADERS = {"User-Agent": "Mozilla/4.0 (compatible; MSIE 5.5; Windows NT)"}
 _SHFE_SUMMARY_IDS = {"", "小计", "合计", "总计"}
 
 # 只有「当日快照」才写的列。历史快照新增行留空、已存在的行不覆盖：
-# - `price_ud`：同步时点的标的现价，对历史行无意义（衍生字段由模型钩子从它派生，
-#   2026-10-27 起服务层不再直接写衍生字段）
 # - `volume`：当日**累计**成交量，盘前取到的恒为 0（实测 2026-10-27 08:07 盘前同步
-#   把 10-26 的 IO 成交量 1431/2527/4587 全刷成 0），历史行必须保留原值
+#   把 10-26 的 IO 成交量 1431/2527/4587 全刷成 0），历史行必须保留原值。
+#
+# 🔄 2026-11-11：`price_ud` **从本元组移出**。10-27 那条「盘前取现价会把今天的价贴到
+# 昨天行上」的论据只对**黄金夜盘**成立（862.58→865.36 是元/克量级、有夜盘）；
+# ETF/IO 盘前实时通道返回的就是 T-1 收盘价且自带行情戳，按 `trade_date=T-1` 落盘
+# 才是正确口径。改由 `_ud_matches_trade_date` 做交易日归属校验 + `_should_write_price_ud`
+# 做「历史行只填空」，校验不过一律留空，宁缺勿猜。
 #
 # ⚠️ value_i / value_t **不在**本元组（2026-10-27 用户拍板「修法 B」）：衍生字段由
 # 模型钩子在每次写入（含历史行重刷）时重算，value_t 始终跟随最新 price。
-# 这有意与「历史行不覆盖」的老规则分开——衍生字段是**计算值**，重算即最新口径；
-# 冻结的只该是「事实」（price_ud / volume）。规则手册该条已同步修订。
-_TODAY_ONLY_COLS = ("price_ud", "volume")
+# 这有意与「历史行不覆盖」的老规则分开——衍生字段是**计算值**，重算即最新口径。
+_TODAY_ONLY_COLS = ("volume",)
 
 
 class ShfeDataNotReady(Exception):
@@ -209,6 +218,8 @@ def _resolve_trade_date(session, closed_only: bool) -> date:
       `ShfeDataNotReady` 再退一天兜住（见 `fetch_shfe_option_day`）。
     - `closed_only=False`（股指/ETF）：`option_finance_board` 返回**实时盘口**，
       开盘（≥09:30）后即为当日行情；盘前拿到的是昨收，标成今天会失鲜。
+      ⚠️ 标的价另按「行情戳归属 == trade_date」校验后落盘（见 `_ud_matches_trade_date`），
+      不受本节时点判据一刀切限制。
     """
     now = datetime.now()
     today = now.date()
@@ -293,24 +304,98 @@ def fetch_shfe_option_day(trade_date: date, option_name: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 标的价（降级链唯一入口）
+# 标的价（降级链唯一入口） + 交易日归属校验
 # ---------------------------------------------------------------------------
 
-def _fetch_underlying_price(und_symbol: str, und_key: str) -> Optional[Decimal]:
-    """取标的现价。三条通道依次降级，全部失败返回 None（不阻断整批）。
+_SINA_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-    1. **gm `current`** —— 系统标准通道（`index_realtime.py` / `option_monitor.py` 同款）
+
+def _as_datetime(v) -> Optional[datetime]:
+    """gm `current()` 的 `created_at` → datetime（datetime / date / 字符串都吃）。
+
+    ⚠️ 规则手册：gm 停牌会给「旧戳 + 旧价」——旧戳正是归属校验要拦的东西。
+    """
+    if isinstance(v, datetime):
+        return v
+    if isinstance(v, date):
+        return datetime.combine(v, dtime(0, 0))
+    if isinstance(v, str) and v.strip():
+        s = v.strip()[:19]
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _parse_sina_quote_dt(parts: list[str]) -> Optional[datetime]:
+    """新浪 hq 串里的行情戳：日期 `YYYY-MM-DD` 后紧跟 `HH:MM:SS`。
+
+    不硬编码下标 30/31：指数 / ETF / 期货三种串长度不同，扫描找日期更稳。
+    实测 `sh000300` = `2026-11-10 15:35:39`、`sh510500` = `2026-11-10 15:34:59`。
+    """
+    for i, p in enumerate(parts):
+        if _SINA_DATE_RE.match(p.strip()) and i + 1 < len(parts):
+            try:
+                return datetime.strptime(
+                    f"{p.strip()} {parts[i + 1].strip()}", "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    return None
+
+
+def _ud_matches_trade_date(quote_dt: Optional[datetime], trade_date: date) -> bool:
+    """标的价能不能落到这一行：**行情戳的自然日必须等于 trade_date**。
+
+    保守判据、故意不用交易日历：A 股收盘戳、集合竞价戳、期货夜盘戳按自然日就能区分。
+    - 盘前（<9:15）：戳 = T-1 15:3x，trade_date = T-1 ⇒ 通过
+    - 9:15~9:30 集合竞价：戳 = T，trade_date 仍 = T-1 ⇒ 拒绝（真污染被挡住）
+    - 非交易日 / 数据源留旧戳：戳与 trade_date 不符 ⇒ 拒绝，留空而非错写
+    后续若遇到「收盘后次日凌晨刷戳」，再放宽为「T 日 15:00 ~ T+1 09:15 归 T」。
+    """
+    return quote_dt is not None and quote_dt.date() == trade_date
+
+
+def _should_write_price_ud(current_value, is_today_snapshot: bool, candidate) -> bool:
+    """写入决策（纯函数，§6.6 哨兵实验的对象）。
+
+    - candidate 为 None（取价失败 / 归属校验不过）⇒ 一律不写
+    - 当日快照 ⇒ 覆盖（同日重跑幂等）
+    - 历史快照 ⇒ **只填空、不覆盖已有值**（不破坏手填、不改写已定稿历史）
+    """
+    if candidate is None:
+        return False
+    if is_today_snapshot:
+        return True
+    return current_value is None
+
+
+def _fetch_underlying_price(
+        und_symbol: str, und_key: str) -> Optional[tuple[Decimal, Optional[datetime]]]:
+    """取标的现价 + 行情时间戳。三条通道依次降级，全部失败返回 None（不阻断整批）。
+
+    返回 `(price, quote_dt)`；**quote_dt 允许为 None**（通道没给时间戳），由调用方
+    `_ud_for_trade_date` 按品种决定要不要校验——ETF/IO 必校验、商品当日快照维持
+    10-27 起的原逻辑不校验、商品历史快照根本不取。
+
+    1. **gm `current`** —— 系统标准通道（`index_realtime.py` / `option_monitor.py` 同款），
+       加取 `created_at`（规则手册：= 最后一笔成交时间，停牌给旧戳旧价）
     2. **新浪 hq.sinajs.cn** —— gm token 失效或终端未启动时的兜底；东财接口在本机被代理拦截，
-       实测 `stock_zh_index_spot_em` / `fund_etf_spot_em` 均 ProxyError，故不用
+       实测 `stock_zh_index_spot_em` / `fund_etf_spot_em` 均 ProxyError，故不用。
+       串里自带 `YYYY-MM-DD,HH:MM:SS` 行情戳，是归属校验的主要依据
     3. 返回 None —— 上游把 `price_ud`/`value_i`/`value_t` 留空，**不猜**
     """
     # ① gm
     try:
         from gm.api import current
         from server_fast.common.utils import call_with_timeout
-        data = call_with_timeout(current, timeout=10)([und_symbol], fields=["symbol", "price"])
+        data = call_with_timeout(current, timeout=10)(
+            [und_symbol], fields=["symbol", "price", "created_at"])
         if data and data[0].get("price") is not None:
-            return _dec(data[0]["price"])
+            px = _dec(data[0]["price"])
+            if px is not None:
+                return px, _as_datetime(data[0].get("created_at"))
     except Exception as e:  # noqa: BLE001 —— 任何异常都应降级，不能中断同步
         logger.warning("[option_market] gm 取标的价失败 %s: %s", und_symbol, e)
 
@@ -332,7 +417,10 @@ def _fetch_underlying_price(und_symbol: str, und_key: str) -> Optional[Decimal]:
         idx = 5 if code.startswith("nf_") else 3
         if len(parts) <= idx:
             return None
-        return _dec(parts[idx])
+        px = _dec(parts[idx])
+        if px is None:
+            return None
+        return px, _parse_sina_quote_dt(parts)
     except Exception as e:  # noqa: BLE001
         logger.warning("[option_market] 新浪取标的价失败 %s: %s", und_symbol, e)
     return None
@@ -350,6 +438,25 @@ def _sina_code(und_symbol: str, und_key: str) -> Optional[str]:
         m = re.match(r"^[a-zA-Z]+(\d{4})$", tail)
         return f"nf_AU{m.group(1)}" if m else None
     return None
+
+
+def _ud_for_trade_date(und_symbol: str, und_key: str, trade_date: date,
+                       is_commodity: bool, is_today_snapshot: bool) -> Optional[Decimal]:
+    """按品种 + 快照时点决定标的价能不能取、要不要校验。
+
+    - 商品期权历史快照：**不取**（10-27 起原逻辑，夜盘价与日盘结算不同口径）
+    - 商品期权当日快照：取价但**不校验**（维持 10-27 起原逻辑，不扩大本次改动范围）
+    - ETF/IO：一律取价 + `quote_dt.date() == trade_date` 归属校验
+    """
+    if is_commodity and not is_today_snapshot:
+        return None
+    fetched = _fetch_underlying_price(und_symbol, und_key)
+    if fetched is None:
+        return None
+    px, quote_dt = fetched
+    if is_commodity:
+        return px
+    return px if _ud_matches_trade_date(quote_dt, trade_date) else None
 
 
 # ---------------------------------------------------------------------------
@@ -476,13 +583,16 @@ def _sync_group(session, option_name: str, end_month: str,
     wanted: set[str] = set(info_map)
     spec_warnings: list[str] = []
 
-    # 标的价：同 und_key 只取一次（au 按合约月份各取一次）
-    ud_cache: dict[str, Optional[Decimal]] = {}
+    # 标的价：同 (标的, trade_date) 只取一次（au 按合约月份各取一次）。
+    # 缓存键带上 trade_date：同一次同步内各组共用，但不同交易日绝不复用旧结果。
+    ud_cache: dict[tuple[str, date], Optional[Decimal]] = {}
 
     def _ud(und_symbol: str, key: str) -> Optional[Decimal]:
-        if und_symbol not in ud_cache:
-            ud_cache[und_symbol] = _fetch_underlying_price(und_symbol, key)
-        return ud_cache[und_symbol]
+        ck = (und_symbol, trade_date)
+        if ck not in ud_cache:
+            ud_cache[ck] = _ud_for_trade_date(
+                und_symbol, key, trade_date, is_commodity, is_today_snapshot)
+        return ud_cache[ck]
 
     parsed: list[dict] = []
     skip_reasons: dict[str, int] = {}
@@ -582,15 +692,14 @@ def _sync_group(session, option_name: str, end_month: str,
             warn = _cross_check_delisted(code, em, rule, delisted)
             if warn:
                 spec_warnings.append(warn)
-            # 标的现价是**同步那一刻**的值，只对「当日快照」成立。
-            # 盘前跑同步拿到的是上一交易日的收盘快照（trade_date=昨天），此时再取现价
-            # 就是把今天的价贴到昨天那一行上——实测 10-27 08:04 把 10-26 的
-            # price_ud 从 862.58 改成 865.36，连带 value_i/value_t 一起失真。
-            # 历史快照一律不取，写库时跳过这三列（保留原值，新行为 NULL）。
-            ud = _ud(und_symbol, und_key) if is_today_snapshot else None
+            # 标的价：ETF/IO 一律取，但必须过「行情戳归属 == trade_date」校验（11-11）。
+            # 盘前实时通道给的就是 T-1 收盘价且带戳 ⇒ 按上一交易日落盘；9:15 集合竞价
+            # 起戳归今天 ⇒ 校验不过、留空。商品期权历史快照不取（夜盘价≠日盘结算）。
+            # 10-27 的 862.58→865.36 属黄金夜盘，不能拿来否决 ETF/IO 的 T-1 收盘价。
+            ud = _ud(und_symbol, und_key)
             if not is_today_snapshot:
-                # 同理：盘前拿到的「成交量」属于下一交易日，写成 0 会把历史行的量抹掉。
-                # 宁可留空让人知道「这一列没回补」，也不能填 0 假装当天无成交。
+                # 成交量属于下一交易日：盘前拿到 0 会把历史行的量抹掉（10-27 实测
+                # 1431/2527/4587 全刷成 0）。宁可留空，也不填 0 假装当天无成交。
                 volume = None
 
             # value_i / value_t / atm_i / ratio_* 不在这里算：模型钩子
@@ -637,8 +746,12 @@ def _sync_group(session, option_name: str, end_month: str,
                 insert += 1
             else:
                 for k, v in p.items():
-                    # 历史快照不覆盖「只有当日才有意义」的列：那是同步时点的现价/当日累计量
+                    # 历史快照不覆盖「只有当日才有意义」的列（现只剩 volume：当日累计量）
                     if not is_today_snapshot and k in _TODAY_ONLY_COLS:
+                        continue
+                    # price_ud 单独判：归属校验不过不写；历史行只填空、不覆盖已有值
+                    if k == "price_ud" and not _should_write_price_ud(
+                            cur.price_ud, is_today_snapshot, v):
                         continue
                     setattr(cur, k, v)
                 update += 1
