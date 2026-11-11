@@ -20,7 +20,8 @@
 - 锚点 1：overrides={} 时 baseline_combo 与 GET /irs/risk-board 同口径一致；
 - 锚点 2：单标的假设价=某档位价时，subjects[sym] 与 level-scenario 同档 combo 一致。
 
-预算读数（budget.evaluate）：恒为**现价基准**（0% 与 +15% 全组同跌、horizon=now），
+预算读数（budget.evaluate）：恒为**现价基准**（0% 与生效压力档全组同跌、horizon=now），
+压力档读 `irs_risk_param` 的 `('*','budget_stress')`，经 budget.stress_run() 生成。
 不随滑块假设价变化——run() 的 shifts 与全组 drop 语义互斥，组合应力留待 M3。
 
 依赖方向（🔒4.12）：irs 内部复用；bills 只取 constants 的归属白名单片段，
@@ -37,7 +38,6 @@ from server_fast.app.irs.service import budget as budget_mod
 from server_fast.app.irs.service import risk_scenario
 from server_fast.app.irs.service import um_level_scenario as lvl
 from server_fast.app.irs.service import um_today, um_version
-from server_fast.app.irs.service.budget import STRESS_DROP
 from server_fast.app.irs.service.um_plan import effective_trigger
 
 HORIZONS = ("now", "expiry")
@@ -159,7 +159,7 @@ def build(db: Session, overrides: dict[str, float],
     base = risk_scenario.run(ctx, "sync", 0.0, horizon=horizon,
                              iv_mult=iv_mult, shifts={})
     b_now = risk_scenario.run(ctx, "sync", 0.0)
-    b_stress = risk_scenario.run(ctx, "sync", STRESS_DROP)
+    _, b_stress = budget_mod.stress_run(ctx, ctx["params"])
     budget = budget_mod.evaluate(ctx, ctx["params"], b_now, b_stress)
 
     dm = {(d["acct"], d["name"]): d for d in scenario["detail"]}

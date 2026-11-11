@@ -22,12 +22,17 @@
 3. 现货-only 账户跳过预算判定：M03 持仓率 100% 但没有追保风险，红标只会钝化告警。
 4. 前端不得自行拼装额度：两次请求跨时点 = 10-23 错误的微缩版。irs 侧要额度，
    一律 `from server_fast.app.irs.service.budget import headroom_of`（🔒4.12 允许）。
+5. 压力档 `budget_stress` 是**全局单值**（一次 run() 只能给全组一个跌幅），由
+   `stress_drop(params)` 统一读取；压力情景一律经 `stress_run()` 生成并打标，
+   `evaluate()` 校验跌幅。11-11 修复：此前 load_cfg 读了它却无人消费，是死参数。
 """
 import math
 import re
 from typing import Optional
 
-# 压力档：方案 R1 原文「标的再跌 15% 后的保证金 + 追保缓冲」
+# 压力档默认值：方案 R1 原文「标的再跌 15% 后的保证金 + 追保缓冲」。
+# ⚠️ 只是零配置 fallback；实际生效值一律读 `stress_drop(params)`（`irs_risk_param`
+# 的 `('*','budget_stress')`），别再拿这个常量直接跑 run()。
 STRESS_DROP = 0.15
 
 # 零配置默认值：表里只存「偏离默认的账户」，M02 这种 100 元账户不用配任何行
@@ -96,6 +101,9 @@ def load_cfg(params: dict, acct: str) -> dict:
 
     `params` 是 `risk_scenario._load_params()` 的 `{(scope, parameter): value}`。
     表里只存偏离默认的行；`scope` 既可以是账户名，也可以是 `*`（全局）。
+
+    ⚠️ `budget_stress` 不在这里：压力情景是「全组同跌一次 run()」，只能有一个跌幅，
+    属于全局参数，由 `stress_drop(params)` 单独读取（方案 §11.2）。
     """
     def pick(key: str, default: float) -> float:
         for scope in (acct, "*"):
@@ -111,8 +119,49 @@ def load_cfg(params: dict, acct: str) -> dict:
         "pct": pct,
         "total": pick("budget_total", DEFAULT_BUDGET["total"]),
         "reserve": pick("budget_reserve", DEFAULT_BUDGET["reserve"]),
-        "stress": pick("budget_stress", DEFAULT_BUDGET["stress"]),
     }
+
+
+def stress_drop(params: dict) -> float:
+    """生效压力档：全局单值，只读 `('*','budget_stress')`，缺省回代码默认。
+
+    一次 `run(ctx,'sync',drop)` 只能给全组一个跌幅 ⇒ 该参数天然账户无关
+    （方案 §11.2 明确 `scope='*'`）。表里的账户级行一律报错、不静默忽略：
+    11-11 之前的 bug 正是「load_cfg 读了 budget_stress 却没有任何地方用它」。
+    """
+    bad = sorted({s for (s, k) in params if k == "budget_stress" and s != "*"})
+    if bad:
+        raise ValueError(
+            f"budget_stress 只允许 scope='*'，发现账户级配置 {bad}；"
+            "压力情景是全组一次 run()，不能按账户分别设"
+        )
+    v = float(params.get(("*", "budget_stress"), DEFAULT_BUDGET["stress"]))
+    if not 0 < v < 1:
+        raise ValueError(f"budget_stress 必须落在 (0, 1)，当前 {v}")
+    return v
+
+
+def _check_stress_run(run_stress: dict, eff: float) -> None:
+    """哨兵：确保压力情景跌幅 == 生效配置，杜绝「参数读了不用」再次发生。"""
+    got = run_stress.get("_stress_drop")
+    if got is None:
+        raise ValueError(
+            "压力情景缺 _stress_drop 标记：必须经 budget.stress_run() 生成，"
+            "禁止直接调 risk_scenario.run(ctx,'sync',常量)"
+        )
+    if abs(float(got) - eff) > 1e-9:
+        raise ValueError(f"压力档跨口径：情景 {float(got):.2%} ≠ 生效配置 {eff:.2%}")
+
+
+def stress_run(ctx: dict, params: dict, horizon: str = "now",
+               iv_mult: float = 1.0) -> tuple[float, dict]:
+    """按生效压力档跑一次 run() 并打标；所有预算调用点的唯一入口。"""
+    from server_fast.app.irs.service import risk_scenario
+
+    d = stress_drop(params)
+    out = risk_scenario.run(ctx, "sync", d, horizon, iv_mult)
+    out["_stress_drop"] = d
+    return d, out
 
 
 def _r2(x: Optional[float]) -> Optional[float]:
@@ -151,7 +200,11 @@ def evaluate(ctx: dict, params: dict, run_now: dict, run_stress: dict) -> dict:
     """在已算好的两次 run()（0% 与 +stress%）之上做后处理，不重算风险。
 
     `run_now` / `run_stress` 必须来自**同一次** `load_context()`，否则又跨时点。
+    `run_stress` 必须经 `stress_run()` 生成（带 `_stress_drop` 标记），跌幅与
+    `irs_risk_param` 的生效值不符时直接报错，不许静默用错的情景。
     """
+    eff_stress = stress_drop(params)
+    _check_stress_run(run_stress, eff_stress)
     scope_margin, scope_per_lot = _per_lot(ctx, run_now)
     accounts: dict[str, dict] = {}
     total_headroom = 0.0
@@ -263,7 +316,7 @@ def evaluate(ctx: dict, params: dict, run_now: dict, run_stress: dict) -> dict:
         symbols.setdefault(p["name"], {"acct": p["acct"], "scope": scope_of(p)})
 
     return {
-        "stress_drop": STRESS_DROP,
+        "stress_drop": eff_stress,
         "mode": "sync",
         "accounts": accounts,
         "symbols": symbols,
@@ -279,7 +332,7 @@ def evaluate(ctx: dict, params: dict, run_now: dict, run_stress: dict) -> dict:
 def evaluate_live() -> dict:
     """独立算一次预算（没有看板上下文时用：irs 加仓点、单点核查）。
 
-    只跑 0% 与 +stress 两次 `run()`——不需要 grid，也不需要首个追保点二分。
+    只跑 0% 与「生效压力档」两次 `run()`——不需要 grid，也不需要首个追保点二分。
     ⚠️ 与 `compute()` 走的是同一套 `load_context` / `run` / `evaluate`，
     口径不会漂移；但两次调用的行情时点可能不同，跨时点比较没有意义。
     """
@@ -287,7 +340,7 @@ def evaluate_live() -> dict:
 
     ctx = risk_scenario.load_context()
     now = risk_scenario.run(ctx, "sync", 0.0)
-    stress = risk_scenario.run(ctx, "sync", STRESS_DROP)
+    _, stress = stress_run(ctx, ctx["params"])
     out = evaluate(ctx, ctx["params"], now, stress)
     out["as_of"] = ctx["data_as_of"].isoformat() if ctx["data_as_of"] else None
     return out
@@ -339,9 +392,8 @@ def headroom_of(symbol: str, acct: Optional[str] = None) -> dict:
     from server_fast.app.irs.service import risk_scenario
 
     ctx = risk_scenario.load_context()
-    blk = evaluate(ctx, ctx["params"],
-                   risk_scenario.run(ctx, "sync", 0.0),
-                   risk_scenario.run(ctx, "sync", STRESS_DROP))
+    _, stress = stress_run(ctx, ctx["params"])
+    blk = evaluate(ctx, ctx["params"], risk_scenario.run(ctx, "sync", 0.0), stress)
     hit = blk["symbols"].get(symbol)
     target = acct or (hit["acct"] if hit else None)
     card = blk["accounts"].get(target) if target else None

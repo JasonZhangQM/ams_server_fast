@@ -566,7 +566,7 @@ class BudgetSummaryOut(BaseModel):
 class BudgetOut(BaseModel):
     """风险预算块（irs/service/budget.py）。"""
 
-    stress_drop: float  # 压力档，0.15 = 标的再跌 15%
+    stress_drop: float  # 生效压力档（irs_risk_param 的 ('*','budget_stress')，缺省 0.15）
     mode: str  # 固定 sync
     accounts: Dict[str, BudgetAccountOut]
     symbols: Dict[str, Dict[str, str]]  # 合约 → {acct, scope}，加仓点查额度用

@@ -126,7 +126,9 @@ def _load_params(db) -> dict:
     消费两类键：
     - `margin_rate`：保证金率（`CFFEX.IC` / `SHFE.au` …，见 `load_context`）
     - `budget_*`：风险预算上限（`budget_pct:<品种组>` / `budget_total` / `budget_reserve`
-      / `budget_stress`，见 `services/budget.py`）。账户级 scope=账户名，全局 scope=`*`
+      / `budget_stress`，见 `services/budget.py`）。账户级 scope=账户名，全局 scope=`*`。
+      ⚠️ `budget_stress` 例外：只能是 `*` 一条，由 `budget.stress_drop()` 读取，
+      不进账户级 cfg —— 压力情景是「全组同跌一次 run()」，全组合只能有一个跌幅。
     """
     today = date.today()
     rows = (
@@ -636,6 +638,9 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
     # 情景矩阵：三模式 × (上涨三档 + 下跌七档) × 分账户
     grid = {}
     raw_stress = None
+    # 生效压力档读 irs_risk_param 的 ('*','budget_stress')，缺省 0.15（budget.py）。
+    eff_stress = budget.stress_drop(ctx["params"])
+    extra_warnings: list[str] = []
     # 对照时点 now ⇄ expiry：只在要逐仓明细时多跑一遍 run()，
     # 日终重算（include_detail=False）零额外开销。不写库、不改 run() 签名。
     other_horizon = "expiry" if horizon == "now" else "now"
@@ -648,8 +653,9 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
                 r_other = run(ctx, mode, d, other_horizon, iv_mult)
                 other_loss = {(x["acct"], x["name"]): x["loss"]
                               for x in r_other["detail"]}
-            if mode == "sync" and abs(d - budget.STRESS_DROP) < 1e-9:
+            if mode == "sync" and abs(d - eff_stress) < 1e-9:
                 raw_stress = r  # 预算主口径要未四舍五入的 net/margin，且与下面同一时点
+                raw_stress["_stress_drop"] = eff_stress  # evaluate() 据此校验跌幅
             eq_total = sum(x["eq"] for x in r["accounts"].values())
             row = {"ALL": {
                 "loss": round(r["loss"], 2), "net": round(r["net"], 2),
@@ -709,8 +715,13 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
     # 组合视角（ALL）的账面浮盈 = 各账户之和；'合计' 行已在 load_context 排除（🔒1.5）
     pf_now_total = round(sum(x["pf_now"] for x in acct_cards.values()), 2)
     net_total = base["net"]
-    if raw_stress is None:  # STEPS 里必须有压力档，否则预算主口径无从取数
-        raise ValueError(f"情景档位缺压力档 {budget.STRESS_DROP:.0%}，无法计算风险预算")
+    if raw_stress is None:
+        # 生效压力档不在情景矩阵固定档位里（表配了非 0.15 的值）：单独跑一次。
+        # 仍是同一 ctx / 同一时点、不落库，也不改 grid 的展示档位。
+        _, raw_stress = budget.stress_run(ctx, ctx["params"], horizon, iv_mult)
+        extra_warnings.append(
+            f"生效压力档 {eff_stress:.0%} 不在情景矩阵档位中，预算已按该档单独重算。"
+        )
 
     return {
         "engine_ver": ENGINE_VER,
@@ -736,7 +747,7 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
         "mode_names": MODE_NAMES,
         "steps": STEPS,
         "upside_steps": UPSIDE_STEPS,
-        "warnings": ctx["warnings"] + ([
+        "warnings": ctx["warnings"] + extra_warnings + ([
             "期权行情为 T−1，请收盘后同步后再看一次"] if ctx["stale_days"] == 1 else []),
     }
 
