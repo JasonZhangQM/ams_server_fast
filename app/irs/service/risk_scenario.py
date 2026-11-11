@@ -38,7 +38,9 @@ from server_fast.app.irs.models import RiskParam, ScenarioGrid
 from server_fast.app.irs.service import budget
 from server_fast.common.db import SessionLocal
 
-ENGINE_VER = "v2.0"
+# v2.1（2026-11-11）：到期时点 Δ 盈亏的基线回归「当前盯市」，修复 v2.0 把
+# 时间价值收益藏进 net0、导致虚值义务仓到期 Δ 恒为 0 的回归（见 _net0 / run 注释）。
+ENGINE_VER = "v2.1"
 
 # 情景档位：负数=上涨（短 call 的风险方向），0%=即期基准
 UPSIDE_STEPS = [-0.20, -0.10, -0.05]
@@ -435,17 +437,23 @@ def _option_margin(p: dict, S: float) -> float:
     return per * p["qty"]
 
 
-def _net0(ctx: dict, horizon: str, iv_mult: float) -> dict[str, float]:
-    """按盯市口径修正系统净值，逐账户。
+def _net0(ctx: dict, iv_mult: float) -> dict[str, float]:
+    """按盯市口径修正系统净值，逐账户。**基线恒为当前盯市（即期 BS），不随时点变**。
 
     旧口径「− (市值 − |成本|)」已废止：2026-10-27 起 bills_group 已按市值入账，
     v2.0 只补「模型盯市价 − 系统市值」的差额（au 的 settle vs price 即属此类）。
+
+    v2.1（2026-11-11）修复：v2.0 把 horizon 传进来，令 expiry 的 net0 直接按内在
+    价值估值，把「时间价值归零」的收益藏进基准净值 ⇒ 到期 Δ 盈亏对虚值义务仓
+    恒为 0。而规则手册明细 2026-10-27 §「卖 put 必报双时点」与 v3 方案 §2.4
+    均要求「即期 0% = 0、到期 0% = +时间价值」。基线恒盯市后收益回到 loss；
+    net = net0 − loss 展开后与修复前完全相同，净值/保证金/风险度零回归。
     """
     net0 = {a: v["system_net"] for a, v in ctx["accounts"].items()}
     for p in ctx["positions"]:
         if p["kind"] not in ("call", "put"):
             continue
-        v = p["sign"] * _option_value(p, p["S0"], horizon, iv_mult) * p["mult"] * p["qty"]
+        v = p["sign"] * _option_value(p, p["S0"], "now", iv_mult) * p["mult"] * p["qty"]
         net0[p["acct"]] += v - p["sys_value"]
     return net0
 
@@ -461,10 +469,14 @@ def run(ctx: dict, mode: str, drop: float, horizon: str = "now",
     默认 None ⇒ 走原来的「全组同跌」语义，风险看板 / budget / compute 零回归。
 
     注意两种语义互斥：这里是「单标的驱动、其它不动」，不是 MODES 的分组联动。
+
+    v2.1 双时点基线：v0（当前盯市）恒用即期 BS，只有 v1 随 horizon 变
+    （now=BS 重估 / expiry=内在价值）。故到期 Δ 自带「时间价值归零」收益，
+    卖方虚值到期不再显示 0；net0 同用即期基线，净值展开后不变。
     """
     f = MODES[mode]
     accs = ctx["accounts"]
-    net0 = _net0(ctx, horizon, iv_mult)
+    net0 = _net0(ctx, iv_mult)
     loss = {a: 0.0 for a in accs}
     margin = {a: 0.0 for a in accs}
     detail = []
@@ -476,7 +488,9 @@ def run(ctx: dict, mode: str, drop: float, horizon: str = "now",
             shift = drop * f.get(p["und_key"], 0)
         if p["kind"] in ("call", "put"):
             S = p["S0"] * (1 - shift)
-            v0 = p["sign"] * _option_value(p, p["S0"], horizon, iv_mult) * p["mult"] * p["qty"]
+            # 基线恒为当前盯市：到期时点的盈亏必须含时间价值归零，
+            # 否则虚值义务仓「权利金全收」会被算成 0（v2.1 修复）。
+            v0 = p["sign"] * _option_value(p, p["S0"], "now", iv_mult) * p["mult"] * p["qty"]
             v1 = p["sign"] * _option_value(p, S, horizon, iv_mult) * p["mult"] * p["qty"]
             d_loss = v0 - v1
             m = _option_margin(p, S) if p["sign"] < 0 else 0.0
@@ -571,7 +585,7 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
     仅供前端保证金结构图使用；默认关闭以控制响应体大小。
     """
     ctx = load_context()
-    net0 = _net0(ctx, horizon, iv_mult)
+    net0 = _net0(ctx, iv_mult)
     base = run(ctx, "sync", 0.0, horizon, iv_mult)
 
     # 持仓明细：1% 敏感度、名义市值、最大亏损
@@ -586,7 +600,8 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
     unbounded = False
     for p in ctx["positions"]:
         if p["kind"] in ("call", "put"):
-            v0 = abs(_option_value(p, p["S0"], horizon, iv_mult)) * p["mult"] * p["qty"]
+            # 已收权利金同按当前盯市计（基线不随时点归零），与 run() 一致
+            v0 = abs(_option_value(p, p["S0"], "now", iv_mult)) * p["mult"] * p["qty"]
             d1 = p["sign"] * p["delta"] * 0.01 * p["S0"] * p["mult"] * p["qty"]
             if p["sign"] < 0:
                 if p["cp"] == "C":
@@ -680,9 +695,11 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
     acct_cards = {}
     for a in ctx["accounts"]:
         x = base["accounts"][a]
-        cov = net0[a] / x["margin"] if x["margin"] > 0 else None
+        # 卡片净值取 0% 情景净值（到期时点已含时间价值归零），与 grid 同口径；
+        # net0 是「当前盯市基线」，只用于 653 行的 loss 对账，不能当卡片净值。
+        cov = x["net"] / x["margin"] if x["margin"] > 0 else None
         acct_cards[a] = {
-            "net0": round(net0[a], 2), "fin": round(ctx["accounts"][a]["fin"], 2),
+            "net0": round(x["net"], 2), "fin": round(ctx["accounts"][a]["fin"], 2),
             "eq": round(x["eq"], 2), "margin": round(x["margin"], 2),
             "real": x["real"], "exch": x["exch"],
             "coverage": (round(cov, 4) if cov is not None else None),
@@ -691,7 +708,7 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
 
     # 组合视角（ALL）的账面浮盈 = 各账户之和；'合计' 行已在 load_context 排除（🔒1.5）
     pf_now_total = round(sum(x["pf_now"] for x in acct_cards.values()), 2)
-    net_total = sum(net0.values())
+    net_total = base["net"]
     if raw_stress is None:  # STEPS 里必须有压力档，否则预算主口径无从取数
         raise ValueError(f"情景档位缺压力档 {budget.STRESS_DROP:.0%}，无法计算风险预算")
 
