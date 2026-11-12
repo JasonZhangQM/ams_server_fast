@@ -93,6 +93,25 @@ def _pf_by_account(db: Session) -> dict:
             for r in db.execute(sql).mappings().all()}
 
 
+def _exposure_by_account(db: Session) -> dict:
+    """账户层面风险敞口：直接读账户汇总表 bills_group_acc.risk_exposure。
+
+    该列 = 账户内各 Group.risk_exposure 之和（模型注释：由 Group 编辑联动刷新，
+    NULL = 全部未设置），与该标的归属无关；静态值，不随档位/时点变化。
+    与 _pf_by_account 同表同键，账户键已核对与 load_context() 的 acct 对齐；
+    必须排除 account='合计'（🔒1.5）。NULL 保留为 None ⇒ 前端显示 '-'，不伪造 0。
+    """
+    sql = text("""
+        SELECT account, risk_exposure
+        FROM bills_group_acc
+        WHERE account <> '合计'
+    """)
+    return {
+        r["account"]: (float(r["risk_exposure"]) if r["risk_exposure"] is not None else None)
+        for r in db.execute(sql).mappings().all()
+    }
+
+
 def _pf_by_position(db: Session, symbol: str) -> dict:
     """该标的项下在仓持仓的账面浮盈按 (账户, 合约) 拆分。
 
@@ -258,6 +277,13 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         warnings.append(f"标的 {symbol} 当前无在仓持仓，仅展示档位价，盈亏与保证金为空。")
     # 分账户账面浮盈：账户层面口径，与标的归属无关，故不再与 pf_now_total 对账
     pf_by_acct = _pf_by_account(db)
+    # 分账户风险敞口同为账户层面口径（bills_group_acc），与标的归属无关
+    exposure_by_acct = _exposure_by_account(db)
+    # 组合口径 = Σ 各账户已登记敞口。_exposure_by_account 已排除 account='合计'（🔒1.5）：
+    # 该行就是各账户之和，误计会把整表放大一倍（2026-11-12 实测 4,642,785.81 × 2）。
+    # 静态账面值，五档 / 双时点恒定；全部账户都未登记时返回 None ⇒ 前端显示 '-'，不伪造 0。
+    exp_vals = [v for v in exposure_by_acct.values() if v is not None]
+    combo_exposure = round(sum(exp_vals), 2) if exp_vals else None
     pf_now_total = sum(_f(r["pf_total"]) for r in owned if _f(r["p_total"]) != 0)
     # 逐仓账面浮盈：只统计真正进入风险上下文的键，漏配/未认领会显式报差
     pf_by_pos = _pf_by_position(db, symbol)
@@ -278,8 +304,15 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         for h in HORIZONS
     }
 
+    def combo_of(res: dict) -> dict:
+        """组合层统一补静态敞口：五档表与「另一时点」汇总共用，避免两处漂移。"""
+        out = _combo(res)
+        out["risk_exposure"] = combo_exposure
+        return out
+
     def assemble(res: dict, base: dict, res_other: dict, pf_by_acct: dict,
-                 pf_by_pos: dict, pp: float, pct: float, h: str) -> dict:
+                 exposure_by_acct: dict, pf_by_pos: dict,
+                 pp: float, pct: float, h: str) -> dict:
         dm = _detail_map(res)
         bd = _detail_map(base)
         dm_other = _detail_map(res_other)
@@ -344,6 +377,8 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         other_acct = _acct_deltas(res_other["detail"])
         accounts = _account_rows(res)
         for a in accounts:
+            exp = exposure_by_acct.get(a["account"])
+            a["risk_exposure"] = round(exp, 2) if exp is not None else None
             a["pf_now"] = _r2(pf_by_acct.get(a["account"], 0.0))
             a["delta_pnl"] = _r2(main_acct.get(a["account"], 0.0))
             a["other_delta_pnl"] = _r2(other_acct.get(a["account"], 0.0))
@@ -363,7 +398,7 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
                 "drawdown_ratio": (round(abs(pf_at) / exposure, 4) if exposure > 0 else None),
                 "pf_at_note": "[推算] 账面浮盈 + 模型口径Δ盈亏，混合口径",
             },
-            "combo": _combo(res),
+            "combo": combo_of(res),
             "accounts": accounts,
         }
 
@@ -377,7 +412,7 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
             "delta_pnl": _r2(-res["loss"]),
             "margin_at": round(margin_at, 2),
             "margin_delta": round(margin_at - margin_base, 2),
-            "combo": _combo(res),
+            "combo": combo_of(res),
             "breached_accounts": [a for a, v in res["accounts"].items() if v["breached"]],
         }
 
@@ -395,7 +430,7 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         res_other = risk_scenario.run(ctx, "sync", 0.0, horizon=other,
                                      iv_mult=iv_mult, shifts=shifts)
         item = assemble(res_main, base_by_horizon[horizon], res_other, pf_by_acct,
-                        pf_by_pos, pp, pct, horizon)
+                        exposure_by_acct, pf_by_pos, pp, pct, horizon)
         item["label"] = label
         levels[key] = item
         compare[key] = {
