@@ -13,6 +13,7 @@
 4. 期权即期 BS 重估、到期内在价值双时点（horizon 决定摘要主口径）；
    逐仓明细与分账户表固定同时给即期/到期两列 Δ 盈亏；义务仓保证金逐档重算。
 5. 分账户风险指标复用 level-scenario 的 _account_rows（净值/权益/保证金/双口径风险度），
+   风险敞口复用 _exposure_by_account（bills_group_acc 静态值），列集合与档位 Tab 逐列一致；
    Δ 统计账户全部持仓以便与 combo.loss 对账；账户当前盈亏取 bills_group_acc 账面值。
 6. 纯现算：不写库、不建任务。
 
@@ -217,12 +218,33 @@ def build(db: Session, overrides: dict[str, float],
             "risk_exposure": exposure_of.get((p["acct"], psym)),
         })
 
+    # ---- 5a. 标的项下持仓敞口合计（左栏卡片 / 右栏逐仓排序的唯一数据源） ----
+    # 口径与逐仓「风险敞口」列同源：exposure_of 按 (账户, 合约) 聚合 bills_group
+    # （已排除 account='合计'，🔒1.5），按归属标的求和；rows 来自 ctx["positions"]，
+    # 故只计在仓持仓。同一 (账户, 合约) 在 rows 里可能对应多行，去重避免重复计；
+    # NULL = 未设置，不参与求和；未归属标的不进 map，前端按 0 处理、固定排最后。
+    seen_exp: set[tuple] = set()
+    subject_exposure: dict[str, float] = {}
+    for r in rows:
+        k = (r["acct"], r["symbol"])
+        if k in seen_exp:
+            continue
+        seen_exp.add(k)
+        exp = exposure_of.get(k)
+        subj = r["subject"]
+        if not subj or exp is None:
+            continue
+        subject_exposure[subj] = round(subject_exposure.get(subj, 0.0) + float(exp), 2)
+
     # ---- 5b. 分账户风险指标（与 underlying-monitors 档位 Tab 同构） ----
     # 账户层净值/权益/保证金/双口径风险度全部由 run() 现算，前端禁自算（🔒4.13）。
     # 与档位 Tab 的差别：那里 Δ 只统计「该标的项下持仓」，这里可多标的并行改价，
     # 故统计账户全部持仓 ⇒ Σ分账户 Δ 可与 combo.loss 完整对账（冻结行 loss 恒 0）。
     accounts = lvl._account_rows(scenario)
     pf_acct = lvl._pf_by_account(db)
+    # 账户风险敞口与档位 Tab 同源（lvl._exposure_by_account → bills_group_acc），
+    # 静态人工值、含账户全部持仓、与归属标的无关；NULL 保留 None ⇒ 前端显示 '-'。
+    exposure_acct = lvl._exposure_by_account(db)
 
     def _acct_deltas(res: dict) -> dict[str, float]:
         out: dict[str, float] = {}
@@ -240,6 +262,8 @@ def build(db: Session, overrides: dict[str, float],
         pnl_now, pnl_expiry = ((d_main, d_other) if horizon == "now"
                                else (d_other, d_main))
         a["pf_now"] = lvl._r2(pf_acct.get(a["account"], 0.0))
+        exp = exposure_acct.get(a["account"])
+        a["risk_exposure"] = round(exp, 2) if exp is not None else None
         a["delta_pnl"] = lvl._r2(d_main)
         a["delta_pnl_now"] = lvl._r2(pnl_now)
         a["delta_pnl_expiry"] = lvl._r2(pnl_expiry)
@@ -307,6 +331,8 @@ def build(db: Session, overrides: dict[str, float],
         "分账户「账户当前盈亏」为账单账户层面全部持仓账面浮盈（静态），两列 Δ 盈亏为模型盯市增量"
         "（账户全部持仓，Σ=组合 Δ盈亏），两者基准不同、不可相加对账；保证金变化相对 0% 基准；"
         "追保只判交易所口径，真实口径 ≥1 而交易所口径 <1 时须单独留意；空账户不展示。",
+        "排序用「标的项下持仓风险敞口合计」= 该标的项下逐仓「风险敞口」之和（人工确认值，"
+        "NULL=未设置不计入），静态值、不随假设价变化；未归属标的固定排最后。",
     ])
 
     return {
@@ -325,6 +351,8 @@ def build(db: Session, overrides: dict[str, float],
             "note": "预算读数为现价基准（0% 与 +15% 全组同跌、horizon=now），不随滑块假设价变化。",
         },
         "subjects": subjects,
+        # 标的项下持仓敞口合计（见 5a）：左右两栏排序共用，不随假设价变化
+        "subject_exposure": subject_exposure,
         "position_rows": rows,
         "accounts": accounts,
         "warnings": warnings,
