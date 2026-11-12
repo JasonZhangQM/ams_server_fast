@@ -452,6 +452,7 @@ class RiskBoardAccountOut(BaseModel):
     coverage: Optional[float] = None  # 自有资金保证金覆盖率 = 净资产 / 保证金
     breached: bool = False  # 是否已触发追保（交易所口径）
     pf_now: float = 0.0  # 账户层面全部持仓的账面浮盈（bills_group_acc.pf_total，排除合计）
+    risk_exposure: Optional[float] = None  # 账户风险敞口（bills_group_acc.risk_exposure，人工确认口径；NULL=全部未设置）
 
 
 class RiskBoardPositionOut(BaseModel):
@@ -590,6 +591,7 @@ class RiskBoardOut(BaseModel):
     real_total: Optional[float] = None  # 组合真实风险度
     max_exposure: float  # 数学最大亏损合计（不含无上限合约）
     max_exposure_unbounded: bool  # 是否存在理论上行无上限的卖认购
+    risk_exposure_total: Optional[float] = None  # 组合风险敞口（各账户之和；全部未设置=None）
     pf_now_total: float = 0.0  # 组合账面浮盈（ALL 视角 = 各账户之和，已排除合计行）
     accounts: Dict[str, RiskBoardAccountOut]  # 分账户风险卡
     positions: List[RiskBoardPositionOut]  # 逐仓明细

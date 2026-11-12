@@ -224,6 +224,10 @@ def load_context() -> dict:
                 # 账户层面全部持仓的账面浮盈（bills_group_acc.pf_total，已排除合计行）。
                 # 静态存量，与模型盯市 Δ 盈亏不同源，仅作对照列，不可相加对账。
                 "pf_now": float(a.pf_total or 0),
+                # 账户风险敞口（bills_group_acc.risk_exposure，人工确认口径，含账户全部持仓）。
+                # 由 Group 编辑联动刷新；NULL = 全部未设置，保留 None 不伪造 0（口径同
+                # um_level_scenario._exposure_by_account，2026-11-12 账户列表新增列）。
+                "risk_exposure": (float(a.risk_exposure) if a.risk_exposure is not None else None),
             }
 
         # 同步清单：账单原始码 → 配置行（只判断「这张合约要不要算」，不承载规格）
@@ -256,7 +260,7 @@ def load_context() -> dict:
         for g in pos_rows:
             if g.account not in accounts:
                 # 账单有在仓行但账户汇总表缺行：账面浮盈按 0 兜底，不猜数
-                accounts[g.account] = {"system_net": 0.0, "fin": 0.0, "pf_now": 0.0}
+                accounts[g.account] = {"system_net": 0.0, "fin": 0.0, "pf_now": 0.0, "risk_exposure": None}
             # ⚠️ 必须前缀匹配：库里实值是「期权交易 / 期货交易 / 证券交易」
             if g.category.startswith("期权"):
                 p = _option_position(g, contracts, cfg_info, market, params,
@@ -731,10 +735,17 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
             "real": x["real"], "exch": x["exch"],
             "coverage": (round(cov, 4) if cov is not None else None),
             "pf_now": round(ctx["accounts"][a].get("pf_now", 0.0), 2),
+            "risk_exposure": ctx["accounts"][a].get("risk_exposure"),
         }
 
     # 组合视角（ALL）的账面浮盈 = 各账户之和；'合计' 行已在 load_context 排除（🔒1.5）
     pf_now_total = round(sum(x["pf_now"] for x in acct_cards.values()), 2)
+    # 组合风险敞口 = 各账户之和；全部未设置（全 None）才回 None，口径同 um_level_scenario
+    _exp_vals = [x.get("risk_exposure") for x in acct_cards.values()]
+    risk_exposure_total = (
+        round(sum(v for v in _exp_vals if v is not None), 2)
+        if any(v is not None for v in _exp_vals) else None
+    )
     net_total = base["net"]
     if raw_stress is None:
         # 生效压力档不在情景矩阵固定档位里（表配了非 0.15 的值）：单独跑一次。
@@ -758,6 +769,7 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
                                   if p["max_loss"] is not None), 2),
         "max_exposure_unbounded": unbounded,
         "pf_now_total": pf_now_total,
+        "risk_exposure_total": risk_exposure_total,
         "accounts": acct_cards,
         "positions": pos_detail,
         "grid": grid,
