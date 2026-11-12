@@ -40,7 +40,11 @@ from server_fast.common.db import SessionLocal
 
 # v2.1（2026-11-11）：到期时点 Δ 盈亏的基线回归「当前盯市」，修复 v2.0 把
 # 时间价值收益藏进 net0、导致虚值义务仓到期 Δ 恒为 0 的回归（见 _net0 / run 注释）。
-ENGINE_VER = "v2.1"
+# v2.2（2026-11-12）：新增显式冻结语义 frozen_no_revalue，仅标的到档情景启用。
+# 默认行为完全未变（风险看板 / budget / simulate 零回归）；启用后「价格冻结的
+# 其它持仓」不随时点重估，其 Δ 盈亏恒 0、保证金照计，修掉到期列混入与本标的
+# 无关的期权时间价值（SHSE.000300 中档实测 +5928）。
+ENGINE_VER = "v2.2"
 
 # 情景档位：负数=上涨（短 call 的风险方向），0%=即期基准
 UPSIDE_STEPS = [-0.20, -0.10, -0.05]
@@ -461,7 +465,8 @@ def _net0(ctx: dict, iv_mult: float) -> dict[str, float]:
 
 
 def run(ctx: dict, mode: str, drop: float, horizon: str = "now",
-        iv_mult: float = 1.0, shifts: Optional[dict] = None) -> dict:
+        iv_mult: float = 1.0, shifts: Optional[dict] = None,
+        frozen_no_revalue: bool = False) -> dict:
     """单模式单情景推演。drop<0 表示上涨；horizon∈{now, expiry}。
 
     shifts（2026-11-08 新增，标的到档情景用）：按持仓精确指定跌幅，
@@ -475,6 +480,13 @@ def run(ctx: dict, mode: str, drop: float, horizon: str = "now",
     v2.1 双时点基线：v0（当前盯市）恒用即期 BS，只有 v1 随 horizon 变
     （now=BS 重估 / expiry=内在价值）。故到期 Δ 自带「时间价值归零」收益，
     卖方虚值到期不再显示 0；net0 同用即期基线，净值展开后不变。
+
+    v2.2 frozen_no_revalue（默认 False）：仅当 shifts 给定时生效。未被 shifts
+    列出的持仓视为「价格与估值时点都冻结」，其 Δ 盈亏恒 0，**保证金仍照计**。
+    不启用时，到期时点下这些冻结期权仍会被内在价值重估、把与本标的无关的
+    时间价值归零混进全组合 loss（实测 +5928），令五档表与分账户/逐仓表
+    的「到期Δ盈亏」对不上。只有标的到档情景显式传 True；simulate 的
+    shifts={} 全冻结基准要展示冻结行 Δ，故保持默认行为不变。
     """
     f = MODES[mode]
     accs = ctx["accounts"]
@@ -485,18 +497,27 @@ def run(ctx: dict, mode: str, drop: float, horizon: str = "now",
     for p in ctx["positions"]:
         if shifts is not None:
             # 单标的到档情景：按 (账户, 合约) 精确施加跌幅，其余持仓冻结。
-            shift = shifts.get((p["acct"], p.get("symbol")), 0.0)
+            key = (p["acct"], p.get("symbol"))
+            frozen = frozen_no_revalue and key not in shifts
+            shift = shifts.get(key, 0.0)
         else:
+            frozen = False
             shift = drop * f.get(p["und_key"], 0)
         if p["kind"] in ("call", "put"):
             S = p["S0"] * (1 - shift)
-            # 基线恒为当前盯市：到期时点的盈亏必须含时间价值归零，
-            # 否则虚值义务仓「权利金全收」会被算成 0（v2.1 修复）。
-            v0 = p["sign"] * _option_value(p, p["S0"], "now", iv_mult) * p["mult"] * p["qty"]
-            v1 = p["sign"] * _option_value(p, S, horizon, iv_mult) * p["mult"] * p["qty"]
-            d_loss = v0 - v1
+            if frozen:
+                # v2.2：价格与估值时点都没变 ⇒ Δ 恒 0。保证金仍按 S 照计，
+                # 否则账户分母会少掉冻结持仓的义务仓占用。
+                d_loss = 0.0
+            else:
+                # 基线恒为当前盯市：到期时点的盈亏必须含时间价值归零，
+                # 否则虚值义务仓「权利金全收」会被算成 0（v2.1 修复）。
+                v0 = p["sign"] * _option_value(p, p["S0"], "now", iv_mult) * p["mult"] * p["qty"]
+                v1 = p["sign"] * _option_value(p, S, horizon, iv_mult) * p["mult"] * p["qty"]
+                d_loss = v0 - v1
             m = _option_margin(p, S) if p["sign"] < 0 else 0.0
         else:
+            # 证券/期货与估值时点无关；冻结时 shift=0 ⇒ v0=v1 ⇒ d_loss 天然为 0。
             S = p["px"] * (1 - shift)
             v0 = p["px"] * p["mult"] * p["qty"]
             v1 = S * p["mult"] * p["qty"]

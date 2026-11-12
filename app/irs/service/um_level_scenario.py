@@ -8,7 +8,8 @@
 1. pct = pp_x / 监测标的主表 price − 1；shift = −pct。档位取主表当前生效版，
    与列表页 pv_* 同式，不现查 effective_version。
 2. 单标的驱动：只对该标的项下持仓施加 shift，其余持仓 shift=0 —— 价格冻结，
-   但保证金仍按基准价计入账户分母（漏算会把账户风险度严重低估）。
+   且显式启用 frozen_no_revalue（v2.2）后不随时点重估、Δ 盈亏恒 0；
+   保证金仍按基准价计入账户分母（漏算会把账户风险度严重低估）。
 3. 持仓按**同百分比**平移（beta=1 近似）。监测标的与持仓基准价常是不同市场、
    不同量纲（GC00Y 美元/盎司 ↔ 沪金 元/克；中证500 指数点 ↔ 500ETF 元），
    因此只联动百分比，绝不比较绝对价，基差/贴水/折溢价漂移不计。
@@ -49,6 +50,8 @@ FIXED_NOTES = [
     "分账户「当前盈亏」= 账户层面全部持仓账面浮盈（bills_group_acc.pf_total，排除 account='合计'），"
     "与该标的项下口径无关；五档表与逐仓「当前盈亏」仍只统计该标的项下持仓，"
     "三处同名列口径不同，不可互相相加或作对账。",
+    "价格冻结的其它持仓（非本标的项下）不随时点重估，其 Δ 盈亏恒 0、保证金仍按基准价计入；"
+    "即期Δ盈亏 / 到期Δ盈亏两列口径一致，都只统计该标的项下持仓。",
 ]
 
 
@@ -300,7 +303,8 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
     # 基准档（pct=0）：既用于 margin_delta，也是「与 risk-board 0% 一致」的验收锚点
     base_by_horizon = {
         h: risk_scenario.run(ctx, "sync", 0.0, horizon=h, iv_mult=iv_mult,
-                             shifts={k: 0.0 for k in shift_keys})
+                             shifts={k: 0.0 for k in shift_keys},
+                             frozen_no_revalue=True)
         for h in HORIZONS
     }
 
@@ -363,7 +367,8 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         exposure = sum(_f(r["risk_exposure"]) for r in in_pos)
         pf_at = pf_now + delta_pnl
 
-        # 逐账户 Δ 盈亏：只聚合该标的项下的持仓（其余持仓 shift=0，loss 恒 0）
+        # 逐账户 Δ 盈亏：只聚合该标的项下的持仓（v2.2 起冻结持仓 loss 恒 0，
+        # 即期 / 到期两列口径一致，五档表与逐仓、分账户表可对账）
         target_keys = {(p["acct"], p["name"]) for p in target_positions}
 
         def _acct_deltas(detail: list[dict]) -> dict:
@@ -425,10 +430,14 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
         pp = levels_pp[key]
         pct = pp / price - 1
         shifts = {k: -pct for k in shift_keys}
+        # v2.2 显式冻结语义：只让该标的项下持仓随时点重估，避免其它期权
+        # 的时间价值归零混进全组合 loss（见 FIXED_NOTES 末条）。
         res_main = risk_scenario.run(ctx, "sync", 0.0, horizon=horizon,
-                                    iv_mult=iv_mult, shifts=shifts)
+                                    iv_mult=iv_mult, shifts=shifts,
+                                    frozen_no_revalue=True)
         res_other = risk_scenario.run(ctx, "sync", 0.0, horizon=other,
-                                     iv_mult=iv_mult, shifts=shifts)
+                                     iv_mult=iv_mult, shifts=shifts,
+                                     frozen_no_revalue=True)
         item = assemble(res_main, base_by_horizon[horizon], res_other, pf_by_acct,
                         exposure_by_acct, pf_by_pos, pp, pct, horizon)
         item["label"] = label
