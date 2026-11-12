@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""探针：推演工作台双锚点验收（2026-11-11）。
+"""探针：标的推演双锚点验收（2026-11-11）。
 
 锚点 1：overrides={} 时 baseline_combo 与 GET /irs/risk-board 逐值一致；
 锚点 2：单标的假设价=档位价时，subjects[sym] 与 level-scenario 同档逐值一致。

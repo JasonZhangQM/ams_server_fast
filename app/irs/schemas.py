@@ -90,6 +90,7 @@ class UnderlyingMonitorOut(BaseModel):
     research_conclusion: Optional[str] = None  # 最新研究结论
     next_review: Optional[date] = None         # 下次复核
     plan_active: Optional[int] = None          # 生效剧本数
+    risk_exposure: Optional[float] = None      # 标的项下持仓风险敞口合计（bills_group_symbol 按归属汇总，NULL=未设置）
     id: int                                    # 主键
     create_time: datetime                      # 创建时间
     update_time: datetime                      # 更新时间
@@ -603,7 +604,7 @@ class RiskBoardOut(BaseModel):
 
 
 class SimulateIn(BaseModel):
-    """推演工作台入参（POST /irs/simulate）。
+    """标的推演入参（POST /irs/simulate）。
 
     overrides：{标的代码: 假设价}，每标的一个假设价；空 dict = 全部现价（0% 基准）。
     响应无固定 response_model（结构与 level-scenario 同风格，dict 原样透出）。

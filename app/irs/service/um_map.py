@@ -118,6 +118,44 @@ def _group_filters(category: str | None, symbol: str | None) -> tuple[str, dict]
     return conds, params
 
 
+# =========================================================================
+# 标的项下持仓风险敞口合计（列表页「风险敞口」列 + 后端倒序，2026-11-12）
+#
+# 口径唯一来源：bills_group_symbol 按 COALESCE(underlying_symbol, symbol) 归属，
+# SUM(risk_exposure)，只取可归属行。与 /irs/simulate 的 subject_exposure 逐值一致
+# （那里按 (账户, 合约) 聚合 bills_group 后再求和，只是同一份人工值的另一条汇总路径）。
+# NULL = 未设置，SUM 自动跳过；全为 NULL 的标的返回 NULL，列表显示 '-' 且排最后。
+# =========================================================================
+
+def subject_exposure_expr() -> str:
+    """相关子查询表达式（供主表 ORDER BY 用，外层务必自行加括号）。
+
+    直接引用主表列 `irs_underlying_monitor.symbol`，因此排序发生在 SQL 层、
+    LIMIT/OFFSET 之前——分页不会把大敞口标的挤到后页（前端不得二次排序）。
+    """
+    return (
+        "SELECT SUM(g.risk_exposure) FROM bills_group_symbol g "
+        "WHERE COALESCE(g.underlying_symbol, g.symbol) = irs_underlying_monitor.symbol "
+        f"AND {attachable_sql('g')}"
+    )
+
+
+def subject_exposure_map(db: Session) -> dict[str, float]:
+    """全标的敞口合计 map（列表回填用），与 subject_exposure_expr 同一口径。"""
+    sql = text(f"""
+        SELECT COALESCE(g.underlying_symbol, g.symbol) AS um_symbol,
+               SUM(g.risk_exposure) AS exposure
+        FROM bills_group_symbol g
+        WHERE {attachable_sql('g')}
+        GROUP BY COALESCE(g.underlying_symbol, g.symbol)
+    """)
+    return {
+        r["um_symbol"]: round(float(r["exposure"]), 2)
+        for r in db.execute(sql).mappings().all()
+        if r["exposure"] is not None
+    }
+
+
 def groups_of(
     db: Session,
     underlying_symbol: str,

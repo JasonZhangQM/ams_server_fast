@@ -309,7 +309,11 @@ def build(db: Session, symbol: str, horizon: str = "now", iv_mult: float = 1.0) 
     }
 
     def combo_of(res: dict) -> dict:
-        """组合层统一补静态敞口：五档表与「另一时点」汇总共用，避免两处漂移。"""
+        """组合层统一补静态敞口：保留接口契约字段（五档表与「另一时点」汇总共用一份）。
+
+        ⚠️ 前端五档表「标的风险敞口」列自 2026-11-12 起改读 total.risk_exposure（标的项下口径），
+        本字段是全账户口径，仍回填给 horizon_compare，展示时勿混用。
+        """
         out = _combo(res)
         out["risk_exposure"] = combo_exposure
         return out

@@ -170,8 +170,12 @@ def _enrich_underlying_monitors(db: Session, items: list) -> list:
     except Exception:
         pct_map = {}
 
+    # 标的项下持仓风险敞口合计（与 /irs/simulate subject_exposure 同源、同一 SQL 口径）
+    exposure_map = service.um_map.subject_exposure_map(db)
+
     for it in items:
         s = it["symbol"]
+        it["risk_exposure"] = exposure_map.get(s)
         it["pp_effective_date"] = cur_date.get(s)
         it["pp_version_count"] = ver_count.get(s, 0)
         it["pp_pending_date"] = pend.get(s)
@@ -258,9 +262,11 @@ def list_underlying_monitors(
     """标的监测（对应 UnderlyingMonitor 独立表，支持代码精确/主题多选/研究状态）。
 
     返回体除主表全字段外，还带 v3 派生：当前生效档位日期、版本数、待生效日期、
-    最新研究结论/复核日、生效剧本数。
+    最新研究结论/复核日、生效剧本数、标的项下持仓风险敞口合计。
 
     `theme` 走多值直通（铁律 4.5：`arrayFormat:'repeat'`），不降级成前端过滤。
+    排序在 SQL 层按「标的项下风险敞口合计」倒序（NULL 最后、symbol 兜底），
+    发生在 LIMIT/OFFSET 之前，前端不再二次排序。
     """
     query = db.query(UnderlyingMonitor)
     if symbol:
@@ -283,7 +289,11 @@ def list_underlying_monitors(
                  .filter(UnderlyingResearch.next_review.isnot(None),
                          UnderlyingResearch.next_review <= date.today()))
     total = query.count()
-    items = query.order_by(UnderlyingMonitor.symbol).offset(offset).limit(limit).all()
+    # 相关子查询取每个标的的敞口合计：非 NULL 优先 → 敞口倒序 → symbol 兜底（结果确定）。
+    # 必须写在 SQL 的 ORDER BY 里，不能在 Python 里对当页 items 排（分页会截断大敞口标的）。
+    exp = service.um_map.subject_exposure_expr()
+    order = text(f"({exp}) IS NULL, ({exp}) DESC, irs_underlying_monitor.symbol ASC")
+    items = query.order_by(order).offset(offset).limit(limit).all()
     dicts = _enrich_underlying_monitors(db, [item.to_dict() for item in items])
     return {"items": dicts, "total": total, "limit": limit, "offset": offset}
 
@@ -1253,7 +1263,7 @@ def get_risk_board(
 
 @router.post("/simulate")
 def simulate_workbench(body: SimulateIn, db: Session = Depends(get_db)):
-    """推演工作台：多标的假设价 → 组合风险/收益联动推演（只读，不落库）。
+    """标的推演：多标的假设价 → 组合风险/收益联动推演（只读，不落库）。
 
     overrides：{标的代码: 假设价}；空 dict = 全部现价（0% 基准）。
     非法标的/价格/上下文不可用 → 400；与风险看板、level-scenario 双锚点同口径
