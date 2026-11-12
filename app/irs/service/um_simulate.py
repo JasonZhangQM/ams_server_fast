@@ -189,7 +189,7 @@ def build(db: Session, overrides: dict[str, float],
             warnings.append(f"持仓 {k[0]}/{psym} 未出现在另一时点明细中，对照Δ盈亏按 0 处理。")
         pnl_main = lvl._r2(-d["loss"])
         pnl_other = lvl._r2(-lvl._f(d_other.get("loss"))) if d_other else 0.0
-        # 两列固定按即期/到期排列，不受顶部时点切换影响；主时点只决定摘要口径。
+        # 两列固定按即期/到期排列，与时点参数无关；主时点只决定摘要口径。
         pnl_now, pnl_expiry = ((pnl_main, pnl_other) if horizon == "now"
                                else (pnl_other, pnl_main))
         subj, subj_name = subject_of.get(psym, (None, None))
@@ -236,7 +236,7 @@ def build(db: Session, overrides: dict[str, float],
     for a in accounts:
         d_main = main_acct.get(a["account"], 0.0)
         d_other = other_acct.get(a["account"], 0.0)
-        # 两列固定按即期/到期排列（与逐仓明细一致），不受顶部时点切换影响
+        # 两列固定按即期/到期排列（与逐仓明细一致），与时点参数无关
         pnl_now, pnl_expiry = ((d_main, d_other) if horizon == "now"
                                else (d_other, d_main))
         a["pf_now"] = lvl._r2(pf_acct.get(a["account"], 0.0))
@@ -301,8 +301,8 @@ def build(db: Session, overrides: dict[str, float],
         "两者基准不同，不可相加对账。",
         "逐仓「风险敞口」为人工确认值（bills_group，按账户+合约拆分），空=未设置；"
         "不是模型推算，也不随假设价变化。",
-        "逐仓明细同时给出即期/到期两时点Δ盈亏；组合摘要、改价小结与预算仍按顶部所选时点；"
-        "保证金逐档重估，与即期/到期时点无关。",
+        "逐仓明细同时给出即期/到期两时点Δ盈亏，到期列仅作对照；组合摘要、改价小结与预算"
+        "按主时点即期（前端已固定，不再切换）；保证金逐档重估，与即期/到期时点无关。",
         "「标的」列为持仓的归属监测标的（含未改价的冻结行）；高亮底色才表示本次被改价命中。",
         "分账户「账户当前盈亏」为账单账户层面全部持仓账面浮盈（静态），两列 Δ 盈亏为模型盯市增量"
         "（账户全部持仓，Σ=组合 Δ盈亏），两者基准不同、不可相加对账；保证金变化相对 0% 基准；"
