@@ -649,7 +649,10 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
             nominal = max_loss
             # 期货 delta 恒 ±1（方向取持仓符号）：减仓排序要算「保证金效率」，
             # 不给它就和期权不可比（2026-11-06，方案改造 5）
-            extra = {"delta": 1.0 if qty > 0 else -1.0}
+            # px 一并输出（2026-11-13）：逐仓总表「盯市单价」原来只有期权有值，
+            # 期货/证券取 bills_group.price（行情同步后即最新价，与成本/浮盈同源）；
+            # 缺价给 None，前端显示 '—'，不给 0 免得读成「不要钱」
+            extra = {"delta": 1.0 if qty > 0 else -1.0, "px": (round(px, 4) if px else None)}
         pos_detail.append({
             "acct": p["acct"], "symbol": p["name"], "kind": p["kind"],
             "und_key": p["und_key"], "qty": p["qty"], "nominal": round(nominal, 2),

@@ -291,6 +291,11 @@ def build(db: Session, overrides: dict[str, float],
     # 基准值同一次 run() 现取，前端不自行相减（🔒4.13）。baseline_combo 传自己的 margin ⇒ 恒 0。
     combo = lvl._combo(scenario, base["margin"])
     baseline_combo = lvl._combo(base, base["margin"])
+    # 另一时点的组合读数：逐仓 / 分账户两表本来就固定给「即期Δ、到期Δ」两列，
+    # 组合层原先只有主时点一份 loss，档位压力表要并列即期/到期就只能让前端自算 —— 违反 🔒4.13。
+    # 这里把已跑过的 scenario_other 一并折成组合读数（保证金只吃标的价格、与 horizon 无关，
+    # 故基准保证金仍用同一份 base["margin"]，不另跑 0% 基准）。
+    combo_other = lvl._combo(scenario_other, base["margin"])
 
     # ---- 6. 每标的假设态小结（zone_at / 假设价剧本命中 / 该标的合计） ----
     # 档位压力只用组合/账户/逐仓三张表，跳过可省掉每档的 effective_version、
@@ -367,6 +372,9 @@ def build(db: Session, overrides: dict[str, float],
         "changed_symbols": list(overrides.keys()),
         "combo": combo,
         "baseline_combo": baseline_combo,
+        # 另一时点（horizon=now 时即到期，反之即期）的组合读数，供档位压力表并列两列 Δ 盈亏；
+        # 前端按 horizon 字段定排位，不依赖本字段的顺序语义。
+        "combo_other": combo_other,
         "budget": ({
             "stress_drop": budget["stress_drop"],
             "summary": budget["summary"],
@@ -387,7 +395,7 @@ def build(db: Session, overrides: dict[str, float],
 def _level_overrides(db: Session, field: str) -> tuple[dict[str, float], list[str], list[float]]:
     """该档的全部标的假设价；与 simulate 页 applyBatch() 逐字段同源同规则。
 
-    - 档位价取**主表** pp_*：GET /irs/today 的 TodayItem.pp 就是主表字段（um_today:192，
+    - 档位价取**主表** pp_*：/risk 左栏档位条与标的主表同一组字段（um_today 原 today_items:192，
       不现查 effective_version），保证「点压力表」与「点顶栏批量设置」得到同一组价；
     - 现价为空/非正、档位价 NULL/非正 ⇒ 跳过（保持现价），与前端 applyBatch 一致；
     - 档位价恰等于现价 ⇒ 不写 override，与 setHypo「现价即不设」语义一致；
@@ -438,13 +446,25 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
     except Exception as exc:  # noqa: BLE001  与 /irs/simulate 同一错误口径
         raise ValueError(f"风险上下文不可用：{exc}") from exc
 
+    def _now_expiry(res: dict) -> tuple[dict, dict]:
+        """把一次 build() 的主时点 / 另一时点两个组合读数，固定排成（即期, 到期）。
+
+        build() 的 combo 跟随 horizon 参数，combo_other 是另一时点；档位压力表的
+        「即期Δ盈亏 / 到期Δ盈亏」两列与逐仓、分账户两表同规矩 —— 固定按即期在前排，
+        不随请求的 horizon 换位（前端已固定传 now）。
+        """
+        return ((res["combo"], res["combo_other"]) if horizon == "now"
+                else (res["combo_other"], res["combo"]))
+
     # 0% 基准（全部现价）：预算读数、账户静态卡、逐仓基准都从这一跑取
     base = build(db, {}, horizon, iv_mult, ctx=ctx)
+    base_now, base_exp = _now_expiry(base)
     levels: dict[str, dict] = {}
     for key, field, label in lvl.LEVELS:
         overrides, skipped, pcts = _level_overrides(db, field)
         res = build(db, overrides, horizon, iv_mult, ctx=ctx,
                     include_budget=False, include_subjects=False)
+        c_now, c_exp = _now_expiry(res)
         levels[key] = {
             "key": key,
             "label": label,
@@ -457,6 +477,13 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
             "baseline_combo": res["baseline_combo"],
             # 相对 0% 基准的 Δ 亏损（正=亏）；压力表「组合盈亏」= −delta_loss
             "delta_loss": round(res["combo"]["loss"] - base["combo"]["loss"], 2),
+            # 组合层双时点 Δ 盈亏（正=盈）：取该时点 run() 的 loss 原值、**不扣 0% 基准**。
+            # 与分账户 / 逐仓两表的 delta_pnl_now / delta_pnl_expiry 完全同式
+            #（那边也是 Σ −detail.loss），故 Σ账户 = 组合、Σ逐仓 = 组合，两列都可对账。
+            # ⚠️ 到期列在 0% 行也不是 0：所有期权的时间价值整体衰减即该列的「Δ」，
+            # 这是到期口径的定义（见 lvl.FIXED_NOTES），不是漏扣基准。
+            "delta_pnl_now": lvl._r2(-c_now["loss"]),
+            "delta_pnl_expiry": lvl._r2(-c_exp["loss"]),
             "accounts": res["accounts"],
             "positions": _slim_positions(res["position_rows"]),
         }
@@ -466,6 +493,9 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
         "accounts": base["accounts"],
         "positions": _slim_positions(base["position_rows"]),
         "budget": base["budget"],
+        # 现价行同样给两列：即期恒 0（不重估就没有 Δ），到期 = 全组合时间价值衰减（负数）
+        "delta_pnl_now": lvl._r2(-base_now["loss"]),
+        "delta_pnl_expiry": lvl._r2(-base_exp["loss"]),
     }
 
     # 首个追保（档位口径）：按到档价升序（极低→极高）找第一个 breached 的档。

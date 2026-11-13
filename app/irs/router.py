@@ -52,7 +52,6 @@ from server_fast.app.irs.schemas import (
     UnderlyingReviewSave,
     UnderlyingVersionOut,
     UnderlyingVersionSave,
-    TodayItem,
     UnderlyingStateLogOut,
     UnderlyingTargetOut,
     UnderlyingTargetSave,
@@ -193,16 +192,6 @@ def _enrich_underlying_monitors(db: Session, items: list) -> list:
         it["pe_pct"] = pct_map.get((s, "pe_ttm"))
         it["pb_pct"] = pct_map.get((s, "pb_mrq"))
     return items
-
-
-@router.get("/today", response_model=List[TodayItem])
-def get_today(db: Session = Depends(get_db)):
-    """今日页：跨标的到价清单（按「需要动作」排序）。
-
-    纯聚合、不落库：8 标的 zone / 命中剧本 / 逻辑减弱 / 证伪触发 / 复核到期 / 裸仓 /
-    目标仓位与漂移，全部在 service 里算好，前端只展示不重算（铁律 4.5）。
-    """
-    return service.um_today.today_items(db)
 
 
 @router.get("/plans", response_model=List[UnderlyingPlanOut])
@@ -1282,7 +1271,7 @@ def simulate_workbench(body: SimulateIn, db: Session = Depends(get_db)):
 def simulate_level_pressure(body: SimulateLevelsIn, db: Session = Depends(get_db)):
     """五档档位压力（只读、不落库）：全部标的同步到同一档，一次返回五档结果。
 
-    档位价取主表 pp_*，与 /irs/today 的 TodayItem.pp、推演页「批量设置」同源；
+    档位价取主表 pp_*，与标的监测 /risk 左栏档位条同源；
     每档给组合 / 分账户 / 逐仓三层读数，供压力表、逐张合约、保证金结构图共用。
     非法时点 / 上下文不可用 → 400；引擎异常 → 500。
     """

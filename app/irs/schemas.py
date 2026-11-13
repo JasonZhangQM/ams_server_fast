@@ -401,42 +401,6 @@ class UnderlyingTargetSave(BaseModel):
 
 
 # =========================================================================
-# 今日页（GET /irs/today）：跨标的到价清单，纯聚合、不落库
-# =========================================================================
-class TodayPlanHit(BaseModel):
-    seq: int
-    trade_symbol: str
-    b_s: str
-    o_c: Optional[str] = None
-    reason: Optional[str] = None
-    effective_trigger: Optional[float] = None
-
-
-class TodayItem(BaseModel):
-    symbol: str
-    name: Optional[str] = None
-    theme: Optional[str] = None
-    price: Optional[float] = None
-    zone: Optional[str] = None
-    nearest_level_pct: Optional[float] = None   # 距最近档位 %
-    pp: Optional[Dict[str, Optional[float]]] = None  # 五档价格 pp_el~pp_eh（今日页刻度条）
-    pv: Optional[Dict[str, Optional[float]]] = None  # 距各档 % pv_el~pv_eh（负=档位在下方）
-    pe_pct: Optional[float] = None              # 当前价对应 PE 分位（指数标的）
-    pb_pct: Optional[float] = None              # 当前价对应 PB 分位（指数标的）
-    hit_plans: List[TodayPlanHit] = Field(default_factory=list)
-    logic_total: int = 0
-    logic_weak: int = 0
-    invalidate_triggered: int = 0              # 已触发证伪条数
-    has_position: bool = False                 # 是否有归属持仓
-    review_due: bool = False                   # 复核已到期
-    naked: bool = False                        # 裸仓（有持仓但 logic=0 或 research=0）
-    target_pct: Optional[float] = None
-    current_pct: Optional[float] = None
-    drift: Optional[float] = None              # 当前 − 目标
-    priority: int = 5                          # 1 证伪置顶 / 2 剧本命中 / 3 裸仓 / 4 复核 / 5 其余
-
-
-# =========================================================================
 # 风险看板（GET /irs/risk-board，对应 risk_scenario.compute() 输出）
 # 2026-11-08 自 bills/schemas.py 整体迁入
 # =========================================================================

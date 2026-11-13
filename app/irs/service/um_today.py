@@ -1,51 +1,34 @@
 # -*- coding: utf-8 -*-
-"""今日页（GET /irs/today）：跨标的到价清单，纯聚合、不落库。
+"""标的维度的横切口径：估值分位 + 证伪自动判定（2026-11-13 起，今日待办已下线）。
 
-把「8 个标的 × 5 个 Tab」摊开的「该干什么」压成一张按优先级排序的清单：
-    1 证伪已触发（红）→ 2 剧本命中（橙）→ 3 裸仓且有持仓（黄）→ 4 复核到期（蓝）→ 5 其余。
+本模块曾承载「今日页（GET /irs/today）」的到价清单聚合，2026-11-13 随今日待办页一并
+删除；保留两项仍被其它链路消费的能力：
 
-口径只在后端这一处算（铁律 4.5）：
-- zone：`um_version.compute_zone`（带语义、左闭右开）
-- 命中：现价满足剧本的 trigger_op（`effective_trigger` 现算，不落库）
-- 裸仓：有归属持仓 且（logic=0 或 research=0）
-- 漂移：target_pct（irs 决策层）− current_pct（bills 事实层），前端派生不落库
+- `percentiles()`：PE/PB 10 年分位（契约在 bds `percentile_store.read_percentiles()`），
+  被标的监测列表、风险看板、档位 Tab 等多处调用；
+- `judge_one / judge_list`：证伪候选判定（只读、不改 status）。
+
+`_is_hit` / `_unfinished_plans` 仍被 `um_simulate`（推演页命中剧本）复用，故保留。
 
 依赖方向：bills ↔ irs 平级、可互依（规则 4.12，2026-10-29 改）；bds 只能被依赖。
-本模块只**读** bills（GroupSymbol/GroupAcc），不写；分位从 bds 只读。
 """
 from __future__ import annotations
 
-from datetime import date
 from typing import Optional
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from server_fast.app.bills.models import GroupAcc, GroupSymbol
-from server_fast.app.irs.models import (
-    UnderlyingMonitor,
-    UnderlyingInvalidate,
-    UnderlyingLogic,
-    UnderlyingPlan,
-    UnderlyingTarget,
-)
+from server_fast.app.irs.models import UnderlyingPlan
 from server_fast.app.irs.service.um_plan import effective_trigger
-from server_fast.app.irs.service.um_research import latest
-from server_fast.app.irs.service.um_version import compute_zone, effective_version
 
 # 历史白名单（方案 P0-4 / P2-1）：读表后不再由本模块过滤，保留供审计与 um_version 注释引用。
 # 落表默认 subject 由 bds 侧 subject_diagnostics() 运行时从 irs_underlying_monitor
 # 推导（🔒4.12：bds 不 import irs，用表名字符串 SQL 取数），不再是 L1_SUBJECTS 常量。
 INDEX_PCT_SYMBOLS = {"SHSE.000300", "SHSE.000905", "SPX"}
 
-# 距最近档位 %：pv_* 字段即 (档位/现价-1)*100，取绝对值最小者
-PV_FIELDS = ("pv_el", "pv_l", "pv_m", "pv_h", "pv_eh")
-# 档位价格：今日页刻度条直接透传 UnderlyingMonitor 主表列（save_version 会回写主表，与生效版本一致）
-PP_FIELDS = ("pp_el", "pp_l", "pp_m", "pp_h", "pp_eh")
-
 
 def percentiles() -> dict:
-    """{(symbol, metric): pct_10y}，失败返回空 dict（分位是纠偏，不是今日页主链）。
+    """{(symbol, metric): pct_10y}，失败返回空 dict（分位是纠偏，不是列表主链）。
 
     列表页 / 详情抽屉 / 今日页 / 证伪判定同样复用本函数补 pe_pct/pb_pct（口径唯一，🔒4.5）。
 
@@ -94,120 +77,10 @@ def _is_hit(p: UnderlyingPlan, pp: dict, price) -> bool:
     return False
 
 
-def _nearest_level_pct(um: UnderlyingMonitor) -> Optional[float]:
-    vals = []
-    for f in PV_FIELDS:
-        v = getattr(um, f, None)
-        if v is not None:
-            vals.append((abs(float(v)), float(v)))
-    return min(vals, key=lambda x: x[0])[1] if vals else None
-
-
 def _unfinished_plans(db: Session, symbol: str) -> list[UnderlyingPlan]:
     """未暂停的剧本（长期有效，全部纳入今日命中判定）。"""
     rows = db.query(UnderlyingPlan).filter(UnderlyingPlan.underlying_symbol == symbol).order_by(UnderlyingPlan.seq).all()
     return [p for p in rows if not p.is_cancelled]
-
-
-def today_items(db: Session) -> list[dict]:
-    """聚合全部标的的今日信息并按优先级排序。"""
-    today = date.today()
-    vms = db.query(UnderlyingMonitor).order_by(UnderlyingMonitor.symbol).all()
-    pct_map = percentiles()
-
-    # 目标仓位 + 当前市值占比（只查一次，8 个标的规模下 JOIN 反而重）
-    targets = {t.symbol: t for t in db.query(UnderlyingTarget).all()}
-    total_asset = db.query(func.coalesce(func.sum(GroupAcc.acc_aset), 0)).scalar() or 0
-    current = {}
-    has_pos = set()
-    gs_rows = db.query(GroupSymbol.value_total, GroupSymbol.p_total, GroupSymbol.underlying_symbol).all()
-    for value_total, p_total, underlying_symbol in gs_rows:
-        if not underlying_symbol:
-            continue
-        if p_total or (value_total is not None and value_total != 0):
-            has_pos.add(underlying_symbol)
-        if value_total is not None:
-            current[underlying_symbol] = current.get(underlying_symbol, 0) + float(value_total)
-
-    # 逻辑 / 证伪计数，按标的聚成 dict（一次查询）
-    logic_total = dict(db.query(UnderlyingLogic.symbol, func.count(UnderlyingLogic.id))
-                       .group_by(UnderlyingLogic.symbol).all())
-    logic_weak = dict(db.query(UnderlyingLogic.symbol, func.count(UnderlyingLogic.id))
-                      .filter(UnderlyingLogic.state == "减弱").group_by(UnderlyingLogic.symbol).all())
-    inv_triggered = dict(db.query(UnderlyingInvalidate.symbol, func.count(UnderlyingInvalidate.id))
-                         .filter(UnderlyingInvalidate.status == "已触发")
-                         .group_by(UnderlyingInvalidate.symbol).all())
-
-    items = []
-    for um in vms:
-        sym = um.symbol
-        pp = {}
-        ver = effective_version(db, sym)
-        if ver is not None:
-            pp = {"pp_el": ver.pp_el, "pp_l": ver.pp_l, "pp_m": ver.pp_m,
-                  "pp_h": ver.pp_h, "pp_eh": ver.pp_eh}
-
-        plans = _unfinished_plans(db, sym)
-        hit_plans = [{
-            "seq": p.seq, "trade_symbol": p.trade_symbol,
-            "b_s": p.b_s, "o_c": p.o_c, "reason": p.reason,
-            "effective_trigger": effective_trigger(p, pp),
-        } for p in plans if _is_hit(p, pp, um.price)]
-
-        research = latest(db, sym) or {}
-        next_review = research.get("next_review")
-        review_due = bool(next_review and next_review < today)
-
-        n_logic = int(logic_total.get(sym, 0))
-        n_research = 1 if research else 0
-        positioned = sym in has_pos
-        naked = positioned and (n_logic == 0 or n_research == 0)
-
-        t = targets.get(sym)
-        target_pct = float(t.target_pct) if t and t.target_pct is not None else None
-        cur_amt = current.get(sym)
-        current_pct = (round(cur_amt / float(total_asset) * 100, 4)
-                       if total_asset and cur_amt is not None else None)
-        drift = (round(current_pct - target_pct, 4)
-                 if current_pct is not None and target_pct is not None else None)
-
-        if int(inv_triggered.get(sym, 0)) > 0:
-            priority = 1
-        elif hit_plans:
-            priority = 2
-        elif naked:
-            priority = 3
-        elif review_due:
-            priority = 4
-        else:
-            priority = 5
-
-        items.append({
-            "symbol": sym,
-            "name": um.name,
-            "theme": um.theme,
-            "price": float(um.price) if um.price is not None else None,
-            "zone": compute_zone(pp, um.price),
-            "nearest_level_pct": _nearest_level_pct(um),
-            "pp": {f: getattr(um, f) for f in PP_FIELDS},
-            "pv": {f: getattr(um, f) for f in PV_FIELDS},
-            "pe_pct": pct_map.get((sym, "pe_ttm")),
-            "pb_pct": pct_map.get((sym, "pb_mrq")),
-            "hit_plans": hit_plans,
-            "logic_total": n_logic,
-            "logic_weak": int(logic_weak.get(sym, 0)),
-            "invalidate_triggered": int(inv_triggered.get(sym, 0)),
-            "has_position": positioned,
-            "review_due": review_due,
-            "naked": naked,
-            "target_pct": target_pct,
-            "current_pct": current_pct,
-            "drift": drift,
-            "priority": priority,
-        })
-
-    items.sort(key=lambda x: (x["priority"], x["symbol"]))
-    return items
 
 
 # =========================================================================
