@@ -210,18 +210,34 @@ def _account_rows(res: dict) -> list[dict]:
             "margin_at": round(a["margin"], 2),
             "real": a["real"],
             "exch": a["exch"],
+            # 覆盖率 R/E：R 真实 = 净值 / 保证金（1/real），E 交易所 = 客户权益 / 保证金（1/exch）。
+            # 两个分母同源（net / eq 就是 real / exch 的分母），前端只做并列展示、禁自算（🔒4.13）。
             "coverage": (a["net"] / a["margin"] if a["margin"] > 0 else None),
+            "coverage_exch": (a["eq"] / a["margin"] if a["margin"] > 0 else None),
             "breached": a["breached"],
         })
     return out
 
 
-def _combo(res: dict) -> dict:
-    """组合层：real 直接取 run()，交易所口径按 Σ客户权益 现算（与 compute 的 ALL 行同式）。"""
+def _combo(res: dict, base_margin: float | None = None) -> dict:
+    """组合层：real 直接取 run()，交易所口径按 Σ客户权益 现算（与 compute 的 ALL 行同式）。
+
+    2026-11-13 补 eq_at：Σ各账户客户权益本来就是 exch 的分母，引擎早已算出，
+    只是此前没输出，导致推演页「账户总表」组合行客户权益只能显示「-」。
+    同轮补 coverage / margin_delta：与 _account_rows 的逐账户口径同式，
+    避免组合行这两格只能空着。base_margin 由调用方传 0% 基准保证金；
+    不传（单标的档位情景）时 margin_delta 留 None，不伪造 0。
+    同日再补 coverage_exch：前端「覆盖率(R/E)」把真实 / 交易所两个口径并列一格，
+    组合行也必须后端给（= Σ客户权益 / 合计保证金 = 1/exch），与逐账户同式、不前端自算。
+    """
     eq_total = sum(a["eq"] for a in res["accounts"].values())
     return {
         "net_at": round(res["net"], 2),
+        "eq_at": round(eq_total, 2),
         "margin_total": round(res["margin"], 2),
+        "margin_delta": (round(res["margin"] - base_margin, 2) if base_margin is not None else None),
+        "coverage": (res["net"] / res["margin"] if res["margin"] > 0 else None),
+        "coverage_exch": (eq_total / res["margin"] if res["margin"] > 0 else None),
         "real": res["real"],
         "exch": (res["margin"] / eq_total if eq_total > 0 else None),
         "loss": round(res["loss"], 2),

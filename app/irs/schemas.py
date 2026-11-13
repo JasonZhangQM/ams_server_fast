@@ -615,3 +615,15 @@ class SimulateIn(BaseModel):
     overrides: Dict[str, float] = {}
     horizon: str = "now"  # now=即期 / expiry=到期
     iv_mult: float = 1.0  # IV 冲击倍数
+
+
+class SimulateLevelsIn(BaseModel):
+    """档位压力入参（POST /irs/simulate/levels）。
+
+    五档固定取 irs_underlying_monitor 主表 pp_*，不接受自定义档位价 ——
+    与推演页顶栏「批量设置」同源，避免两处档位口径漂移。
+    响应无固定 response_model（结构与 /irs/simulate 同风格，dict 原样透出）。
+    """
+
+    horizon: str = "now"  # now=即期 / expiry=到期
+    iv_mult: float = 1.0  # IV 冲击倍数

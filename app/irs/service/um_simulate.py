@@ -80,8 +80,16 @@ def _risk_exposure_by_position(db: Session) -> dict[tuple[str, str], float | Non
 
 
 def build(db: Session, overrides: dict[str, float],
-          horizon: str = "now", iv_mult: float = 1.0) -> dict:
-    """多标的假设价推演；纯现算，不写库。非法标的/价格抛 ValueError → 400。"""
+          horizon: str = "now", iv_mult: float = 1.0, *,
+          ctx: dict | None = None,
+          include_budget: bool = True,
+          include_subjects: bool = True) -> dict:
+    """多标的假设价推演；纯现算，不写库。非法标的/价格抛 ValueError → 400。
+
+    ctx / include_budget / include_subjects 只给 build_levels() 五档批量用：
+    共用一次风险上下文、跳过每档重复的预算与剧本查询；直接调 /irs/simulate
+    时三个参数全走默认值，行为与改造前逐字节一致（探针双锚点不变）。
+    """
     if horizon not in HORIZONS:
         raise ValueError(f"horizon 只支持 now / expiry：{horizon}")
     if not overrides:
@@ -100,9 +108,12 @@ def build(db: Session, overrides: dict[str, float],
             raise ValueError(f"标的 {sym} 假设价必须为正数：{price_at}")
         vms[sym] = um
 
-    # ---- 2. 风险上下文（一次） ----
+    # ---- 2. 风险上下文（一次）----
+    # build_levels() 五档复用同一 ctx：load_context 要查行情/账户/持仓，跑 5 次太贵，
+    # 且同一请求内五档必须用同一份行情快照，否则跨档数值不可比。
     try:
-        ctx = risk_scenario.load_context()
+        if ctx is None:
+            ctx = risk_scenario.load_context()
     except Exception as exc:  # noqa: BLE001  行情陈旧/合约未认领等统一转 400
         raise ValueError(f"风险上下文不可用：{exc}") from exc
 
@@ -159,9 +170,12 @@ def build(db: Session, overrides: dict[str, float],
                                        iv_mult=iv_mult, shifts=shifts)
     base = risk_scenario.run(ctx, "sync", 0.0, horizon=horizon,
                              iv_mult=iv_mult, shifts={})
-    b_now = risk_scenario.run(ctx, "sync", 0.0)
-    _, b_stress = budget_mod.stress_run(ctx, ctx["params"])
-    budget = budget_mod.evaluate(ctx, ctx["params"], b_now, b_stress)
+    # 预算恒为现价基准、不随假设价变化；五档批量只在 0% 基准那一跑算一次。
+    budget = None
+    if include_budget:
+        b_now = risk_scenario.run(ctx, "sync", 0.0)
+        _, b_stress = budget_mod.stress_run(ctx, ctx["params"])
+        budget = budget_mod.evaluate(ctx, ctx["params"], b_now, b_stress)
 
     dm = {(d["acct"], d["name"]): d for d in scenario["detail"]}
     dm_other = {(d["acct"], d["name"]): d for d in scenario_other["detail"]}
@@ -216,6 +230,10 @@ def build(db: Session, overrides: dict[str, float],
             "margin_at": round(lvl._f(d["margin"]), 2),
             "margin_delta": round(lvl._f(d["margin"]) - lvl._f(bm.get(k, {}).get("margin")), 2),
             "risk_exposure": exposure_of.get((p["acct"], psym)),
+            # 与 run() 的 detail 同源，供档位压力的「保证金结构（按品种族）」分组，
+            # 前端复用 marginGroupOf() 聚合，不另写一套分组规则。
+            "mtype": d.get("mtype"),
+            "und_key": d.get("und_key"),
         })
 
     # ---- 5a. 标的项下持仓敞口合计（左栏卡片 / 右栏逐仓排序的唯一数据源） ----
@@ -269,12 +287,16 @@ def build(db: Session, overrides: dict[str, float],
         a["delta_pnl_expiry"] = lvl._r2(pnl_expiry)
         a["margin_delta"] = round(a["margin_at"] - base_margin.get(a["account"], a["margin_at"]), 2)
 
-    combo = lvl._combo(scenario)
-    baseline_combo = lvl._combo(base)
+    # 组合行「保证金变化」= 到档合计保证金 − 0% 基准合计保证金；
+    # 基准值同一次 run() 现取，前端不自行相减（🔒4.13）。baseline_combo 传自己的 margin ⇒ 恒 0。
+    combo = lvl._combo(scenario, base["margin"])
+    baseline_combo = lvl._combo(base, base["margin"])
 
     # ---- 6. 每标的假设态小结（zone_at / 假设价剧本命中 / 该标的合计） ----
+    # 档位压力只用组合/账户/逐仓三张表，跳过可省掉每档的 effective_version、
+    # 未完成剧本、命中判定等一串查库。
     subjects: dict[str, dict] = {}
-    for sym, info in subject_info.items():
+    for sym, info in (subject_info.items() if include_subjects else ()):
         um = vms[sym]
         keys_set = set(info["keys"])
         s_rows = [r for r in rows if (r["acct"], r["symbol"]) in keys_set]
@@ -345,15 +367,139 @@ def build(db: Session, overrides: dict[str, float],
         "changed_symbols": list(overrides.keys()),
         "combo": combo,
         "baseline_combo": baseline_combo,
-        "budget": {
+        "budget": ({
             "stress_drop": budget["stress_drop"],
             "summary": budget["summary"],
             "note": "预算读数为现价基准（0% 与 +15% 全组同跌、horizon=now），不随滑块假设价变化。",
-        },
+        } if budget is not None else None),
         "subjects": subjects,
         # 标的项下持仓敞口合计（见 5a）：左右两栏排序共用，不随假设价变化
         "subject_exposure": subject_exposure,
         "position_rows": rows,
         "accounts": accounts,
+        "warnings": warnings,
+    }
+
+
+# =========================================================================
+# 档位压力（POST /irs/simulate/levels）：全标的同步到同一档 × 五档
+# =========================================================================
+def _level_overrides(db: Session, field: str) -> tuple[dict[str, float], list[str], list[float]]:
+    """该档的全部标的假设价；与 simulate 页 applyBatch() 逐字段同源同规则。
+
+    - 档位价取**主表** pp_*：GET /irs/today 的 TodayItem.pp 就是主表字段（um_today:192，
+      不现查 effective_version），保证「点压力表」与「点顶栏批量设置」得到同一组价；
+    - 现价为空/非正、档位价 NULL/非正 ⇒ 跳过（保持现价），与前端 applyBatch 一致；
+    - 档位价恰等于现价 ⇒ 不写 override，与 setHypo「现价即不设」语义一致；
+    - 同时返回每个标的的 pct，供压力表给幅度区间（各标的幅度不同，单值会骗人）。
+    """
+    out: dict[str, float] = {}
+    skipped: list[str] = []
+    pcts: list[float] = []
+    for um in db.query(UnderlyingMonitor).all():
+        price_now = lvl._f(um.price)
+        pp = lvl._f(getattr(um, field, None))
+        if price_now <= 0 or pp <= 0:
+            skipped.append(um.symbol)
+            continue
+        if abs(pp - price_now) < 1e-9:
+            continue
+        out[um.symbol] = pp
+        pcts.append(pp / price_now - 1)
+    return out, skipped, pcts
+
+
+# 档位压力只回逐张合约表 / 保证金结构图要用的字段，避免 5 档响应体膨胀
+_LEVEL_POS_KEYS = (
+    "acct", "name", "symbol", "kind", "cp", "strike", "qty", "subject",
+    "subject_name", "changed", "price_now", "price_at", "pf_now",
+    "delta_pnl_now", "delta_pnl_expiry", "margin_at", "margin_delta",
+    "risk_exposure", "mtype", "und_key",
+)
+
+
+def _slim_positions(rows: list[dict]) -> list[dict]:
+    return [{k: r.get(k) for k in _LEVEL_POS_KEYS} for r in rows]
+
+
+def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dict:
+    """五档档位压力：全部监测标的各自到自己的 pp_el/…/pp_eh，一次算完五档。
+
+    与 build() 是同一个引擎、同一份 ctx、同一套 shifts 口径，只是把「用户手拖
+    滑块」换成五个预设档批量跑。纯现算，不写库、不建任务、不碰 irs_scenario_grid。
+    输出供 /irs/simulate 右栏的档位压力表 / 逐张合约 / 保证金结构图共用；
+    组合与账户指标全部后端算，前端只做渲染与展示层分组（🔒4.13）。
+    """
+    if horizon not in HORIZONS:
+        raise ValueError(f"horizon 只支持 now / expiry：{horizon}")
+
+    try:
+        ctx = risk_scenario.load_context()
+    except Exception as exc:  # noqa: BLE001  与 /irs/simulate 同一错误口径
+        raise ValueError(f"风险上下文不可用：{exc}") from exc
+
+    # 0% 基准（全部现价）：预算读数、账户静态卡、逐仓基准都从这一跑取
+    base = build(db, {}, horizon, iv_mult, ctx=ctx)
+    levels: dict[str, dict] = {}
+    for key, field, label in lvl.LEVELS:
+        overrides, skipped, pcts = _level_overrides(db, field)
+        res = build(db, overrides, horizon, iv_mult, ctx=ctx,
+                    include_budget=False, include_subjects=False)
+        levels[key] = {
+            "key": key,
+            "label": label,
+            "overrides": overrides,
+            "subject_count": len(overrides),
+            "skipped_symbols": skipped,
+            "pct_min": round(min(pcts), 6) if pcts else None,
+            "pct_max": round(max(pcts), 6) if pcts else None,
+            "combo": res["combo"],
+            "baseline_combo": res["baseline_combo"],
+            # 相对 0% 基准的 Δ 亏损（正=亏）；压力表「组合盈亏」= −delta_loss
+            "delta_loss": round(res["combo"]["loss"] - base["combo"]["loss"], 2),
+            "accounts": res["accounts"],
+            "positions": _slim_positions(res["position_rows"]),
+        }
+
+    baseline = {
+        "combo": base["combo"],
+        "accounts": base["accounts"],
+        "positions": _slim_positions(base["position_rows"]),
+        "budget": base["budget"],
+    }
+
+    # 首个追保（档位口径）：按到档价升序（极低→极高）找第一个 breached 的档。
+    # 只判交易所口径，与旧「全组同跌 11 档」的临界跌幅不是同一口径。
+    ordered = [levels[k] for k, _, _ in lvl.LEVELS]
+    first_call: dict[str, str | None] = {
+        a["account"]: next((lv["label"] for lv in ordered
+                            if any(x["account"] == a and x["breached"] for x in lv["accounts"])), None)
+        for a in base["accounts"]
+    }
+    first_call["ALL"] = next((lv["label"] for lv in ordered
+                              if any(x["breached"] for x in lv["accounts"])), None)
+
+    warnings = list(base["warnings"]) + [
+        "档位压力 = 全部监测标的同步到同一档，每个标的用**自己的** pp_* 档位价（主表当前生效值），"
+        "与推演页顶栏「批量设置」同源；无该档位或档位价恰等现价的标的保持现价。",
+        "各标的到档幅度不同，压力表给的是幅度区间而非单一涨跌幅；持仓按同百分比平移"
+        "（beta=1 近似），跨市场基差/贴水/折溢价漂移不计，全部数值为 [推算]。",
+        "「极高」档是上涨方向，对卖出认购是压力侧；档位名不代表风险由低到高排序。",
+        "首个追保（档位口径）= 按到档价从低到高第一个触发 breached 的档；只判交易所口径，"
+        "与「组合 Δ盈亏」同为模型值，不构成实际追保结论。",
+    ]
+
+    return {
+        "as_of": base["as_of"],
+        "data_as_of": base["data_as_of"],
+        "stale_days": base["stale_days"],
+        "engine_ver": base["engine_ver"],
+        "horizon": horizon,
+        "iv_mult": iv_mult,
+        "level_order": [k for k, _, _ in lvl.LEVELS],
+        "level_labels": {k: lab for k, _, lab in lvl.LEVELS},
+        "levels": levels,
+        "baseline": baseline,
+        "first_call_by_account": first_call,
         "warnings": warnings,
     }

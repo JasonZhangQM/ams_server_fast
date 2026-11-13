@@ -58,6 +58,7 @@ from server_fast.app.irs.schemas import (
     UnderlyingTargetSave,
     RiskBoardOut,
     SimulateIn,
+    SimulateLevelsIn,
 )
 from server_fast.common.db import get_db, SessionLocal
 from server_fast.common.pagination import PageResponse
@@ -1275,6 +1276,22 @@ def simulate_workbench(body: SimulateIn, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"推演计算失败：{str(e)}")
+
+
+@router.post("/simulate/levels")
+def simulate_level_pressure(body: SimulateLevelsIn, db: Session = Depends(get_db)):
+    """五档档位压力（只读、不落库）：全部标的同步到同一档，一次返回五档结果。
+
+    档位价取主表 pp_*，与 /irs/today 的 TodayItem.pp、推演页「批量设置」同源；
+    每档给组合 / 分账户 / 逐仓三层读数，供压力表、逐张合约、保证金结构图共用。
+    非法时点 / 上下文不可用 → 400；引擎异常 → 500。
+    """
+    try:
+        return service.um_simulate.build_levels(db, body.horizon, body.iv_mult)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"档位压力计算失败：{str(e)}")
 
 
 @router.post("/run/risk-board")
