@@ -791,71 +791,18 @@ def _cascade_risk_exposure(db: Session, group: Group) -> None:
 # 同步路由
 # =========================================================================
 
-def _finish_risk_task(task_id: int, status: str, result: dict) -> None:
-    """收尾：写任务状态与结构化结果（独立 session，run_and_persist 内部也自管 session）。"""
-    db = SessionLocal()
-    try:
-        t = db.get(BdsSyncTask, task_id)
-        if t is None:
-            return
-        t.status = status
-        t.end_time = datetime.now()
-        t.result = result
-        t.progress = Decimal(100) if status == "done" else Decimal(0)
-        db.commit()
-    finally:
-        db.close()
-
-
-def _persist_risk_grid() -> dict:
-    """情景网格落库（挂在 /sync/group 末段，改造 6）。
-
-    🔒4.8 派生表重算必须任务化 + `bds_sync_task` 互斥：本步骤在共用任务表里登记
-    `scope=irs_risk`（风险看板已于 2026-11-08 迁至 irs 模块，与 bills_import 一起
-    构成 bills 域的全局互斥）。
-
-    失败**不阻断**调用方：期权行情过期（T−2）是预期业务异常，不该连累账单净值汇总；
-    结果写进 `task.result` 与返回体，由前端提示。
-    """
-    from server_fast.app.irs.service import risk_scenario
-
-    db = SessionLocal()
-    try:
-        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
-        if running is not None:
-            return {"status": "skipped",
-                    "reason": f"已有任务 {running.id}({running.scope}) 在运行，本次不重算"}
-        task = BdsSyncTask(scope="irs_risk", tables=["irs_scenario_grid"],
-                           mark_synced=0, status="running",
-                           start_time=datetime.now(), progress=Decimal(0))
-        db.add(task)
-        db.commit()
-        task_id = task.id
-    finally:
-        db.close()
-
-    try:
-        out = risk_scenario.run_and_persist()
-    except Exception as e:  # noqa: BLE001 —— 网格只是曲线原料，不阻断同步
-        _finish_risk_task(task_id, "failed", {"error": str(e)})
-        return {"status": "failed", "task_id": task_id, "reason": str(e)}
-
-    b = out["board"]
-    summary = {"calc_date": b["calc_date"], "rows": out["rows_upserted"],
-               "disabled": len(out["disabled_contracts"]),
-               "verdict": b["budget"]["summary"]["verdict"]}
-    _finish_risk_task(task_id, "done", summary)
-    return {"status": "ok", "task_id": task_id, **summary}
-
+# （2026-11-14）原挂在本路由末段的 `_persist_risk_grid`（情景网格 UPSERT 落库
+# irs_scenario_grid，scope=irs_risk，含 `_finish_risk_task` 收尾）已随落库链路
+# 整体下线删除：风险看板 GET 一直实时计算、不读该表，落库只写不读、仅作留档。
 
 # 合并后的同步路由：顺序执行实时估值 → 持仓归零清空风险敞口 → 标的汇总 → 账户汇总
 @router.post("/sync/group")
 def sync_group():
-    """触发实时估值 + 标的汇总 + 账户汇总同步，末段重算风险情景网格。
+    """触发实时估值 + 标的汇总 + 账户汇总同步。
 
     顺序执行：value_float_em_sql → clear_zero_position_risk_sql
-    → upsert_group_acc_sql → upsert_group_symbol_sql → persist_risk_grid。
-    末段失败不影响前四步结果（网格只服务「首个追保点趋势」曲线）。
+    → upsert_group_acc_sql → upsert_group_symbol_sql。
+    （原末段 persist_risk_grid 已于 2026-11-14 随落库链路下线删除。）
     """
     from server_fast.app.bills.services.value_calc import value_float_em_sql
     from server_fast.app.bills.services.group_summary import (
@@ -867,7 +814,6 @@ def sync_group():
             ("clear_zero_position_risk_sql", clear_zero_position_risk_sql),
             ("upsert_group_acc_sql", upsert_group_acc_sql),
             ("upsert_group_symbol_sql", upsert_group_symbol_sql),
-            ("persist_risk_grid", _persist_risk_grid),
         ]
     )
 

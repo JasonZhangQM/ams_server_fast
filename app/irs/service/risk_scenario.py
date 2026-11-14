@@ -7,7 +7,8 @@
 三个入口：
 - load_context():      读持仓/账户/合约字典/行情快照/保证金率，构造计算上下文
 - compute():           全量计算（持仓明细 + 情景矩阵 + 首个追保点），不写库
-- run_and_persist():   compute + UPSERT irs_scenario_grid（任务化重算，铁律 4.8）
+- recalc_board():      停用过期合约 + compute（日终重算入口，不写库；
+                       irs_scenario_grid 落库链路已于 2026-11-14 整体下线）
 
 五个口径（v2.1 修订，勿在未通读方案前改动）：
 
@@ -34,7 +35,7 @@ from sqlalchemy import func
 from server_fast.app.bds.models import OptionConfig, OptionInfo, OptionMarket, TradeDate
 from server_fast.app.bds.services.market_data import option_market, option_info
 from server_fast.app.bills.models import Group, GroupAcc
-from server_fast.app.irs.models import RiskParam, ScenarioGrid
+from server_fast.app.irs.models import RiskParam
 from server_fast.app.irs.service import budget
 from server_fast.common.db import SessionLocal
 
@@ -809,43 +810,13 @@ def expire_configs() -> list[str]:
     return ids
 
 
-def run_and_persist() -> dict:
-    """compute + UPSERT irs_scenario_grid（任务化重算入口，审计进 result）。"""
+def recalc_board() -> dict:
+    """日终重算入口：停用过期合约 → compute，纯计算不写库。
+
+    irs_scenario_grid 落库链路已于 2026-11-14 下线（看板 GET 本就实时计算，
+    表只写不读、仅作留档），数据库表保留但不再有任何代码写入。
+    ⚠️ 不能叫 run()——与上方单情景 run(ctx, mode, drop, …) 同名会互相遮蔽。
+    """
     disabled = expire_configs()
     board = compute()
-    db = SessionLocal()
-    try:
-        n = 0
-        for mode, rows in board["grid"].items():
-            for d_str, row in rows.items():
-                d = float(d_str)
-                for acct, x in row.items():
-                    obj = (
-                        db.query(ScenarioGrid)
-                        .filter(
-                            ScenarioGrid.calc_date == board["calc_date"],
-                            ScenarioGrid.mode == mode,
-                            ScenarioGrid.drop_pct == d,
-                            ScenarioGrid.account == acct,
-                        )
-                        .first()
-                    )
-                    vals = dict(
-                        loss_amt=x["loss"], net_after=x["net"], margin_req=x["margin"],
-                        risk_ratio_real=(x["real"] if x["real"] is not None else 9999),
-                        risk_ratio_exch=(x["exch"] if x["exch"] is not None else 9999),
-                        breached=1 if x["breached"] else 0,
-                        engine_ver=board["engine_ver"],
-                    )
-                    if obj is None:
-                        db.add(ScenarioGrid(
-                            calc_date=board["calc_date"], mode=mode, drop_pct=d,
-                            account=acct, **vals))
-                    else:
-                        for k, v in vals.items():
-                            setattr(obj, k, v)
-                    n += 1
-        db.commit()
-        return {"board": board, "rows_upserted": n, "disabled_contracts": disabled}
-    finally:
-        db.close()
+    return {"board": board, "disabled_contracts": disabled}

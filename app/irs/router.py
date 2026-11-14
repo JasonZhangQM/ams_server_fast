@@ -1285,13 +1285,13 @@ def simulate_level_pressure(body: SimulateLevelsIn, db: Session = Depends(get_db
 
 @router.post("/run/risk-board")
 def run_risk_board():
-    """日终重算：停用过期合约 → 计算 → UPSERT irs_scenario_grid。
+    """日终重算：停用过期合约 → 纯计算（不写库）。
 
-    同步执行（无独立任务表；/bills/sync/group 末段另有任务化的 `_persist_risk_grid`），
-    前端按钮需防重复点击。
+    irs_scenario_grid 落库链路已于 2026-11-14 下线，本端点只返回重算结果；
+    同步执行、无任务表，前端按钮需防重复点击。
     """
     try:
-        out = service.risk_scenario.run_and_persist()
+        out = service.risk_scenario.recalc_board()
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -1301,7 +1301,6 @@ def run_risk_board():
         "status": "ok",
         "engine_ver": b["engine_ver"],
         "calc_date": b["calc_date"],
-        "rows_upserted": out["rows_upserted"],
         "disabled_contracts": out["disabled_contracts"],
         "net_total": b["net_total"],
         "margin_total": b["margin_total"],

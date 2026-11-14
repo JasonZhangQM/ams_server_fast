@@ -434,7 +434,7 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
     """五档档位压力：全部监测标的各自到自己的 pp_el/…/pp_eh，一次算完五档。
 
     与 build() 是同一个引擎、同一份 ctx、同一套 shifts 口径，只是把「用户手拖
-    滑块」换成五个预设档批量跑。纯现算，不写库、不建任务、不碰 irs_scenario_grid。
+    滑块」换成五个预设档批量跑。纯现算，不写库、不建任务（irs_scenario_grid 落库链路已下线）。
     输出供 /irs/simulate 右栏的档位压力表 / 逐张合约 / 保证金结构图共用；
     组合与账户指标全部后端算，前端只做渲染与展示层分组（🔒4.13）。
     """

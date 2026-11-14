@@ -3,8 +3,8 @@
 
 共 7 个模型：Bill / Profit / Group / GroupAcc / GroupSymbol / BillNote / ProfitYear。
 
-（RiskParam / ScenarioGrid 已于 2026-11-08 随风险看板整体迁至 app/irs/models.py，
-表改名 irs_risk_param / irs_scenario_grid。）
+（RiskParam 已于 2026-11-08 随风险看板整体迁至 app/irs/models.py，表改名 irs_risk_param；
+ScenarioGrid（irs_scenario_grid）落库链路已于 2026-11-14 下线、模型删除，表保留为遗留对象。）
 
 - 继承 (Base, BaseModel)，BaseModel 提供 id/create_time/update_time 及通用方法
 - 外键列名以 _id 结尾
