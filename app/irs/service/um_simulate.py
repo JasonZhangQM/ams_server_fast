@@ -534,25 +534,12 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
         "cum_pnl_expiry": base["combo"]["cum_pnl_expiry"],
     }
 
-    # 首个追保（档位口径）：按到档价升序（极低→极高）找第一个 breached 的档。
-    # 只判交易所口径，与旧「全组同跌 11 档」的临界跌幅不是同一口径。
-    ordered = [levels[k] for k, _, _ in lvl.LEVELS]
-    first_call: dict[str, str | None] = {
-        a["account"]: next((lv["label"] for lv in ordered
-                            if any(x["account"] == a and x["breached"] for x in lv["accounts"])), None)
-        for a in base["accounts"]
-    }
-    first_call["ALL"] = next((lv["label"] for lv in ordered
-                              if any(x["breached"] for x in lv["accounts"])), None)
-
     warnings = list(base["warnings"]) + [
         "档位压力 = 全部监测标的同步到同一档，每个标的用**自己的** pp_* 档位价（主表当前生效值），"
         "与推演页顶栏「批量设置」同源；无该档位或档位价恰等现价的标的保持现价。",
         "各标的到档幅度不同，压力表给的是幅度区间而非单一涨跌幅；持仓按同百分比平移"
         "（beta=1 近似），跨市场基差/贴水/折溢价漂移不计，全部数值为 [推算]。",
-        "「极高」档是上涨方向，对卖出认购是压力侧；档位名不代表风险由低到高排序。",
-        "首个追保（档位口径）= 按到档价从低到高第一个触发 breached 的档；只判交易所口径，"
-        "与「组合 Δ盈亏」同为模型值，不构成实际追保结论。",
+        "「极高」档是上涨方向，对卖出认购是压力侧；档位名不代表风险由低到高排序。"
     ]
 
     return {
@@ -566,6 +553,5 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
         "level_labels": {k: lab for k, _, lab in lvl.LEVELS},
         "levels": levels,
         "baseline": baseline,
-        "first_call_by_account": first_call,
         "warnings": warnings,
     }
