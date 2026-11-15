@@ -207,6 +207,8 @@ def build(db: Session, overrides: dict[str, float],
         # 两列固定按即期/到期排列，与时点参数无关；主时点只决定摘要口径。
         pnl_now, pnl_expiry = ((pnl_main, pnl_other) if horizon == "now"
                                else (pnl_other, pnl_main))
+        # 账面浮盈取整与本行「当前盈亏」列同值，保证「当前盈亏 + 到期Δ = 到期累计盈亏」可逐行验算
+        pf_v = round(pf_pos.get(k, 0.0), 2)
         subj, subj_name = subject_of.get(psym, (None, None))
         rows.append({
             "acct": p["acct"],
@@ -223,10 +225,13 @@ def build(db: Session, overrides: dict[str, float],
             "price_now": base_price,
             "price_at": (base_price or 0) * (1 - shift),
             "shift": shift,
-            "pf_now": round(pf_pos.get(k, 0.0), 2),
+            "pf_now": pf_v,
             "delta_pnl": pnl_main,
             "delta_pnl_now": pnl_now,
             "delta_pnl_expiry": pnl_expiry,
+            # 到期累计盈亏 = 本行「当前盈亏」+ 本行「到期Δ盈亏」（2026-11-15 用户定稿口径）。
+            # 覆盖全部在仓品种，不区分有无到期日 / 权利金；不再有 null（不适用）分支。
+            "cum_pnl_expiry": lvl._r2(pf_v + pnl_expiry),
             "margin_at": round(lvl._f(d["margin"]), 2),
             "margin_delta": round(lvl._f(d["margin"]) - lvl._f(bm.get(k, {}).get("margin")), 2),
             "risk_exposure": exposure_of.get((p["acct"], psym)),
@@ -285,6 +290,8 @@ def build(db: Session, overrides: dict[str, float],
         a["delta_pnl"] = lvl._r2(d_main)
         a["delta_pnl_now"] = lvl._r2(pnl_now)
         a["delta_pnl_expiry"] = lvl._r2(pnl_expiry)
+        # 到期累计盈亏 = 本行「当前盈亏」+ 本行「到期Δ盈亏」；全部品种纳入、恒有值。
+        a["cum_pnl_expiry"] = lvl._r2(a["pf_now"] + a["delta_pnl_expiry"])
         a["margin_delta"] = round(a["margin_at"] - base_margin.get(a["account"], a["margin_at"]), 2)
 
     # 组合行「保证金变化」= 到档合计保证金 − 0% 基准合计保证金；
@@ -296,6 +303,9 @@ def build(db: Session, overrides: dict[str, float],
     # 这里把已跑过的 scenario_other 一并折成组合读数（保证金只吃标的价格、与 horizon 无关，
     # 故基准保证金仍用同一份 base["margin"]，不另跑 0% 基准）。
     combo_other = lvl._combo(scenario_other, base["margin"])
+    # 组合行「到期累计盈亏」由后端给（🔒4.13 前端禁自算）= Σ分账户（本行当前盈亏 + 到期Δ）。
+    # 实测 Σ逐仓 pf_now = Σ分账户 pf_now = board.pf_now_total，故 Σ逐仓 = Σ分账户 = 组合行。
+    combo["cum_pnl_expiry"] = lvl._r2(sum(a["cum_pnl_expiry"] for a in accounts))
 
     # ---- 6. 每标的假设态小结（zone_at / 假设价剧本命中 / 该标的合计） ----
     # 档位压力只用组合/账户/逐仓三张表，跳过可省掉每档的 effective_version、
@@ -349,14 +359,17 @@ def build(db: Session, overrides: dict[str, float],
 
     warnings.extend([
         "逐仓「当前盈亏」为账单账面浮盈（静态，不随假设价变化），Δ盈亏为模型盯市增量；"
-        "两者基准不同，不可相加对账。",
+        "两者价源/时点可能不同，但「到期累计盈亏」列按用户口径直接把这两列相加。",
+        "「到期累计盈亏」= 当前盈亏 + 到期Δ盈亏（2026-11-15 用户定稿口径），覆盖全部在仓品种，"
+        "不论有无到期日 / 权利金：证券与期货的到期Δ等于价格变动增量，期权的到期Δ含时间价值归零。"
+        "随左栏假设价变化、与所选主时点无关；同一行三列可直接相加验算，Σ逐仓 = Σ分账户 = 组合行。",
         "逐仓「风险敞口」为人工确认值（bills_group，按账户+合约拆分），空=未设置；"
         "不是模型推算，也不随假设价变化。",
         "逐仓明细同时给出即期/到期两时点Δ盈亏，到期列仅作对照；组合摘要、改价小结与预算"
         "按主时点即期（前端已固定，不再切换）；保证金逐档重估，与即期/到期时点无关。",
         "「标的」列为持仓的归属监测标的（含未改价的冻结行）；高亮底色才表示本次被改价命中。",
         "分账户「账户当前盈亏」为账单账户层面全部持仓账面浮盈（静态），两列 Δ 盈亏为模型盯市增量"
-        "（账户全部持仓，Σ=组合 Δ盈亏），两者基准不同、不可相加对账；保证金变化相对 0% 基准；"
+        "（账户全部持仓，Σ=组合 Δ盈亏）；「到期累计盈亏」= 该行当前盈亏 + 到期Δ；保证金变化相对 0% 基准；"
         "追保只判交易所口径，真实口径 ≥1 而交易所口径 <1 时须单独留意；空账户不展示。",
         "排序用「标的项下持仓风险敞口合计」= 该标的项下逐仓「风险敞口」之和（人工确认值，"
         "NULL=未设置不计入），静态值、不随假设价变化；未归属标的固定排最后。",
@@ -484,6 +497,9 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
             # 这是到期口径的定义（见 lvl.FIXED_NOTES），不是漏扣基准。
             "delta_pnl_now": lvl._r2(-c_now["loss"]),
             "delta_pnl_expiry": lvl._r2(-c_exp["loss"]),
+            # 到期累计盈亏 = 该档组合当前盈亏 + 该档到期Δ；与 build() 的 combo 同源，
+            # 提到顶层是为让档位压力表与两列 Δ 并列取值（组合视角；单账户取 accounts[].cum）。
+            "cum_pnl_expiry": res["combo"]["cum_pnl_expiry"],
             "accounts": res["accounts"],
             "positions": _slim_positions(res["position_rows"]),
         }
@@ -496,6 +512,8 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
         # 现价行同样给两列：即期恒 0（不重估就没有 Δ），到期 = 全组合时间价值衰减（负数）
         "delta_pnl_now": lvl._r2(-base_now["loss"]),
         "delta_pnl_expiry": lvl._r2(-base_exp["loss"]),
+        # 现价行累计 = 组合当前盈亏 + 现价到期Δ；0% 时与 /irs/simulate 的 combo 逐值相等
+        "cum_pnl_expiry": base["combo"]["cum_pnl_expiry"],
     }
 
     # 首个追保（档位口径）：按到档价升序（极低→极高）找第一个 breached 的档。
