@@ -14,7 +14,8 @@
    逐仓明细与分账户表固定同时给即期/到期两列 Δ 盈亏；义务仓保证金逐档重算。
 5. 分账户风险指标复用 level-scenario 的 _account_rows（净值/权益/保证金/双口径风险度），
    风险敞口复用 _exposure_by_account（bills_group_acc 静态值），列集合与档位 Tab 逐列一致；
-   Δ 统计账户全部持仓以便与 combo.loss 对账；账户当前盈亏取 bills_group_acc 账面值。
+   Δ 统计账户全部持仓以便与 combo.loss 对账；账户当前盈亏 = bills_group_acc 账面值
+   + 盯市修正（模型盯市市值 − 报表市值，risk_scenario.mark_adj_map），与 Δ 同一价源。
 6. 纯现算：不写库、不建任务。
 
 可查可核的两条锚点（探针 scripts/_probe_um_simulate.py 验收，不改运行时行为）：
@@ -189,6 +190,15 @@ def build(db: Session, overrides: dict[str, float],
         pk = (p["acct"], p["name"])
         pf_pos[pk] = pf_pos.get(pk, 0.0) + lvl._f(p.get("pf_now"))
 
+    # 盯市修正（2026-11-15）：把「当前盈亏」从报表收盘价口径统一到引擎盯市价口径，
+    # 使「当前盈亏 + 到期Δ = 到期累计盈亏」严格等于「到期市值 − 建仓成本」。
+    # 与 _net0 / run() 的 v0 同源；只对期权仓有值，证券/期货两条链本就同源、修正恒 0。
+    # 静态值，不随假设价或主时点变化。
+    mark_adj = risk_scenario.mark_adj_map(ctx, iv_mult)
+    mark_adj_acct: dict[str, float] = {}
+    for (acct, _name), v in mark_adj.items():
+        mark_adj_acct[acct] = mark_adj_acct.get(acct, 0.0) + v
+
     rows: list[dict] = []
     for p in ctx["positions"]:
         k = (p["acct"], p["name"])
@@ -207,8 +217,9 @@ def build(db: Session, overrides: dict[str, float],
         # 两列固定按即期/到期排列，与时点参数无关；主时点只决定摘要口径。
         pnl_now, pnl_expiry = ((pnl_main, pnl_other) if horizon == "now"
                                else (pnl_other, pnl_main))
-        # 账面浮盈取整与本行「当前盈亏」列同值，保证「当前盈亏 + 到期Δ = 到期累计盈亏」可逐行验算
-        pf_v = round(pf_pos.get(k, 0.0), 2)
+        # 「当前盈亏」= 账单账面浮盈 + 盯市修正（与模型 Δ 同一价源）；取整后与本行
+        # 显示值同值，保证「当前盈亏 + 到期Δ = 到期累计盈亏」可逐行验算。
+        pf_v = lvl._r2(pf_pos.get(k, 0.0) + mark_adj.get(k, 0.0))
         subj, subj_name = subject_of.get(psym, (None, None))
         rows.append({
             "acct": p["acct"],
@@ -284,7 +295,9 @@ def build(db: Session, overrides: dict[str, float],
         # 两列固定按即期/到期排列（与逐仓明细一致），与时点参数无关
         pnl_now, pnl_expiry = ((d_main, d_other) if horizon == "now"
                                else (d_other, d_main))
-        a["pf_now"] = lvl._r2(pf_acct.get(a["account"], 0.0))
+        # 账户「当前盈亏」同样补盯市修正，与逐仓 / 组合行同口径（Σ修正按账户聚合）
+        a["pf_now"] = lvl._r2(pf_acct.get(a["account"], 0.0)
+                              + mark_adj_acct.get(a["account"], 0.0))
         exp = exposure_acct.get(a["account"])
         a["risk_exposure"] = round(exp, 2) if exp is not None else None
         a["delta_pnl"] = lvl._r2(d_main)
@@ -303,8 +316,10 @@ def build(db: Session, overrides: dict[str, float],
     # 这里把已跑过的 scenario_other 一并折成组合读数（保证金只吃标的价格、与 horizon 无关，
     # 故基准保证金仍用同一份 base["margin"]，不另跑 0% 基准）。
     combo_other = lvl._combo(scenario_other, base["margin"])
-    # 组合行「到期累计盈亏」由后端给（🔒4.13 前端禁自算）= Σ分账户（本行当前盈亏 + 到期Δ）。
-    # 实测 Σ逐仓 pf_now = Σ分账户 pf_now = board.pf_now_total，故 Σ逐仓 = Σ分账户 = 组合行。
+    # 组合行「当前盈亏」与「到期累计盈亏」都由后端给（🔒4.13 前端禁自算）= Σ分账户。
+    # 盯市修正后 Σ逐仓 pf_now = Σ分账户 pf_now = combo.pf_now，但不再等于
+    # board.pf_now_total（那是账单收盘价口径，差额恰为 Σ盯市修正）。
+    combo["pf_now"] = lvl._r2(sum(a["pf_now"] for a in accounts))
     combo["cum_pnl_expiry"] = lvl._r2(sum(a["cum_pnl_expiry"] for a in accounts))
 
     # ---- 6. 每标的假设态小结（zone_at / 假设价剧本命中 / 该标的合计） ----
@@ -358,17 +373,20 @@ def build(db: Session, overrides: dict[str, float],
         )
 
     warnings.extend([
-        "逐仓「当前盈亏」为账单账面浮盈（静态，不随假设价变化），Δ盈亏为模型盯市增量；"
-        "两者价源/时点可能不同，但「到期累计盈亏」列按用户口径直接把这两列相加。",
+        "逐仓「当前盈亏」= 账单账面浮盈 + 盯市修正（模型盯市市值 − 报表市值），"
+        "与 Δ 盈亏同为结算价 / BS 口径（2026-11-15 统一价源）；静态，不随假设价变化。",
         "「到期累计盈亏」= 当前盈亏 + 到期Δ盈亏（2026-11-15 用户定稿口径），覆盖全部在仓品种，"
         "不论有无到期日 / 权利金：证券与期货的到期Δ等于价格变动增量，期权的到期Δ含时间价值归零。"
-        "随左栏假设价变化、与所选主时点无关；同一行三列可直接相加验算，Σ逐仓 = Σ分账户 = 组合行。",
+        "随左栏假设价变化、与所选主时点无关；同一行三列可直接相加验算，Σ逐仓 = Σ分账户 = 组合行。"
+        "价源统一后本列也等于「到期市值 − 建仓成本」，虚值义务仓到期即实收权利金。",
+        "⚠️ 盯市修正只作用于推演表：账单页 / 组合快照的账面浮盈仍是收盘价口径，"
+        "与推演表「当前盈亏」的差额 = Σ(模型盯市市值 − 报表市值)，两者不可直接对账。",
         "逐仓「风险敞口」为人工确认值（bills_group，按账户+合约拆分），空=未设置；"
         "不是模型推算，也不随假设价变化。",
         "逐仓明细同时给出即期/到期两时点Δ盈亏，到期列仅作对照；组合摘要、改价小结与预算"
         "按主时点即期（前端已固定，不再切换）；保证金逐档重估，与即期/到期时点无关。",
         "「标的」列为持仓的归属监测标的（含未改价的冻结行）；高亮底色才表示本次被改价命中。",
-        "分账户「账户当前盈亏」为账单账户层面全部持仓账面浮盈（静态），两列 Δ 盈亏为模型盯市增量"
+        "分账户「账户当前盈亏」为账户全部持仓账面浮盈 + 盯市修正（静态，与模型 Δ 同源），两列 Δ 盈亏为模型盯市增量"
         "（账户全部持仓，Σ=组合 Δ盈亏）；「到期累计盈亏」= 该行当前盈亏 + 到期Δ；保证金变化相对 0% 基准；"
         "追保只判交易所口径，真实口径 ≥1 而交易所口径 <1 时须单独留意；空账户不展示。",
         "排序用「标的项下持仓风险敞口合计」= 该标的项下逐仓「风险敞口」之和（人工确认值，"

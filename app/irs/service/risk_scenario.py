@@ -469,6 +469,26 @@ def _net0(ctx: dict, iv_mult: float) -> dict[str, float]:
     return net0
 
 
+def mark_adj_map(ctx: dict, iv_mult: float) -> dict[tuple[str, str], float]:
+    """「模型盯市市值 − 报表市值」按 (账户, 合约) 聚合，供推演侧统一当前盈亏口径。
+
+    与 _net0 的 ``v - p["sys_value"]``、run() 期权分支的 v0 三者完全同源（同一个
+    ``_option_value(p, S0, "now", iv_mult)``）。报表市值按收盘价（value_calc 的
+    price→settle）、引擎盯市按结算价（settle→price），商品期权两者常不等；若把
+    模型口径的 Δ 直接加到账面浮盈上，到期累计盈亏会凭空多出这段价源差。
+
+    例：au2612P840 收盘 14.94 / 结算 17.32，义务仓修正量 = −17,320 −(−14,940) = −2,380。
+    """
+    out: dict[tuple[str, str], float] = {}
+    for p in ctx["positions"]:
+        if p["kind"] not in ("call", "put"):
+            continue
+        v = p["sign"] * _option_value(p, p["S0"], "now", iv_mult) * p["mult"] * p["qty"]
+        k = (p["acct"], p["name"])
+        out[k] = out.get(k, 0.0) + (v - p["sys_value"])
+    return out
+
+
 def run(ctx: dict, mode: str, drop: float, horizon: str = "now",
         iv_mult: float = 1.0, shifts: Optional[dict] = None,
         frozen_no_revalue: bool = False) -> dict:
