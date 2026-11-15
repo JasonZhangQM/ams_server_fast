@@ -93,7 +93,7 @@ from server_fast.app.bds.schemas import (
 from server_fast.app.bds.services import (
     check_index_config_consistency,
     fetch_realtime_index_prices,
-    get_index_infos_from_symbol_info,
+    get_macro_history_targets,
     insert_trade_date_em_sql,
     refresh_table_stat,
     resolve_total,
@@ -110,7 +110,6 @@ from server_fast.app.bds.services import (
     upsert_gold_reserve_sql,
     upsert_index_constituent_sql,
     upsert_history_market_sql,
-    sync_one_index,
     sync_history_market,
     sync_symbol_info_all,
     upsert_symbol_info_excel_sql,
@@ -258,15 +257,31 @@ def list_trade_dates(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询交易日历数据，支持可选的日期范围筛选。"""
+    """查询交易日历数据，支持可选的日期范围筛选。
+
+    ⚠️ 无筛选时 total 读 bds_table_stat 缓存（宏观分段同步 trade_date 段收尾重算），
+    缓存缺失/过旧回落 information_schema 估算并置 total_is_estimated=true；有筛选走精确
+    COUNT(*)。offset 受 MAX_LIST_OFFSET 护栏限制，前端 setPaginationTotal 同步截断可达页数。
+
+    排序：交易日倒序（11-15）。列表原先没有 ORDER BY，MySQL 对 offset/limit 不保证
+    顺序，首屏是 1991 年的老数据且翻页可能跳行/重复；id 作次级键兜底同日重复行。
+    """
+    _guard_list_offset(offset)
     query = db.query(TradeDate)
     if start_date:
         query = query.filter(TradeDate.trade_date >= start_date)
     if end_date:
         query = query.filter(TradeDate.trade_date <= end_date)
-    total = query.count()  # 满足过滤条件的总记录数
-    items = query.offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    total, total_estimated = resolve_total(db, query, TradeDate, bool(start_date or end_date))
+    items = (query.order_by(TradeDate.trade_date.desc(), TradeDate.id.desc())
+             .offset(offset).limit(limit).all())
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/symbol-infos", response_model=PageResponse[SymbolInfoOut])
@@ -468,12 +483,13 @@ def mark_synced(
 def resolve_history_targets(req: HistoryTargetsResolveRequest):
     """校验历史行情目标清单（**只读**，不触发同步）。
 
-    供「监测标的」（scope=watch）与「手写清单」（scope=explicit）启动前预览：
+    供「手写清单」启动前预览（历史行情目标校验端点，scope 仅作回显）：
     返回每个代码是否存在、标的类型（stock/index），以及不可用原因
     （信息表无此代码 / 类型无法判定 / 本轮明确跳过）。
 
-    注意：解析「监测标的」清单本身由前端调 `GET /irs/underlying-monitors` 完成，
-    bds 不跨层读 irs 表；本端点只做 bds 侧（证券信息表）的校验。
+    `scope=watch` 是 2026-11-15 之前「财务及行情批量同步」的监测标的档：前端选项已取消，
+    但 API 与历史任务仍保留兼容。宏观与基础数据同步卡片的「历史行情」段不调本端点，
+    它在后端运行时从 `irs_underlying_monitor` 取清单（见 get_macro_history_targets）。
     """
     result = validate_history_targets(req.symbols)
     result['scope'] = req.scope
@@ -556,7 +572,12 @@ def list_history_markets(
     - 排序 `trade_date DESC, id DESC`：同日有数千行，必须有 id 兜底才是全序，
       翻页才不会重复/漏行；该顺序与 `k_ih_td`（二级索引末尾隐含主键）方向一致，
       可走反向索引扫描，避免深翻页 filesort。
+    - 无筛选时 total 读 `bds_table_stat` 缓存（见 services/table_stat.py），缓存缺失/过旧
+      回落 information_schema 估算并置 total_is_estimated=true；前端据此标 ≈。
+    - ⚠️ offset 受 MAX_LIST_OFFSET 护栏限制（与两个日频端点同口径），前端
+      setPaginationTotal 同步截断可达页数并在前缀提示「请用筛选缩小范围」。
     """
+    _guard_list_offset(offset)
     query = db.query(HistoryMarket)
     if symbol:
         query = query.filter(HistoryMarket.symbol == symbol)
@@ -638,7 +659,13 @@ def list_index_constituents(
       total 为去重后的行数（COUNT(DISTINCT symbol)）。
 
     响应中每条记录附加 sec_name 字段（从 Config.INDEX_CODE 查找）。
+
+    ⚠️ 无筛选且 dedup=False 时 total 读 bds_table_stat 缓存（指数成分同步线程收尾重算），
+    缓存缺失/过旧回落 information_schema 估算并置 total_is_estimated=true；
+    dedup=True 的 total 是 COUNT(DISTINCT symbol)，与全表行数不同源 ⇒ 恒走精确值。
+    offset 受 MAX_LIST_OFFSET 护栏限制，前端 setPaginationTotal 同步截断可达页数。
     """
+    _guard_list_offset(offset)
     # 公共过滤条件（两个分支共用）
     filters = []
     if index_code:
@@ -680,7 +707,9 @@ def list_index_constituents(
             .limit(limit)
         ).all()
         # 去重后 total = distinct symbol 数（口径 A 下与去重后的行数严格相等）
+        # 🔴 与全表行数不同源，绝不能读 bds_table_stat 缓存
         total = db.query(func.count(func.distinct(IndexConstituent.symbol))).filter(*filters).scalar() or 0
+        total_estimated = False
         for row in rows:
             item_dict = {
                 "index_code": row.index_code,
@@ -697,7 +726,7 @@ def list_index_constituents(
             query = query.filter(*filters)
         # 按 trade_date 降序；同日期行按 id 升序兜底，避免顺序不稳导致翻页重复/漏行
         query = query.order_by(IndexConstituent.trade_date.desc(), IndexConstituent.id.asc())
-        total = query.count()
+        total, total_estimated = resolve_total(db, query, IndexConstituent, bool(filters))
         items = query.offset(offset).limit(limit).all()
         # 附加 sec_name 字段（从 Config.INDEX_CODE 查找，不存数据库）
         for item in items:
@@ -705,7 +734,13 @@ def list_index_constituents(
             item_dict["sec_name"] = Config.INDEX_CODE.get(item.index_code, {}).get("sec_name")
             result_items.append(item_dict)
 
-    return {"items": result_items, "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": result_items,
+        "total": total,
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.post("/sync/index-constituent", response_model=BdsSyncTaskOut)
@@ -950,6 +985,12 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
 
     为什么不回表后再 ORDER BY 一次：二次排序会丢掉第 1 步确定的顺序，也会破坏上一条
     说的全序保证。
+
+    ⚠️ 无筛选时 total 读 bds_table_stat 缓存（财务四表与两张日频表同属批量同步
+    TABLES，收尾 targets=tables 自动重算），缓存缺失/过旧回落 information_schema
+    估算并置 total_is_estimated=true；有任一筛选（symbol / rpt_type / start_date）
+    一律走精确 COUNT(*)。offset 受 MAX_LIST_OFFSET 护栏限制，前端
+    setPaginationTotal 同步截断可达页数并提示「请用筛选缩小范围」。
     """
     _guard_list_offset(offset)
     query = db.query(model)
@@ -959,7 +1000,9 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
         query = query.filter(model.rpt_type == rpt_type)
     if start_date:
         query = query.filter(model.rpt_date >= start_date)
-    total = query.count()
+    # rpt_type 用 is not None 判（与过滤条件一致），避免将来出现 0 值时误判成「无筛选」
+    has_filter = bool(symbol or rpt_type is not None or start_date)
+    total, total_estimated = resolve_total(db, query, model, has_filter)
 
     id_rows = (
         query.with_entities(model.id)
@@ -973,7 +1016,13 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
         by_id = {item.id: item for item in db.query(model).filter(model.id.in_(ids)).all()}
     items = [by_id[i] for i in ids if i in by_id]
 
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/fund-balances", response_model=PageResponse[FundBalanceOut])
@@ -1216,7 +1265,12 @@ def list_economic_indicators(
     """查询经济指标数据，支持指标代码/类别/国别精确匹配和报告日期范围筛选。
 
     排序规则：report_date 降序，同 report_date 按 indicator_code 升序。
+
+    ⚠️ 无筛选时 total 读 bds_table_stat 缓存（宏观分段同步 wscn 段收尾重算），缓存缺失/过旧
+    回落 information_schema 估算并置 total_is_estimated=true；有筛选走精确 COUNT(*)。
+    offset 受 MAX_LIST_OFFSET 护栏限制，前端 setPaginationTotal 同步截断可达页数。
     """
+    _guard_list_offset(offset)
     query = db.query(EconomicIndicator)
     # indicator_code 精确匹配
     if indicator_code:
@@ -1232,12 +1286,19 @@ def list_economic_indicators(
         query = query.filter(EconomicIndicator.report_date >= start_date)
     if end_date:
         query = query.filter(EconomicIndicator.report_date <= end_date)
-    total = query.count()
+    has_filter = bool(indicator_code or category or country or start_date or end_date)
+    total, total_estimated = resolve_total(db, query, EconomicIndicator, has_filter)
     items = (
         query.order_by(EconomicIndicator.report_date.desc(), EconomicIndicator.indicator_code.asc())
         .offset(offset).limit(limit).all()
     )
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/economic-indicator-codes")
@@ -1309,7 +1370,12 @@ def list_gold_reserves(
     """查询黄金储备数据，支持国家多选和日期范围筛选。
 
     按 rpt_date 降序、country_code 升序排序。
+
+    ⚠️ 无筛选时 total 读 bds_table_stat 缓存（宏观分段同步 gold 段收尾重算），缓存缺失/过旧
+    回落 information_schema 估算并置 total_is_estimated=true；有筛选走精确 COUNT(*)。
+    offset 受 MAX_LIST_OFFSET 护栏限制，前端 setPaginationTotal 同步截断可达页数。
     """
+    _guard_list_offset(offset)
     query = db.query(GoldReserve)
     if country_code:
         query = query.filter(GoldReserve.country_code.in_(country_code))
@@ -1317,9 +1383,16 @@ def list_gold_reserves(
         query = query.filter(GoldReserve.rpt_date >= start_date)
     if end_date:
         query = query.filter(GoldReserve.rpt_date <= end_date)
-    total = query.count()
+    has_filter = bool(country_code or start_date or end_date)
+    total, total_estimated = resolve_total(db, query, GoldReserve, has_filter)
     items = query.order_by(GoldReserve.rpt_date.desc(), GoldReserve.country_code.asc()).offset(offset).limit(limit).all()
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.post("/sync/gold-reserve")
@@ -1407,7 +1480,12 @@ def list_daily_indicators(
     """查询美债收益率指标数据，支持指标代码多选 IN、报告日期范围筛选与分页。
 
     排序规则：report_date 降序，同 report_date 按 indicator_code 升序。
+
+    ⚠️ 无筛选时 total 读 bds_table_stat 缓存（宏观分段同步 daily 段收尾重算），缓存缺失/过旧
+    回落 information_schema 估算并置 total_is_estimated=true；有筛选走精确 COUNT(*)。
+    offset 受 MAX_LIST_OFFSET 护栏限制，前端 setPaginationTotal 同步截断可达页数。
     """
+    _guard_list_offset(offset)
     query = db.query(DailyIndicator)
     # indicator_code 多选 IN 过滤
     if indicator_code:
@@ -1417,12 +1495,19 @@ def list_daily_indicators(
         query = query.filter(DailyIndicator.report_date >= start_date)
     if end_date:
         query = query.filter(DailyIndicator.report_date <= end_date)
-    total = query.count()
+    has_filter = bool(indicator_code or start_date or end_date)
+    total, total_estimated = resolve_total(db, query, DailyIndicator, has_filter)
     items = (
         query.order_by(DailyIndicator.report_date.desc(), DailyIndicator.indicator_code.asc())
         .offset(offset).limit(limit).all()
     )
-    return {"items": [item.to_dict() for item in items], "total": total, "limit": limit, "offset": offset}
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.post("/sync/daily-indicator")
@@ -1523,7 +1608,8 @@ def _sync_stage_items(stage: str) -> list:
 
     - trade_date：原子操作（一年只在跨年时真写库），整体 1 项
     - symbol_info：东财 Excel / gm 两条通道各 1 项（与 sync_symbol_info_all 的步骤划分一致）
-    - history_market：按证券信息表的行业「A股指数」逐指数（Config 仅在信息表为空时兜底）
+    - history_market：`industry='A股指数'` ∪ `irs_underlying_monitor`（去重合集），逐标的 1 项
+      （清单由 get_macro_history_targets 运行时推导；Config 仅在信息表为空时兜底）
     - option_market：按「品种 × 到期月」逐组（= 一次接口请求），与 /option-market/sync 的分组口径一致；
       清单为空时给一个 `__no_config__` 伪项，让失败明细能说清原因，而不是 0 项静默通过
     - wscn：service 内部按自然月分批（首次全量 141 批起）**不可切分** ⇒ 整体 1 项
@@ -1534,9 +1620,8 @@ def _sync_stage_items(stage: str) -> list:
     if stage == "symbol_info":
         return [("excel", "东财Excel"), ("gm", "gm证券信息")]
     if stage == "history_market":
-        # 来源：证券信息表 industry='A股指数'（Config.INDEX_CODE 仅在信息表为空时兜底）
-        return [(code, info.get("sec_name") or code)
-                for code, info in get_index_infos_from_symbol_info().items()]
+        # 范围 = A股指数 ∪ 监测标的（去重合集），运行时推导、不落配置
+        return get_macro_history_targets()
     if stage == "option_info":
         # 整批刷新只算 1 项：25,910 行是一次 HTTP + 一批 UPSERT，拆成「按品种」计项
         # 只会让进度条显得很长而实际没有可并行的东西。
@@ -1561,9 +1646,9 @@ def _sync_stage_items(stage: str) -> list:
 def _run_sync_item(stage: str, key: str) -> int:
     """执行单项，返回条数（-1=失败）。
 
-    各 service 单项函数内部已 try/except（宏观三个返回 -1，history_market 的
-    sync_one_index 同样返回 -1）；这里再兜一层：任何意外异常都只算该项失败，
-    不得中断整段或整个任务。
+    各 service 单项函数内部已 try/except（宏观三个返回 -1，history_market 由
+    sync_history_market 的 status 映射成 0/-1/行数）；这里再兜一层：任何意外异常
+    都只算该项失败，不得中断整段或整个任务。
 
     ⚠️ symbol_info 刻意**不走** sync_symbol_info_all()：它的语义是「任一通道失败即抛」，
     放进一键任务会把东财已写入的五千余条一起算失败。这里两条通道各自计项、各自兜异常。
@@ -1576,8 +1661,18 @@ def _run_sync_item(stage: str, key: str) -> int:
                 return upsert_symbol_info_excel_sql()
             return upsert_symbol_info_gm_sql()
         if stage == "history_market":
-            # info=None → 服务内按证券信息表 industry='A股指数' 解析，Config 兜底
-            return sync_one_index(key)
+            # 段内标的统一走单标的端点同一实现：个股后复权 / 指数不复权由证券信息表判定，
+            # 并复用 SKIP_SYMBOL_REASONS 与「已追平目标交易日不调 gm」的跳过逻辑。
+            # status → count：success=行数 / no_data|skipped=0 / error=-1（写 errors 明细）
+            res = sync_history_market(key)
+            status = res.get("status")
+            if status == "success":
+                return int(res.get("count") or 0)
+            if status in ("no_data", "skipped"):
+                if status == "skipped":
+                    print(f"[sync] history_market/{key} 按规则跳过：{res.get('reason', '')}")
+                return 0
+            return -1
         if stage == "option_info":
             # 返回「本次解析并写入的行数」；桶水位（哨兵跳过、撞码）写进服务的 log
             st = option_info.fetch_and_store()
@@ -1692,6 +1787,20 @@ def _run_sync_thread(task_id: int, stages: list):
         db.commit()
         print(f"[sync #{task_id}] 失败: {e}")
     finally:
+        # 本次涉及的列表页计数缓存：宏观 stage 名多数直接就是 STAT_TABLES 的 key，
+        # 未登记的段（symbol_info）由 refresh_table_stat 静默跳过；
+        # history_market 同名会被顺带刷新（该段确实写这张表）。
+        # option_market 是唯一别名：STAT_TABLES 的 key 沿用独立期权线程任务 tables 的
+        # option-market，这里映射一次，保证宏观卡片跑期权行情段后计数也刷新。
+        # best-effort：失败不影响已定型的任务终态，写法对齐批量同步收尾 §7 与期权行情线程。
+        try:
+            stat_targets = ["option-market" if s == "option_market" else s for s in stages]
+            refreshed = refresh_table_stat(db, targets=stat_targets)
+            if refreshed:
+                print(f'[sync #{task_id}] 已重算总数缓存: {refreshed}')
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            print(f'[sync #{task_id}] 重算总数缓存失败（不影响任务）: {type(e).__name__}: {e}')
         _stop_events.pop(task_id, None)
         db.close()
 
@@ -1704,8 +1813,8 @@ def sync_macro(req: MacroSyncRequest):
     **执行顺序固定 trade_date → symbol_info → history_market → wscn → daily → gold**，
     不按入参数组顺序（基础数据是下游依赖，且整体快 → 慢，中途停止的代价最小）。
 
-    进度：`total_count` = 各段条目数之和（trade_date 1 + symbol_info 2 + history_market 每指数 1
-    + wscn 1 + daily 每指标 1 + gold 每国 1），每完成一项 `done_count` +1。
+    进度：`total_count` = 各段条目数之和（trade_date 1 + symbol_info 2 + history_market
+    「A股指数 ∪ 监测标的」每标的 1 + wscn 1 + daily 每指标 1 + gold 每国 1），每完成一项 `done_count` +1。
     `result.stages` 存各段 total/done/ok/no_data/error/rows（含 group 供前端分组），
     `result.stage` 存当前段 —— wscn 首轮全量时进度条会停在该段，靠它显示"正在跑哪一段"。
 
@@ -1996,6 +2105,15 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
         db.commit()
         print(f'[index-constituent #{task_id}] 失败: {e}')
     finally:
+        # 指数成分已登记 bds_table_stat：无论成功/失败/停止都要刷新（失败也可能已写入部分行）。
+        # best-effort：缓存失败不影响已定型的任务终态，写法对齐批量同步收尾 §7。
+        try:
+            refreshed = refresh_table_stat(db, targets=["index-constituent"])
+            if refreshed:
+                print(f'[index-constituent #{task_id}] 已重算总数缓存: {refreshed}')
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            print(f'[index-constituent #{task_id}] 重算总数缓存失败（不影响任务）: {type(e).__name__}: {e}')
         _stop_events.pop(task_id, None)
         db.close()
 
@@ -2131,6 +2249,16 @@ def _run_valuation_thread(task_id: int, plan: dict, start_date=None,
         db.commit()
         print(f'[index-valuation #{task_id}] 失败: {e}')
     finally:
+        # 指数估值已登记 bds_table_stat：重算会改写行数，收尾必须刷新，否则 24h 后
+        # /index-valuations/paged 的 total 会回落 information_schema 估算并显示「≈」。
+        # best-effort：缓存失败不影响已定型的任务终态，写法对齐批量同步收尾 §7。
+        try:
+            refreshed = refresh_table_stat(db, targets=["index-valuation"])
+            if refreshed:
+                print(f'[index-valuation #{task_id}] 已重算总数缓存: {refreshed}')
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            print(f'[index-valuation #{task_id}] 重算总数缓存失败（不影响任务）: {type(e).__name__}: {e}')
         _stop_events.pop(task_id, None)
         db.close()
 
@@ -2173,9 +2301,10 @@ def run_batch_sync(req: BatchSyncRequest):
         if req.scope == "explicit" and not req.symbols:
             raise HTTPException(status_code=400, detail="scope=explicit 时 symbols 必填")
         if req.scope == "watch" and not req.symbols:
+            # 旧「监测标的」档（前端选项 2026-11-15 取消），仅为 API / 历史任务兼容保留
             raise HTTPException(
                 status_code=400,
-                detail="scope=watch 时 symbols 必填（前端先调 /irs/underlying-monitors 取监测清单）",
+                detail="scope=watch 时 symbols 必填（旧档，前端选项已取消）",
             )
         # 退市口径校验（schema 未加 pattern ⇒ 由这里统一返 400，与 scope 的校验方式保持一致）
         if req.trading_status not in ("trading", "delisted", "all"):
@@ -2194,7 +2323,7 @@ def run_batch_sync(req: BatchSyncRequest):
         elif req.scope == "explicit":
             scope_params["symbols"] = req.symbols
         elif req.scope == "watch":
-            # 监测标的：清单由前端从 irs 取，这里原样留存（source 仅作审计线索）
+            # 旧档兼容：清单仍由调用方显式提交（宏观卡片已改为后端自行读监测表）
             scope_params["symbols"] = req.symbols
             scope_params["source"] = "irs.underlying-monitors"
         # 行为参数存进 JSON 而不是新增表列：历史任务缺该键 ⇒ 一律按 False（不跳过）解读，
@@ -2817,7 +2946,13 @@ def list_option_info(
     这是口径决定的，不是数据错误；前端展示时要带标的名。
 
     ⚠️ 排序必须显式给出：服务端 offset/limit 缺 ORDER BY 时 MySQL 不保证顺序，
-    会翻页跳行/重复行。
+    会翻页跳行/重复行。11-15 起改为**到期日倒序**（关键词搜索时名称命中仍优先、
+    组内再按到期日倒序），末尾 `contract_id` 唯一键兜底全序。
+
+    ⚠️ 无筛选时 total 读 bds_table_stat 缓存（宏观分段同步 option_info 段收尾重算），
+    缓存缺失/过旧回落 information_schema 估算并置 total_is_estimated=true；有任一筛选
+    一律走精确 COUNT(*)。offset 受 MAX_LIST_OFFSET 护栏限制，前端 setPaginationTotal
+    同步截断可达页数。
     """
     _guard_list_offset(offset)
     query = db.query(OptionInfo)
@@ -2867,23 +3002,35 @@ def list_option_info(
             conds.append(OptionInfo.product_id.in_(ledger_pids))
         query = query.filter(or_(*conds))
 
-    total = query.count()
+    has_filter = bool(
+        product_id or exchange or option_name or underlying_contract_id
+        or expire_year_month or cp or (is_listed is not None) or keyword
+    )
+    total, total_estimated = resolve_total(db, query, OptionInfo, has_filter)
     order = [
         # 相关性优先：合约名称直接命中的排前面（否则搜「500ETF」时，
         # 台账路径带进来的全量 ETF 会把名称命中的 290 行压到后面）
         OptionInfo.contract_name.contains(kw).desc(),
     ] if keyword else []
+    # 到期日倒序（11-15）：原先以 product_id 升序打头，首屏由品种字母序决定、
+    # 与到期日无关；现按日期值从大到小（远月在前），与 /option-config 口径一致。
+    # 同款「NULL 布尔位 + 末尾唯一键」写法见 /option-config。
+    # `expire_year_month` 由 last_trade_date 派生，同一到期日恒定，不再作为排序键。
+    # 关键词命中仍优先（搜索时名称命中比到期日更重要），组内再按到期日倒序。
     items = (
         query.order_by(
             *order,
+            OptionInfo.last_trade_date.is_(None).asc(),
+            OptionInfo.last_trade_date.desc(),
             OptionInfo.product_id.asc(),
             OptionInfo.underlying_contract_id.asc(),
-            OptionInfo.expire_year_month.asc(),
             OptionInfo.cp.asc(),
-            OptionInfo.strike.asc())
+            OptionInfo.strike.asc(),
+            OptionInfo.contract_id.asc())
         .offset(offset).limit(limit).all()
     )
     return {"items": [i.to_dict() for i in items], "total": total,
+            "total_is_estimated": total_estimated,
             "limit": limit, "offset": offset}
 
 
@@ -3032,6 +3179,11 @@ def list_option_market(
     对当前 3 个品种，两种口径都是「同品种、同标的、近月在前、行权价升序」，
     只是品种之间的先后由 `und_key` 字母序变成 `product_id` 字母序
     （`ETF_O` < `IO` < `au_o`）。ETF 第一个仍是 510500（唯一启用标的）。
+
+    ⚠️ 无筛选时 total 读 `bds_table_stat` 缓存（期权同步收尾重算），缓存缺失/过旧回落
+    information_schema 估算并置 total_is_estimated=true；有任一筛选（含 latest_only）
+    一律走精确 COUNT(*)，前端据此标 ≈。offset 受 MAX_LIST_OFFSET 护栏限制，
+    前端 setPaginationTotal 同步截断可达页数。
     """
     _guard_list_offset(offset)
     # outer join：字典缺行的历史行必须保留（内连接会让它凭空消失）
@@ -3081,10 +3233,15 @@ def list_option_market(
     if latest_only:
         latest = query.with_entities(func.max(OptionMarket.trade_date)).scalar()
         if latest is None:
-            return {"items": [], "total": 0, "limit": limit, "offset": offset}
+            return {"items": [], "total": 0, "total_is_estimated": False,
+                    "limit": limit, "offset": offset}
         query = query.filter(OptionMarket.trade_date == latest)
 
-    total = query.count()
+    # latest_only 把查询收窄到「当前范围内最新日」，此时绝不能读全表总数缓存；
+    # 其余任一筛选同理，只有完全无筛选才走 bds_table_stat。
+    has_filter = bool(und_key or option_name or end_month or option_type
+                      or contract_id or trade_date is not None or latest_only)
+    total, total_estimated = resolve_total(db, query, OptionMarket, has_filter)
     rows = (
         # trade_date 必须排最前：跨日混排先按日分组，最新在前
         query.order_by(OptionMarket.trade_date.desc(),
@@ -3105,6 +3262,7 @@ def list_option_market(
     return {
         "items": items,
         "total": total,
+        "total_is_estimated": total_estimated,
         "limit": limit,
         "offset": offset,
     }
@@ -3323,6 +3481,16 @@ def _run_option_market_thread(task_id: int, group_total: int):
         db.commit()
         print(f"[option-market #{task_id}] 失败: {e}")
     finally:
+        # 期权行情已登记 bds_table_stat：无论成功/失败/停止都要刷新（失败也可能已写入部分行）。
+        # 漏刷则 24h 后列表页 total 会回落 information_schema 估算并显示「≈」。
+        # best-effort：缓存失败不影响已定型的任务终态，写法对齐批量同步收尾 §7。
+        try:
+            refreshed = refresh_table_stat(db, targets=list(task.tables or ["option-market"]))
+            if refreshed:
+                print(f'[option-market #{task_id}] 已重算总数缓存: {refreshed}')
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            print(f'[option-market #{task_id}] 重算总数缓存失败（不影响任务）: {type(e).__name__}: {e}')
         _stop_events.pop(task_id, None)
         db.close()
 

@@ -8,6 +8,7 @@
 from server_fast.app.bds.services.market_data.history_market import (
     check_index_config_consistency,
     get_index_infos_from_symbol_info,
+    get_macro_history_targets,
     sync_one_index,
     sync_history_market,
     upsert_history_market_sql,
@@ -26,6 +27,7 @@ from server_fast.app.bds.services.market_data.daily_mktvalue import (
 __all__ = [
     'check_index_config_consistency',
     'get_index_infos_from_symbol_info',
+    'get_macro_history_targets',
     'sync_one_index',
     'sync_history_market',
     'upsert_history_market_sql',

@@ -10,7 +10,7 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 from gm.api import history, ADJUST_NONE, ADJUST_POST
-from sqlalchemy import func
+from sqlalchemy import func, text
 
 from server_fast.config import settings
 from server_fast.common.utils import call_with_timeout, upsert_df_to_db, df_init_model
@@ -43,6 +43,10 @@ SKIP_SYMBOL_REASONS = {
 
 # 目标交易日缓存：一天内批量同步共享同一个值（trade_date 表查询一次就够）
 _TARGET_TRADE_DATE_CACHE = {'date': None, 'value': None}
+
+# 标的监测表（irs 域）：bds 只能被依赖 ⇒ 用表名字符串 + 原生 SQL 读业务域事实，
+# 不 import irs 任何模块/模型（🔒4.12，与 valuation/percentile_store.monitor_subjects 同口径）
+MONITOR_TABLE = "irs_underlying_monitor"
 
 
 def _get_target_trade_date() -> date:
@@ -243,9 +247,73 @@ def get_index_infos_from_symbol_info() -> dict:
     return infos
 
 
-def sync_one_index(symbol: str, info: dict | None = None) -> int:
-    """单指数同步入口（供「一键同步」任务按指数逐项回报进度）。
+def get_macro_history_targets() -> list[tuple[str, str]]:
+    """「宏观与基础数据同步 / 历史行情」段的标的清单（**去重合集**）。
 
+    范围（用户 2026-11-15 拍板）：
+        `bds_symbol_info.industry='A股指数'` ∪ `irs_underlying_monitor.symbol`
+    两处各自按 symbol 升序、先指数后监测标的，重复只保留一次 ⇒ 顺序稳定，
+    进度条 total 与清单一致（§「一键同步」按条目逐项计数）。
+
+    - 信息表查不到「A股指数」时回退 `Config.INDEX_CODE`（与
+      `get_index_infos_from_symbol_info` 同一兜底口径）；
+    - 监测表不存在 / 查询失败只告警并返回空集，**不让 irs 侧故障拖垮基础数据段**；
+      独立会话查询，失败也不会污染主会话事务。
+    - ⚠️ 这里只定「清单」，不做类型/跳过过滤：实际同步统一走 `sync_history_market`
+      逐只判定（个股后复权 / 指数不复权 / SKIP_SYMBOL_REASONS / 已追平目标交易日跳过），
+      与单标的端点 `POST /bds/sync/history-market` 完全同口径。
+
+    返回 [(symbol, 显示名)]；显示名取证券信息表，缺失时回退 Config.sec_name / symbol。
+    """
+    try:
+        with SessionLocal() as session:
+            monitor_symbols = [
+                str(s) for s in session.execute(
+                    text(f"SELECT symbol FROM {MONITOR_TABLE} ORDER BY symbol")
+                ).scalars().all() if s
+            ]
+    except Exception as e:
+        logger.warning(f'读取 {MONITOR_TABLE} 失败，历史行情段只跑 A股指数：{e}')
+        monitor_symbols = []
+
+    with SessionLocal() as session:
+        rows = (
+            session.query(SymbolInfo.symbol, SymbolInfo.name)
+            .filter(SymbolInfo.industry == INDEX_INDUSTRY)
+            .order_by(SymbolInfo.symbol)
+            .all()
+        )
+        index_symbols = [r.symbol for r in rows] or list(dbsCfg.INDEX_CODE)
+        if not rows:
+            logger.warning('证券信息表无 industry=「A股指数」的标的，历史行情段回退 Config.INDEX_CODE')
+        union = list(dict.fromkeys(index_symbols + monitor_symbols))
+        name_map = {r.symbol: r.name for r in rows}
+        if union:
+            # 监测标的里的个股不在上面的指数结果里，补一次名称查询（清单只有十来个）
+            extra = (
+                session.query(SymbolInfo.symbol, SymbolInfo.name)
+                .filter(SymbolInfo.symbol.in_(union))
+                .all()
+            )
+            for r in extra:
+                name_map.setdefault(r.symbol, r.name)
+
+    out = []
+    for s in union:
+        name = name_map.get(s) or (dbsCfg.INDEX_CODE.get(s) or {}).get('sec_name') or s
+        out.append((s, name))
+    logger.info(
+        f'历史行情段范围：A股指数 {len(index_symbols)} + 监测标的 {len(monitor_symbols)}'
+        f' → 去重后 {len(out)} 只'
+    )
+    return out
+
+
+def sync_one_index(symbol: str, info: dict | None = None) -> int:
+    """单指数同步入口（供 `POST /bds/sync/history-market-index` 逐指数回报进度）。
+
+    ⚠️ 宏观与基础数据同步的「历史行情」段**不走这里**：那段范围含个股，
+    统一由 `_run_sync_item` 调 `sync_history_market`（见 get_macro_history_targets）。
     info 为 None 时按证券信息表（industry='A股指数'）组装，Config 兜底。
     返回：>0 条数 / 0 无需导入 / -1 失败。异常已在此吞掉，不向上抛。
     """

@@ -32,6 +32,7 @@ from server_fast.app.bds.config import Config as dbsCfg
 from server_fast.app.bds.models import (
     IndexConstituent, IndexConstituentSync, IndexValuation, TradeDate,
 )
+from server_fast.app.bds.services.table_stat import resolve_cached_total
 from server_fast.app.bds.services.valuation.percentile_stat import (
     WINDOW_YEARS, stat_window,
 )
@@ -661,9 +662,11 @@ def list_paged(index_codes=None, start_date: Optional[date] = None,
     排序：`trade_date DESC, index_code ASC`——同一天多指数时不会跳行，
     且首页固定是「最新那天 × 5 个指数」，与分位接口的当前值对得上。
 
-    性能（2026-10-20 实测，全表 18,433 行）：`COUNT(*)` 0.17 s（约 0.14 s 是本地 MySQL
-    往返固定开销）、`offset=18000` 仍 0.12 s ⇒ 不走 `bds_table_stat` 计数缓存，
-    也没有 `daily_valuations`（643 万行）那种深翻页惩罚。
+    性能 / 计数口径（2026-11-15 改）：默认 5 个宽基 == 表内全部 index_code ⇒ 无筛选时
+    `index_code IN` 等价于全表，改读 `bds_table_stat` 计数缓存（与全站 50k 护栏口径一致）；
+    有筛选（显式 index_codes / 日期范围）仍走精确 `COUNT(*)`，且带同样的 index_code IN 条件。
+    ⚠️ 全表 18,433 行时精确 COUNT 仅 0.17 s（实测 2026-10-20），登记缓存的价值在
+    「随交易日持续累积」的未来；缓存缺失/过旧时由 resolve_cached_total 回落估算并标 ≈。
     """
     codes = resolve_index_codes(index_codes)
 
@@ -676,6 +679,7 @@ def list_paged(index_codes=None, start_date: Optional[date] = None,
         where.append("trade_date <= :e")
         params["e"] = end_date
     cond = " AND ".join(where)
+    has_filter = bool(index_codes or start_date or end_date)
 
     with SessionLocal() as session:
         stmt = text(
@@ -689,9 +693,13 @@ def list_paged(index_codes=None, start_date: Optional[date] = None,
         rows = session.execute(
             stmt, {**params, "limit": limit, "offset": offset}).mappings().all()
 
-        total = session.execute(
-            text(f"SELECT COUNT(*) FROM bds_index_valuation WHERE {cond}")
-            .bindparams(bindparam("codes", expanding=True)), params).scalar()
+        if has_filter:
+            total = session.execute(
+                text(f"SELECT COUNT(*) FROM bds_index_valuation WHERE {cond}")
+                .bindparams(bindparam("codes", expanding=True)), params).scalar()
+            total_estimated = False
+        else:
+            total, total_estimated = resolve_cached_total(session, "bds_index_valuation")
 
     items = []
     for r in rows:
@@ -700,7 +708,13 @@ def list_paged(index_codes=None, start_date: Optional[date] = None,
         d["sec_name"] = dbsCfg.INDEX_CODE.get(d["index_code"], {}).get("sec_name", d["index_code"])
         items.append(d)
 
-    return {"items": items, "total": int(total or 0), "limit": limit, "offset": offset}
+    return {
+        "items": items,
+        "total": int(total or 0),
+        "total_is_estimated": total_estimated,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 def get_percentiles(index_codes=None, metric: str = "pe_ttm") -> dict:

@@ -450,14 +450,15 @@ class BatchSyncRequest(BaseModel):
 class HistoryTargetsResolveRequest(BaseModel):
     """历史行情目标校验请求（POST /bds/sync/targets/resolve）。
 
-    只做**只读校验**，不触发同步：供「监测标的」与「手写清单」在启动前预览，
+    只做**只读校验**，不触发同步：供「手写清单」在启动前预览，
     提前暴露「代码不存在 / 类型无法判定 / 本轮明确跳过」三类不可用标的。
+    宏观卡片「历史行情」段的清单由后端运行时推导，不走本端点。
     """
 
     model_config = ConfigDict(extra='forbid')
 
     symbols: list[str] = Field(default_factory=list, description="待校验的标的代码清单")
-    scope: str = Field(default='explicit', description="watch=监测标的 / explicit=手写清单（仅影响提示文案）")
+    scope: str = Field(default='explicit', description="explicit=手写清单；watch=旧「监测标的」档（前端选项 2026-11-15 已取消，API 兼容保留）；仅影响提示文案")
 
 
 class MacroSyncRequest(BaseModel):

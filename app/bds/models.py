@@ -1228,7 +1228,8 @@ class BdsTableStat(Base, BaseModel):
     （innodb_buffer_pool_size 仅 128MB，二级索引 ~192MB 全读盘，重复执行不复用），
     而真正取数只 6ms。本表缓存「表总行数」，无筛选时 O(1) 读到。
 
-    - 写入时机：批量同步收尾重算（+ 手工 POST /bds/refresh-table-stat）
+    - 写入时机：批量同步收尾重算、期权同步线程收尾（option-market）、
+      手工 POST /bds/refresh-table-stat
     - 读取口径：见 services/table_stat.py 的 resolve_total
     - 统计时间 = BaseModel.update_time（行被重算时刷新），不另设 updated_at 列
     """
