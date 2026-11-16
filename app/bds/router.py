@@ -26,6 +26,7 @@ bds 模块只负责"数据管理"：数据同步 + 基础查询 + 下拉选项�
 - GET  /bds/daily-indicator-codes   美债收益率代码下拉
 - POST /bds/sync/{target}           数据同步（按 target 触发对应 service）
 - POST /bds/sync/index-constituent  指数成分股同步/回填（异步任务，复用 bds_sync_task 轮询进度）
+- POST /bds/sync/index-fund-agg     指数成分股财务聚合（异步任务，复用 bds_sync_task 轮询进度）
 - POST /bds/sync/mark-synced        标记标的当日已完成批量同步（写 bds_symbol_info.sync_at）
 """
 from datetime import date, datetime, timedelta
@@ -74,6 +75,7 @@ from server_fast.app.bds.schemas import (
     HistoryTargetsResolveRequest,
     IndexConstituentOut,
     IndexConstituentSyncRequest,
+    IndexFundAggSyncRequest,
     IndexValuationRow,
     IndexValuationSyncRequest,
     MacroSyncRequest,
@@ -91,6 +93,7 @@ from server_fast.app.bds.schemas import (
     ValuationPctSyncRequest,
 )
 from server_fast.app.bds.services import (
+    aggregate_index_fund,
     check_index_config_consistency,
     fetch_realtime_index_prices,
     get_macro_history_targets,
@@ -811,6 +814,73 @@ def sync_index_constituent(req: IndexConstituentSyncRequest):
         db.close()
 
 
+@router.post("/sync/index-fund-agg", response_model=BdsSyncTaskOut)
+def sync_index_fund_agg(req: IndexFundAggSyncRequest):
+    """启动指数成分股财务聚合（后台线程异步执行），返回 task 供前端轮询进度。
+
+    口径：三大报表（资产负债表/利润表/现金流量表）按指数成分股逐科目求和，
+    纯库内计算不调 gm；聚合行与个股混存同一批表，sec_type='index' 区分。
+    时点成分：对报告期 R 取成分快照 S = MAX(trade_date) WHERE trade_date <= R；
+    早于首份快照的报告期跳过，原因作为 no_data 类型写入任务 errors；
+    覆盖率落库（snap_cons_cnt/agg_cons_cnt）；每次对该指数全历史重算覆盖
+    （幂等，唯一键 symbol+rpt_date）。
+
+    请求体：index_codes 必填（页面勾选），空/未知 → 400，不静默跳过。
+    停止：POST /bds/stop/batch-sync?task_id=<id>。
+    ⚠️ 与 /run/batch-sync 共用 bds_sync_task 与停止信号 ⇒ 二者全局互斥（有一方 running 则 409）。
+    """
+    db = next(get_db())
+    try:
+        # 1. 参数校验（先于建任务，避免非法入参在任务表里留下垃圾记录）
+        codes = list(dict.fromkeys((c or "").strip() for c in req.index_codes if c and c.strip()))
+        if not codes:
+            raise HTTPException(status_code=400, detail="index_codes 不能为空，至少选择一个指数")
+        unknown = [c for c in codes if c not in Config.INDEX_CODE]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"未知指数代码：{unknown}")
+
+        # 2. 清理僵尸任务 + 互斥检查
+        _cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        # 3. 建任务（scope=index_fund_agg，14 字符 ≤16；与批量同步的 scope 区分开）
+        task = BdsSyncTask(
+            scope="index_fund_agg",
+            scope_params={
+                "index_codes": codes,
+                "start_date": req.start_date.isoformat() if req.start_date else None,
+            },
+            tables=["fund-balance", "fund-income", "fund-cashflow"],
+            status="running",
+            total_count=len(codes),
+            done_count=0,
+            success_count=0,
+            no_data_count=0,
+            error_count=0,
+            progress=0,
+            errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        # 4. 注册停止信号并启动后台线程（daemon=True：进程退出时自动终止）
+        _stop_events[task.id] = threading.Event()
+        t = threading.Thread(
+            target=_run_index_fund_agg_thread,
+            args=(task.id, codes, req.start_date),
+            daemon=True,
+        )
+        t.start()
+
+        return task
+
+    finally:
+        db.close()
+
+
 @router.get("/index-cum-returns")
 def list_index_cum_returns(
     start_date: Optional[str] = Query(
@@ -964,10 +1034,13 @@ def sync_fund_balance(
     return _build_sync_response(symbol, steps, errors)
 
 
-def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit, offset):
+def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit, offset,
+                        sec_type=None):
     """通用财务报表查询（FundBalance/FundIncome/FundCashflow/FinanceDeriv 共用）。
 
-    过滤规则：symbol 精确匹配、rpt_type 精确匹配、rpt_date 起始日。
+    过滤规则：symbol 精确匹配、rpt_type 精确匹配、rpt_date 起始日；
+    sec_type 可选精确匹配（stock=个股 / index=指数成分股聚合行），仅三张财务报表
+    端点暴露该参数（finance-derivs 无此列，恒为 None）。
     排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
 
     分页采用「先取 id 再回表」两步：
@@ -1000,8 +1073,10 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
         query = query.filter(model.rpt_type == rpt_type)
     if start_date:
         query = query.filter(model.rpt_date >= start_date)
+    if sec_type:
+        query = query.filter(model.sec_type == sec_type)
     # rpt_type 用 is not None 判（与过滤条件一致），避免将来出现 0 值时误判成「无筛选」
-    has_filter = bool(symbol or rpt_type is not None or start_date)
+    has_filter = bool(symbol or rpt_type is not None or start_date or sec_type)
     total, total_estimated = resolve_total(db, query, model, has_filter)
 
     id_rows = (
@@ -1030,12 +1105,17 @@ def list_fund_balances(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    sec_type: Optional[str] = Query(
+        default=None,
+        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤（默认看个股）",
+    ),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """查询资产负债表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
-    return _query_fund_reports(FundBalance, db, symbol, rpt_type, start_date, limit, offset)
+    return _query_fund_reports(FundBalance, db, symbol, rpt_type, start_date, limit, offset,
+                               sec_type=sec_type)
 
 
 @router.post("/sync/fund-income")
@@ -1059,12 +1139,17 @@ def list_fund_incomes(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    sec_type: Optional[str] = Query(
+        default=None,
+        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤（默认看个股）",
+    ),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """查询利润表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
-    return _query_fund_reports(FundIncome, db, symbol, rpt_type, start_date, limit, offset)
+    return _query_fund_reports(FundIncome, db, symbol, rpt_type, start_date, limit, offset,
+                               sec_type=sec_type)
 
 
 @router.post("/sync/fund-cashflow")
@@ -1088,12 +1173,17 @@ def list_fund_cashflows(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    sec_type: Optional[str] = Query(
+        default=None,
+        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤（默认看个股）",
+    ),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """查询现金流量表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
-    return _query_fund_reports(FundCashflow, db, symbol, rpt_type, start_date, limit, offset)
+    return _query_fund_reports(FundCashflow, db, symbol, rpt_type, start_date, limit, offset,
+                               sec_type=sec_type)
 
 
 @router.post("/sync/finance-deriv")
@@ -1926,7 +2016,7 @@ def _run_batch_sync_thread(task_id: int, req: BatchSyncRequest):
                 else:
                     t.error_count += 1
                     t.errors = (t.errors or []) + [{"symbol": symbol, "table": table, "message": ""}]
-                t.progress = round(done_count / total * 100, 2) if total else 100
+                t.progress = round(done_count / total_count * 100, 2) if total_count else 100
                 s.commit()
             finally:
                 s.close()
@@ -2114,6 +2204,111 @@ def _run_constituent_thread(task_id: int, index_codes: list, start_date):
         except Exception as e:  # noqa: BLE001
             db.rollback()
             print(f'[index-constituent #{task_id}] 重算总数缓存失败（不影响任务）: {type(e).__name__}: {e}')
+        _stop_events.pop(task_id, None)
+        db.close()
+
+
+def _run_index_fund_agg_thread(task_id: int, index_codes: list, start_date=None):
+    """后台线程：逐指数聚合三大报表并实时写进度（与 _run_constituent_thread 同构）。
+
+    与 HTTP 调用完全隔离：线程内部自建 SessionLocal，不复用请求 db。
+    复用 bds_sync_task 与 _stop_events ⇒ 与批量同步全局互斥。
+
+    计数口径：success_count=落库聚合行数（含覆盖旧行）；no_data_count=整指数
+    无产出（无成分快照 / 全部报告期被跳过）的指数个数；error_count=异常指数个数。
+    跳过原因（无成分快照 / 报告期早于首份快照）一律写入 errors 列表。
+    start_date（可选）：重算起点，仅聚合该日及之后的报告期，更早报告期不重算不覆盖。
+    """
+    db = SessionLocal()
+    task = db.query(BdsSyncTask).get(task_id)
+    errors = []
+
+    try:
+        task.status = "running"
+        task.start_time = datetime.now()
+        db.commit()
+
+        stop_event = _stop_events.get(task_id)
+        counts = {"success": 0, "no_data": 0, "error": 0}
+        total = len(index_codes)
+
+        def on_progress(done_count):
+            """逐指数实时落进度：每次开独立 session，避免长事务；commit 刷新
+            update_time，防止 5 分钟僵尸清理把仍在跑的长任务误标为 failed。"""
+            s = SessionLocal()
+            try:
+                t = s.query(BdsSyncTask).get(task_id)
+                t.done_count = done_count
+                t.success_count = counts["success"]
+                t.no_data_count = counts["no_data"]
+                t.error_count = counts["error"]
+                t.progress = round(done_count / total * 100, 2) if total else 100
+                s.commit()
+            finally:
+                s.close()
+
+        done = 0
+        for code in index_codes:
+            if stop_event is not None and stop_event.is_set():
+                break
+            steps, agg_errors = aggregate_index_fund([code], start_date=start_date)
+            done += 1
+            rows = steps.get(code, 0)
+            msg = agg_errors.get(code)
+            if rows < 0:
+                counts["error"] += 1
+                errors.append({"symbol": code, "table": "index-fund-agg",
+                               "message": msg or "聚合失败"})
+            elif rows == 0:
+                # 无成分快照 / 全部报告期早于首份快照 ⇒ no_data 类型，原因入 errors
+                counts["no_data"] += 1
+                if msg:
+                    errors.append({"symbol": code, "table": "index-fund-agg", "message": msg})
+            else:
+                counts["success"] += rows
+                if msg:
+                    # 部分报告期被跳过等原因照实记录，不影响该指数的成功计数
+                    errors.append({"symbol": code, "table": "index-fund-agg", "message": msg})
+            on_progress(done)
+
+        # 终态：用户停止 > 全部指数失败 > 正常完成
+        if stop_event is not None and stop_event.is_set():
+            task.status = "stopped"
+        elif counts["error"] and not counts["success"]:
+            task.status = "failed"
+        else:
+            task.status = "done"
+        task.done_count = done
+        task.success_count = counts["success"]
+        task.no_data_count = counts["no_data"]
+        task.error_count = counts["error"]
+        task.progress = round(done / total * 100, 2) if total else 100
+        task.errors = errors or None
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[index-fund-agg #{task_id}] {task.status}：rows={task.success_count}, '
+              f'no_data={task.no_data_count}, failed={task.error_count}')
+
+    except Exception as e:
+        # 兜底：线程异常也要把 task 状态置为 failed
+        errors.append({"symbol": "", "table": "index-fund-agg",
+                       "message": f"线程异常: {type(e).__name__}: {e}"})
+        task.status = "failed"
+        task.errors = errors
+        task.end_time = datetime.now()
+        db.commit()
+        print(f'[index-fund-agg #{task_id}] 失败: {e}')
+    finally:
+        # 三张财务表均已登记 bds_table_stat：无论成功/失败/停止都要刷新（失败也可能已写入部分行）。
+        # best-effort：缓存失败不影响已定型的任务终态，写法对齐 _run_constituent_thread 收尾。
+        try:
+            refreshed = refresh_table_stat(
+                db, targets=["fund-balance", "fund-income", "fund-cashflow"])
+            if refreshed:
+                print(f'[index-fund-agg #{task_id}] 已重算总数缓存: {refreshed}')
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            print(f'[index-fund-agg #{task_id}] 重算总数缓存失败（不影响任务）: {type(e).__name__}: {e}')
         _stop_events.pop(task_id, None)
         db.close()
 

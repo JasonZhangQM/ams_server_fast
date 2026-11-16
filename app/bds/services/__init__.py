@@ -35,6 +35,7 @@ from server_fast.app.bds.services.index_constituent import (
     upsert_index_constituent_sql,
 )
 from server_fast.app.bds.services.fund_data import (
+    aggregate_index_fund,
     upsert_fund_balance_sql,
     upsert_fund_cashflow_sql,
     upsert_fund_income_sql,
@@ -77,6 +78,7 @@ __all__ = [
     'upsert_index_constituent_sql',
     'plan_index_constituent_backfill',
     # 财务数据
+    'aggregate_index_fund',
     'upsert_fund_balance_sql',
     'upsert_fund_cashflow_sql',
     'upsert_fund_income_sql',

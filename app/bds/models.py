@@ -389,6 +389,15 @@ class FundBalance(Base, BaseModel):
     rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
     rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
     data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+    sec_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="stock", server_default="stock",
+        comment="主体类型：stock=个股，index=指数成分股聚合")
+    snap_cons_cnt: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        comment="快照成分股数量：聚合本行所用的时点成分快照的成分股总数（仅指数行填写）")
+    agg_cons_cnt: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        comment="聚合成分股数量：本行实际参与汇总的成分股数量（仅指数行填写）")
 
     # ---- 资产类字段 ----
     mny_cptl: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="货币资金")
@@ -444,6 +453,15 @@ class FundIncome(Base, BaseModel):
     rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
     rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
     data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+    sec_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="stock", server_default="stock",
+        comment="主体类型：stock=个股，index=指数成分股聚合")
+    snap_cons_cnt: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        comment="快照成分股数量：聚合本行所用的时点成分快照的成分股总数（仅指数行填写）")
+    agg_cons_cnt: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        comment="聚合成分股数量：本行实际参与汇总的成分股数量（仅指数行填写）")
 
     # ---- 收入类字段 ----
     ttl_inc_oper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业总收入")
@@ -497,6 +515,15 @@ class FundCashflow(Base, BaseModel):
     rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
     rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
     data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+    sec_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="stock", server_default="stock",
+        comment="主体类型：stock=个股，index=指数成分股聚合")
+    snap_cons_cnt: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        comment="快照成分股数量：聚合本行所用的时点成分快照的成分股总数（仅指数行填写）")
+    agg_cons_cnt: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        comment="聚合成分股数量：本行实际参与汇总的成分股数量（仅指数行填写）")
 
     # ---- 经营活动现金流 ----
     cash_rcv_sale: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="销售商品、提供劳务收到的现金")

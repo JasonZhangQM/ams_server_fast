@@ -104,6 +104,9 @@ class FundBalanceOut(BaseModel):
     rpt_date: Optional[date] = Field(default=None, description="报告日期")
     rpt_type: Optional[int] = Field(default=None, description="报表类型")
     data_type: Optional[int] = Field(default=None, description="数据类型")
+    sec_type: str = Field(description="主体类型：stock=个股，index=指数成分股聚合")
+    snap_cons_cnt: Optional[int] = Field(default=None, description="快照成分股数量：聚合本行所用的时点成分快照的成分股总数（仅指数行填写）")
+    agg_cons_cnt: Optional[int] = Field(default=None, description="聚合成分股数量：本行实际参与汇总的成分股数量（仅指数行填写）")
     # ---- 资产类字段 ----
     mny_cptl: Optional[Decimal] = Field(default=None, description="货币资金")
     acct_rcv: Optional[Decimal] = Field(default=None, description="应收账款")
@@ -146,6 +149,9 @@ class FundIncomeOut(BaseModel):
     rpt_date: Optional[date] = Field(default=None, description="报告日期")
     rpt_type: Optional[int] = Field(default=None, description="报表类型")
     data_type: Optional[int] = Field(default=None, description="数据类型")
+    sec_type: str = Field(description="主体类型：stock=个股，index=指数成分股聚合")
+    snap_cons_cnt: Optional[int] = Field(default=None, description="快照成分股数量：聚合本行所用的时点成分快照的成分股总数（仅指数行填写）")
+    agg_cons_cnt: Optional[int] = Field(default=None, description="聚合成分股数量：本行实际参与汇总的成分股数量（仅指数行填写）")
     # ---- 收入类字段 ----
     ttl_inc_oper: Optional[Decimal] = Field(default=None, description="营业总收入")
     inc_oper: Optional[Decimal] = Field(default=None, description="营业收入")
@@ -191,6 +197,9 @@ class FundCashflowOut(BaseModel):
     rpt_date: Optional[date] = Field(default=None, description="报告日期")
     rpt_type: Optional[int] = Field(default=None, description="报表类型")
     data_type: Optional[int] = Field(default=None, description="数据类型")
+    sec_type: str = Field(description="主体类型：stock=个股，index=指数成分股聚合")
+    snap_cons_cnt: Optional[int] = Field(default=None, description="快照成分股数量：聚合本行所用的时点成分快照的成分股总数（仅指数行填写）")
+    agg_cons_cnt: Optional[int] = Field(default=None, description="聚合成分股数量：本行实际参与汇总的成分股数量（仅指数行填写）")
     # ---- 经营活动现金流 ----
     cash_rcv_sale: Optional[Decimal] = Field(default=None, description="销售商品、提供劳务收到的现金")
     cf_in_oper: Optional[Decimal] = Field(default=None, description="经营活动现金流入小计")
@@ -426,7 +435,11 @@ class BatchSyncRequest(BaseModel):
     )
     industry: Optional[str] = Field(default=None, description="scope=industry 时填行业名，如 银行")
     symbols: Optional[list[str]] = Field(default=None, description="scope=explicit 时填手写清单")
-    tables: Optional[list[str]] = Field(default=None, description="要同步的表列表，默认 6 张全跑")
+    tables: Optional[list[str]] = Field(
+        default=None,
+        description="要同步的表列表，默认 6 张全跑；可另选特殊项 index-fund-agg"
+                    "（指数成分股财务聚合：scope=index 用 index_codes，scope=explicit 时 "
+                    "symbols 即指数代码清单）")
     mark_synced: bool = Field(default=True, description="全部成功后是否写 sync_at 标记")
     exclude_synced_since: Optional[date] = Field(
         default=None,
@@ -494,6 +507,21 @@ class IndexConstituentSyncRequest(BaseModel):
         default=None,
         description="回填起点 YYYY-MM-DD；不传=各指数从核查水位 checked_to+1 增量"
                     "（水位未初始化退回库内最新 trade_date+1，库空则从 listed_date 起）")
+
+
+class IndexFundAggSyncRequest(BaseModel):
+    """指数成分股财务聚合请求体（POST /bds/sync/index-fund-agg）。
+
+    指数清单由前端页面手动勾选后显式传入；后端仍会硬校验（空/未知 → 400）。
+    """
+
+    index_codes: list[str] = Field(
+        min_length=1,
+        description="本次要聚合的指数代码清单（页面勾选），如 ['SHSE.000300', 'SZSE.399006']")
+    start_date: Optional[date] = Field(
+        default=None,
+        description="重算起点 YYYY-MM-DD；不传=对该指数全历史重算覆盖；传入=仅聚合该日及之后的报告期，"
+                    "更早报告期的已有聚合行保持不动")
 
 
 class IndexValuationSyncRequest(BaseModel):
