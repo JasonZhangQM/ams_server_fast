@@ -183,16 +183,20 @@ def _stale_days(db, market_date: date, ref: date) -> int:
         TradeDate.trade_date > market_date, TradeDate.trade_date <= ref).scalar() or 0)
 
 
-def _load_latest_market(db, contract_ids: list[str]) -> dict[str, OptionMarket]:
-    """每合约取最新一日快照；按 trade_date 升序后写覆盖先写。"""
+def _load_latest_market(db, contract_ids: list[str],
+                         max_date: Optional[date] = None) -> dict[str, OptionMarket]:
+    """每合约取最新一日快照；按 trade_date 升序后写覆盖先写。
+
+    - max_date=None：行为不变，全区间取每合约最新一行。
+    - max_date 有值：只看 trade_date ≤ max_date 的行，供混日回退统一到某个
+      公共快照日时使用（风险引擎要求所有在仓期权同一个横截面做 BS 重估）。
+    """
     if not contract_ids:
         return {}
-    rows = (
-        db.query(OptionMarket)
-        .filter(OptionMarket.contract_id.in_(contract_ids))
-        .order_by(OptionMarket.contract_id, OptionMarket.trade_date)
-        .all()
-    )
+    q = db.query(OptionMarket).filter(OptionMarket.contract_id.in_(contract_ids))
+    if max_date is not None:
+        q = q.filter(OptionMarket.trade_date <= max_date)
+    rows = q.order_by(OptionMarket.contract_id, OptionMarket.trade_date).all()
     return {r.contract_id: r for r in rows}
 
 
@@ -245,7 +249,13 @@ def load_context() -> dict:
             key = c.broker_symbol or (info_row.symbol if info_row else None)
             if key:
                 contracts[key] = c
-        market = _load_latest_market(db, [c.contract_id for c in cfg_rows])
+        # ===== 段 A 探测：全量每合约取最新快照，构造持仓，收集行情日期 =====
+        # 盘中时点各品种行情到达时间不同（如 ETF 上午可到、黄金收盘后才有），
+        # 不同品种的期权最新快照日期可能不一致。风险引擎要求所有期权同一个
+        # 横截面做 BS 重估与保证金公式，否则同 underlying 跨日 S0 混合导致 Δ、
+        # 保证金、风险度全链口径不自洽。先取最新，若混日则段 B 统一到公共最早快照日。
+        all_contract_ids = [c.contract_id for c in cfg_rows]
+        market = _load_latest_market(db, all_contract_ids)
 
         pos_rows = (
             db.query(Group)
@@ -297,13 +307,49 @@ def load_context() -> dict:
             # 已到期被剔除的行走 continue，不会执行到这里。
             positions[-1]["pf_now"] = float(g.pf_total or 0)
 
-        # 新鲜度哨兵：所有在仓期权必须同一天，且不早于允许的最早行情日
-        data_as_of = stale = None
-        if market_dates:
+        # ===== 段 B 回退：混日统一到 min(market_dates) 快照，重建期权持仓 =====
+        # 回退只改「取哪一行快照」，估值逻辑不动；期货/股票不涉及行情横截面，
+        # 持仓原样保留。
+        if len(market_dates) > 1:
+            common_date = min(market_dates)
+            warnings.append(
+                f"在仓期权行情日期不一致 {sorted(market_dates)}，"
+                f"已统一回退到 {common_date} 快照计算")
+            market = _load_latest_market(db, all_contract_ids, max_date=common_date)
+            expired_set = set(expired)  # 段 A 已判定到期，不再重建
+            opt_positions: list[dict] = []
+            und_px.clear()
+            market_dates.clear()
+            for g in pos_rows:
+                if not g.category.startswith("期权"):
+                    continue
+                if g.symbol in expired_set:
+                    continue  # 已到期，段 A 已记入 expired
+                p = _option_position(g, contracts, cfg_info, market, params,
+                                     today, warnings)
+                # 回退后 p=None 不应出现（到期与否由 last_trade_date 决定，与快照日无关）；
+                # 若抛 ValueError（无快照/缺合约行）则原样上抛，阻止静默混日。
+                if p is None:
+                    continue
+                if p["und_key"] in und_px and abs(und_px[p["und_key"]] - p["S0"]) > 1e-6:
+                    warnings.append(
+                        f"{p['und_key']} 同日标的价不一致：{und_px[p['und_key']]} vs {p['S0']}")
+                und_px.setdefault(p["und_key"], p["S0"])
+                market_dates.add(p["market_date"])
+                opt_positions.append(p)
+                opt_positions[-1]["pf_now"] = float(g.pf_total or 0)
+            non_opt = [p for p in positions if p["kind"] not in ("call", "put")]
+            positions = non_opt + opt_positions
+            # 防御：回退后仍存在多日属异常（理论上不可能，min() 应全部 ≤ common_date）
             if len(market_dates) > 1:
                 raise ValueError(
-                    f"在仓期权的行情日期不一致：{sorted(market_dates)}，拒绝混日计算")
-            data_as_of = market_dates.pop()
+                    f"回退到 {common_date} 后仍存在混日：{sorted(market_dates)}，拒绝计算")
+
+        # 新鲜度哨兵（改判 common_date；段 B 已收敛为 1 日，段 A 路径零回归）
+        data_as_of = stale = None
+        if market_dates:
+            common_date = min(market_dates)
+            data_as_of = common_date
             ref, allowed_min = _trade_date_window(db, today)
             if data_as_of < allowed_min:
                 raise ValueError(
