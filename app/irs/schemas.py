@@ -478,7 +478,7 @@ class RiskBoardFirstCallOut(BaseModel):
 
 
 class BudgetScopeOut(BaseModel):
-    """单个品种组的额度读数。"""
+    """单个品种组的额度读数（结构集中度控制，与两道防线正交）。"""
 
     scope: str  # index_fut / gold / opt_short / etf_short / equity / other
     name: str  # 中文名
@@ -486,54 +486,51 @@ class BudgetScopeOut(BaseModel):
     pct: Optional[float] = None  # 占账户净值比例
     cap: Optional[float] = None  # 上限；null=未设上限（只报不判）
     headroom: Optional[float] = None  # 额度 = net0 × cap − margin
-    per_lot: Optional[float] = None  # 该组当前每手保证金（组内最大）
-    lots: int = 0  # 还能开几手
     status: str = "ok"  # ok / over / unknown
 
 
-class BudgetTotalOut(BaseModel):
-    """账户总闸（四档读数）。"""
+class BudgetLineOut(BaseModel):
+    """单道防线（到档情景）的余缺读数。"""
 
-    cap: float  # 保证金占用上限（0.85）
-    reserve: float  # 其中只留给预设加仓点的一块（0.15）
-    usable: float  # 日常可开比例 = cap − reserve（0.70）
-    gate_now: float  # net0 × usable − margin(0)
-    gate_stress: float  # 判据：net(+stress) × usable − margin(+stress)
-    gate_stress_max: float  # 含加仓包的极限，仅展示不参与取 min
-    status: str  # ok / over / block / skip
+    label: str  # 低档 / 极低档
+    denom: str  # 分母口径：net（R 防线，自有资金）/ eq（E 防线，客户权益含融资）
+    cap: Optional[float] = None  # 阈值（budget_tier_r / budget_tier_e，默认 1）
+    margin_at: Optional[float] = None  # 到档情景保证金
+    denom_at: Optional[float] = None  # 到档情景分母（净值 / 客户权益）
+    ratio: Optional[float] = None  # 到档风险度；分母非正（穿仓）为 null
+    gap: Optional[float] = None  # margin_at − cap × denom_at；>0 = 超限
+    fund_needed: Optional[float] = None  # 需入金 = gap ÷ cap（达标时恒 0）
+    left: Optional[float] = None  # 剩余空间 = −gap（缺口时恒 0）
 
 
 class BudgetAccountOut(BaseModel):
-    """单账户预算卡。"""
+    """单账户预算卡（档位锚定双防线）。"""
 
     net0: float  # 模型盯市净值
     book_net: float  # 账面净值（acc_aset − diff_br）
     book_gap: float  # net0 − 账面净，非 0 时必须提示（BS 重估差）
     margin: float
-    total: BudgetTotalOut
+    lines: Dict[str, BudgetLineOut]  # r（低档防线R）/ e（极低档防线E）
     by_scope: List[BudgetScopeOut]
-    headroom: Optional[float] = None  # 取 min 后的可开额度
-    binding: str  # 取到 min 的约束：scope 名 / total@now / total@stress
-    lots: int = 0  # 可开手数
-    openable: bool = False  # 额度>0 且够一手才算能开
-    per_lot_margin: Optional[float] = None
-    verdict: str = "ok"  # block / over / ok / skip
+    binding: Optional[str] = None  # 卡在哪：r / e（breach）或品种组名（over）
+    verdict: str = "ok"  # breach / over / ok / skip
 
 
 class BudgetSummaryOut(BaseModel):
-    """全账户汇总。"""
+    """全账户汇总（组合层余缺 = Σ账户，gap 线性可加）。"""
 
     verdict: str
     judged_accounts: int
-    blocked_accounts: List[str]
-    headroom_total: Optional[float] = None
+    breached_accounts: List[str]
+    lines: Dict[str, BudgetLineOut]
 
 
 class BudgetOut(BaseModel):
-    """风险预算块（irs/service/budget.py）。"""
+    """风险预算块（irs/service/budget.py，档位锚定双防线）。"""
 
-    stress_drop: float  # 生效压力档（irs_risk_param 的 ('*','budget_stress')，缺省 0.15）
-    mode: str  # 固定 sync
+    engine: str  # tier_v1
+    anchor: str  # 修正锚：min(档位价, 现价)
+    thresholds: Dict[str, Optional[float]]  # {r, e} 全局生效阈值
     accounts: Dict[str, BudgetAccountOut]
     symbols: Dict[str, Dict[str, str]]  # 合约 → {acct, scope}，加仓点查额度用
     summary: BudgetSummaryOut

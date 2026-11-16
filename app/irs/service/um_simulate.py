@@ -22,9 +22,13 @@
 - 锚点 1：overrides={} 时 baseline_combo 与 GET /irs/risk-board 同口径一致；
 - 锚点 2：单标的假设价=某档位价时，subjects[sym] 与 level-scenario 同档 combo 一致。
 
-预算读数（budget.evaluate）：恒为**现价基准**（0% 与生效压力档全组同跌、horizon=now），
-压力档读 `irs_risk_param` 的 `('*','budget_stress')`，经 budget.stress_run() 生成。
-不随滑块假设价变化——run() 的 shifts 与全组 drop 语义互斥，组合应力留待 M3。
+预算读数（budget.evaluate）：恒为**现价基准**（0% 与「到低档 / 到极低档」两道到档
+情景、horizon=now，修正锚 = min(档位价, 现价)），阈值读 `irs_risk_param` 的
+`budget_tier_r` / `budget_tier_e`（默认 1，2026-11-16 由 0.95 调整），不随滑块假设价变化。
+统一计算（2026-11-16 用户定稿）：build_levels() 的预算**直接复用本表 l/el 两档的
+同一次情景 run**（_level_overrides 与 budget.tier_shifts 同式、同锚定、同归属规则，
+实测逐分相等），不再为预算单独跑三次情景；/irs/simulate 单次推演无 levels 情景
+可用，仍由 build() 内部走 tier_run 生成。
 
 依赖方向（🔒4.12）：irs 内部复用；bills 只取 constants 的归属白名单片段，
 跨模块取数一律用表名字符串 SQL，不 import bills 模型（避免循环导入）。
@@ -84,12 +88,15 @@ def build(db: Session, overrides: dict[str, float],
           horizon: str = "now", iv_mult: float = 1.0, *,
           ctx: dict | None = None,
           include_budget: bool = True,
-          include_subjects: bool = True) -> dict:
+          include_subjects: bool = True,
+          return_raw: bool = False) -> dict:
     """多标的假设价推演；纯现算，不写库。非法标的/价格抛 ValueError → 400。
 
-    ctx / include_budget / include_subjects 只给 build_levels() 五档批量用：
-    共用一次风险上下文、跳过每档重复的预算与剧本查询；直接调 /irs/simulate
-    时三个参数全走默认值，行为与改造前逐字节一致（探针双锚点不变）。
+    ctx / include_budget / include_subjects / return_raw 只给 build_levels() 五档
+    批量用：共用一次风险上下文、跳过每档重复的预算与剧本查询；return_raw=True
+    时响应里带 `"_raw"`（本次情景 run 与 0% 现价基准 run 的原始 dict），仅供
+    build_levels 复用（预算统一计算），调用方必须 pop 掉、不得透出 API。
+    直接调 /irs/simulate 时参数全走默认值，行为与改造前逐字节一致。
     """
     if horizon not in HORIZONS:
         raise ValueError(f"horizon 只支持 now / expiry：{horizon}")
@@ -171,12 +178,18 @@ def build(db: Session, overrides: dict[str, float],
                                        iv_mult=iv_mult, shifts=shifts)
     base = risk_scenario.run(ctx, "sync", 0.0, horizon=horizon,
                              iv_mult=iv_mult, shifts={})
-    # 预算恒为现价基准、不随假设价变化；五档批量只在 0% 基准那一跑算一次。
+    # 预算恒为现价基准、不随假设价变化。0% 现价基准 run：horizon=now 时与 base
+    # 是同一次 run，直接复用不重算（horizon=expiry 时预算仍按 now 口径单独跑）。
+    b_now = None
+    if include_budget or return_raw:
+        b_now = base if horizon == "now" else risk_scenario.run(ctx, "sync", 0.0)
     budget = None
     if include_budget:
-        b_now = risk_scenario.run(ctx, "sync", 0.0)
-        _, b_stress = budget_mod.stress_run(ctx, ctx["params"])
-        budget = budget_mod.evaluate(ctx, ctx["params"], b_now, b_stress)
+        # 双防线到档情景复用本请求的 db 会话（tier_run 不再自己开会话）。
+        # 2026-11-16 二次定稿：R 防线吃到低档（pp_l）、E 防线吃到极低档（pp_el）。
+        b_r = budget_mod.tier_run(ctx, "pp_l", db=db)
+        b_e = budget_mod.tier_run(ctx, "pp_el", db=db)
+        budget = budget_mod.evaluate(ctx, ctx["params"], b_now, b_r, b_e)
 
     dm = {(d["acct"], d["name"]): d for d in scenario["detail"]}
     dm_other = {(d["acct"], d["name"]): d for d in scenario_other["detail"]}
@@ -407,9 +420,11 @@ def build(db: Session, overrides: dict[str, float],
         # 前端按 horizon 字段定排位，不依赖本字段的顺序语义。
         "combo_other": combo_other,
         "budget": ({
-            "stress_drop": budget["stress_drop"],
+            "engine": budget["engine"],
+            "thresholds": budget["thresholds"],
             "summary": budget["summary"],
-            "note": "预算读数为现价基准（0% 与 +15% 全组同跌、horizon=now），不随滑块假设价变化。",
+            "note": "预算读数为现价基准（低/极低档到档情景、修正锚 = min(档位价, 现价)、horizon=now），"
+                    "不随滑块假设价变化。",
         } if budget is not None else None),
         "subjects": subjects,
         # 标的项下持仓敞口合计（见 5a）：左右两栏排序共用，不随假设价变化
@@ -417,35 +432,53 @@ def build(db: Session, overrides: dict[str, float],
         "position_rows": rows,
         "accounts": accounts,
         "warnings": warnings,
+        # 仅供 build_levels 复用的原始情景 run（预算统一计算，2026-11-16）；
+        # 调用方必须 pop，绝不出 API。bnow = 0% 现价基准 run（horizon=now 语义）。
+        **({"_raw": {"scenario": scenario, "bnow": b_now}} if return_raw else {}),
     }
 
 
 # =========================================================================
 # 档位压力（POST /irs/simulate/levels）：全标的同步到同一档 × 五档
 # =========================================================================
-def _level_overrides(db: Session, field: str) -> tuple[dict[str, float], list[str], list[float]]:
-    """该档的全部标的假设价；与 simulate 页 applyBatch() 逐字段同源同规则。
+def _level_overrides(db: Session, field: str) -> tuple[dict[str, float], list[str], list[float], int]:
+    """该档的全部标的假设价（含**方向感知修正锚**）。
 
     - 档位价取**主表** pp_*：/risk 左栏档位条与标的主表同一组字段（um_today 原 today_items:192，
-      不现查 effective_version），保证「点压力表」与「点顶栏批量设置」得到同一组价；
-    - 现价为空/非正、档位价 NULL/非正 ⇒ 跳过（保持现价），与前端 applyBatch 一致；
-    - 档位价恰等于现价 ⇒ 不写 override，与 setHypo「现价即不设」语义一致；
-    - 同时返回每个标的的 pct，供压力表给幅度区间（各标的幅度不同，单值会骗人）。
+      不现查 effective_version）；前端批量套档（applyBatch）已实现同口径锚定，两侧一致；
+    - **修正锚（2026-11-16 用户定稿，方向感知）**：情景只从现价出发**向档位移动**，
+      已越过档位的标的保持现价（零位移），绝不反向拉回：
+      * 下方档位（pp_el/pp_l/pp_m）：情景价 = min(档位价, 现价)——现价在档位上方
+        才施加跌幅；已跌破该档 ⇒ 零跌幅（用户原话：已低于中/低档就用现价）；
+      * 上方档位（pp_h/pp_eh）：情景价 = max(档位价, 现价)——对称逻辑，已涨破
+        该档 ⇒ 零涨幅。⚠️ 若对上方档位也套 min，极高档会被整体冻结成现价，
+        压力表的上涨情景（卖购压力侧）就消失了；
+    - 现价为空/非正、档位价 NULL/非正 ⇒ 跳过（保持现价）；
+    - 返回 (overrides, skipped, pcts, anchored)：anchored = 已越档被锚定在现价的标的数，
+      供压力表如实报数（这些标的不进 pct 幅度区间）。
     """
     out: dict[str, float] = {}
     skipped: list[str] = []
     pcts: list[float] = []
+    anchored = 0
+    downside = field in ("pp_el", "pp_l", "pp_m")  # 五档固定 el<l<m<h<eh
     for um in db.query(UnderlyingMonitor).all():
         price_now = lvl._f(um.price)
         pp = lvl._f(getattr(um, field, None))
         if price_now <= 0 or pp <= 0:
             skipped.append(um.symbol)
             continue
-        if abs(pp - price_now) < 1e-9:
-            continue
+        if downside:
+            if pp >= price_now - 1e-9:  # 现价已跌破该档（含恰等）⇒ 不反弹，零跌幅
+                anchored += 1
+                continue
+        else:
+            if pp <= price_now + 1e-9:  # 现价已涨破该档（含恰等）⇒ 不回跌，零涨幅
+                anchored += 1
+                continue
         out[um.symbol] = pp
         pcts.append(pp / price_now - 1)
-    return out, skipped, pcts
+    return out, skipped, pcts, anchored
 
 
 # 档位压力只回逐张合约表 / 保证金结构图要用的字段，避免 5 档响应体膨胀
@@ -468,6 +501,8 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
     滑块」换成五个预设档批量跑。纯现算，不写库、不建任务（irs_scenario_grid 落库链路已下线）。
     输出供 /irs/simulate 右栏的档位压力表 / 逐张合约 / 保证金结构图共用；
     组合与账户指标全部后端算，前端只做渲染与展示层分组（🔒4.13）。
+    预算统一计算（2026-11-16）：baseline.budget 直接复用本表 l/el 两档的同一次
+    情景 run（经 _tier 哨兵校验），不重复跑预算情景、两处不可能不一致。
     """
     if horizon not in HORIZONS:
         raise ValueError(f"horizon 只支持 now / expiry：{horizon}")
@@ -487,20 +522,33 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
         return ((res["combo"], res["combo_other"]) if horizon == "now"
                 else (res["combo_other"], res["combo"]))
 
-    # 0% 基准（全部现价）：预算读数、账户静态卡、逐仓基准都从这一跑取
-    base = build(db, {}, horizon, iv_mult, ctx=ctx)
+    # 0% 基准（全部现价）：账户静态卡、逐仓基准与预算的 0% 腿都从这一跑取。
+    # include_budget=False：预算统一在循环后用压力表 m/l 两档的同一次 run 算（不重跑）。
+    base = build(db, {}, horizon, iv_mult, ctx=ctx,
+                 include_budget=False, return_raw=True)
+    base_raw = base.pop("_raw")
     base_now, base_exp = _now_expiry(base)
     levels: dict[str, dict] = {}
+    tier_runs: dict[str, dict] = {}
     for key, field, label in lvl.LEVELS:
-        overrides, skipped, pcts = _level_overrides(db, field)
+        overrides, skipped, pcts, anchored = _level_overrides(db, field)
         res = build(db, overrides, horizon, iv_mult, ctx=ctx,
-                    include_budget=False, include_subjects=False)
+                    include_budget=False, include_subjects=False, return_raw=True)
+        raw = res.pop("_raw")
+        if key in ("l", "el"):
+            # 预算统一计算（2026-11-16 用户定稿）：低/极低档防线直接复用本档情景 run，
+            # 不再为预算单独跑 tier_run。等价性依据：_level_overrides 与
+            # budget.tier_shifts 同式（方向感知锚定 min/max、同一归属规则），
+            # 2026-11-16 实测两路径逐分相等；打同一 _tier 哨兵供 evaluate 校验。
+            raw["scenario"]["_tier"] = f"pp_{key}"
+            tier_runs[key] = raw["scenario"]
         c_now, c_exp = _now_expiry(res)
         levels[key] = {
             "key": key,
             "label": label,
             "overrides": overrides,
             "subject_count": len(overrides),
+            "anchored_count": anchored,
             "skipped_symbols": skipped,
             "pct_min": round(min(pcts), 6) if pcts else None,
             "pct_max": round(max(pcts), 6) if pcts else None,
@@ -522,11 +570,30 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
             "positions": _slim_positions(res["position_rows"]),
         }
 
+    # 预算（统一计算，2026-11-16）：0% 腿 = 基准 run，低/极低档腿 = 本表 l/el 两档的
+    # 同一次情景 run —— 档位压力表与预算防线共用同一批 run，不重复计算、不可能不一致。
+    # 预算恒为 now 口径：horizon=now（前端固定）时如上复用；expiry 请求退回
+    # tier_run 独立跑（保持旧口径，防御分支，前端不走）。
+    if horizon == "now":
+        budget_full = budget_mod.evaluate(
+            ctx, ctx["params"], base_raw["bnow"], tier_runs["l"], tier_runs["el"])
+    else:
+        b_r = budget_mod.tier_run(ctx, "pp_l", db=db)
+        b_e = budget_mod.tier_run(ctx, "pp_el", db=db)
+        budget_full = budget_mod.evaluate(ctx, ctx["params"], base_raw["bnow"],
+                                          b_r, b_e)
+
     baseline = {
         "combo": base["combo"],
         "accounts": base["accounts"],
         "positions": _slim_positions(base["position_rows"]),
-        "budget": base["budget"],
+        "budget": {
+            "engine": budget_full["engine"],
+            "thresholds": budget_full["thresholds"],
+            "summary": budget_full["summary"],
+            "note": "预算与档位压力表同一次情景 run（统一计算，无重复算）；"
+                    "组合行=全组合口径（账户间资金可相互调配），verdict 仍按逐账户。",
+        },
         # 现价行同样给两列：即期恒 0（不重估就没有 Δ），到期 = 全组合时间价值衰减（负数）
         "delta_pnl_now": lvl._r2(-base_now["loss"]),
         "delta_pnl_expiry": lvl._r2(-base_exp["loss"]),
@@ -535,10 +602,12 @@ def build_levels(db: Session, horizon: str = "now", iv_mult: float = 1.0) -> dic
     }
 
     warnings = list(base["warnings"]) + [
-        "档位压力 = 全部监测标的同步到同一档，每个标的用**自己的** pp_* 档位价（主表当前生效值），"
-        "与推演页顶栏「批量设置」同源；无该档位或档位价恰等现价的标的保持现价。",
-        "各标的到档幅度不同，压力表给的是幅度区间而非单一涨跌幅；持仓按同百分比平移"
-        "（beta=1 近似），跨市场基差/贴水/折溢价漂移不计，全部数值为 [推算]。",
+        "档位压力 = 全部监测标的同步到同一档，每个标的用**自己的** pp_* 档位价（主表当前生效值）；"
+        "修正锚（方向感知）：下方档位情景价 = min(档位价, 现价)，现价已跌破该档的标的保持现价"
+        "（零跌幅，anchored_count 如实报数）；上方档位对称取 max，已涨破该档的标的零涨幅。"
+        "前端批量套档（压力表行点击 → 左栏滑块）同口径锚定，推演结果 = 本表该行数值。",
+        "各标的到档幅度不同，压力表给的是幅度区间而非单一涨跌幅（区间只覆盖实际移动的标的）；"
+        "持仓按同百分比平移（beta=1 近似），跨市场基差/贴水/折溢价漂移不计，全部数值为 [推算]。",
         "「极高」档是上涨方向，对卖出认购是压力侧；档位名不代表风险由低到高排序。"
     ]
 

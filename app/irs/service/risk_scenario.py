@@ -130,10 +130,9 @@ def _load_params(db) -> dict:
 
     消费两类键：
     - `margin_rate`：保证金率（`CFFEX.IC` / `SHFE.au` …，见 `load_context`）
-    - `budget_*`：风险预算上限（`budget_pct:<品种组>` / `budget_total` / `budget_reserve`
-      / `budget_stress`，见 `services/budget.py`）。账户级 scope=账户名，全局 scope=`*`。
-      ⚠️ `budget_stress` 例外：只能是 `*` 一条，由 `budget.stress_drop()` 读取，
-      不进账户级 cfg —— 压力情景是「全组同跌一次 run()」，全组合只能有一个跌幅。
+    - `budget_*`：风险预算参数（`budget_pct:<品种组>` / `budget_tier_r` /
+      `budget_tier_e`，见 `services/budget.py`）。账户级 scope=账户名，全局 scope=`*`。
+      旧 `budget_stress`（统一 15% 压力档）已随 gate 体系下线（2026-11-16）。
     """
     today = date.today()
     rows = (
@@ -686,9 +685,6 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
 
     # 情景矩阵：三模式 × (上涨三档 + 下跌七档) × 分账户
     grid = {}
-    raw_stress = None
-    # 生效压力档读 irs_risk_param 的 ('*','budget_stress')，缺省 0.15（budget.py）。
-    eff_stress = budget.stress_drop(ctx["params"])
     extra_warnings: list[str] = []
     # 对照时点 now ⇄ expiry：只在要逐仓明细时多跑一遍 run()，
     # 日终重算（include_detail=False）零额外开销。不写库、不改 run() 签名。
@@ -702,9 +698,6 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
                 r_other = run(ctx, mode, d, other_horizon, iv_mult)
                 other_loss = {(x["acct"], x["name"]): x["loss"]
                               for x in r_other["detail"]}
-            if mode == "sync" and abs(d - eff_stress) < 1e-9:
-                raw_stress = r  # 预算主口径要未四舍五入的 net/margin，且与下面同一时点
-                raw_stress["_stress_drop"] = eff_stress  # evaluate() 据此校验跌幅
             eq_total = sum(x["eq"] for x in r["accounts"].values())
             row = {"ALL": {
                 "loss": round(r["loss"], 2), "net": round(r["net"], 2),
@@ -771,13 +764,15 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
         if any(v is not None for v in _exp_vals) else None
     )
     net_total = base["net"]
-    if raw_stress is None:
-        # 生效压力档不在情景矩阵固定档位里（表配了非 0.15 的值）：单独跑一次。
-        # 仍是同一 ctx / 同一时点、不落库，也不改 grid 的展示档位。
-        _, raw_stress = budget.stress_run(ctx, ctx["params"], horizon, iv_mult)
-        extra_warnings.append(
-            f"生效压力档 {eff_stress:.0%} 不在情景矩阵档位中，预算已按该档单独重算。"
-        )
+
+    # 双防线到档情景（2026-11-16 起，替换旧 15% 统一压力档）：
+    # R 防线吃到低档（pp_l）、E 防线吃到极低档（pp_el），全监测标的各自到
+    # min(档位价, 现价)，修正锚口径见 budget.tier_shifts。
+    # 三次 run 同一 ctx / 同一时点、不落库；情景 warning（冻结/修正锚/未归属）并入 warnings。
+    tier_r = budget.tier_run(ctx, "pp_l", horizon, iv_mult)
+    tier_e = budget.tier_run(ctx, "pp_el", horizon, iv_mult)
+    extra_warnings.extend(tier_r.get("_tier_warnings") or [])
+    extra_warnings.extend(tier_e.get("_tier_warnings") or [])
 
     return {
         "engine_ver": ENGINE_VER,
@@ -799,8 +794,8 @@ def compute(horizon: str = "now", iv_mult: float = 1.0,
         "grid": grid,
         "first_call": first_call,
         "first_call_all": first_call_all,
-        # 风险预算：在 grid/base 之上做后处理，判据取最严档（见 services/budget.py）
-        "budget": budget.evaluate(ctx, ctx["params"], base, raw_stress),
+        # 风险预算：档位锚定双防线（低档R/极低档E，2026-11-16 起，替换旧 gate 体系，见 services/budget.py）
+        "budget": budget.evaluate(ctx, ctx["params"], base, tier_r, tier_e),
         "mode_names": MODE_NAMES,
         "steps": STEPS,
         "upside_steps": UPSIDE_STEPS,
