@@ -22,7 +22,12 @@ from sqlalchemy.orm import Session, joinedload
 
 from server_fast.app.bds.models import BdsSyncTask, OptionConfig, OptionInfo
 from server_fast.app.bds.schemas import BdsSyncTaskOut
-from server_fast.app.bds.sync_task_utils import STOP_EVENTS, cleanup_zombies
+from server_fast.app.bds.sync_task_utils import (
+    STOP_EVENTS,
+    cleanup_zombies,
+    register_stage_runner,
+    set_stage_runtime,
+)
 from server_fast.app.bills.config import Config
 from server_fast.app.bills.constants import (
     RZRQ_CATEGORY,
@@ -795,6 +800,20 @@ def _cascade_risk_exposure(db: Session, group: Group) -> None:
 # irs_scenario_grid，scope=irs_risk，含 `_finish_risk_task` 收尾）已随落库链路
 # 整体下线删除：风险看板 GET 一直实时计算、不读该表，落库只写不读、仅作留档。
 
+def _build_group_steps() -> List[Tuple[str, Callable]]:
+    """持仓行情四步清单：/sync/group 与宏观任务执行器共用，避免两处漂移。"""
+    from server_fast.app.bills.services.value_calc import value_float_em_sql
+    from server_fast.app.bills.services.group_summary import (
+        upsert_group_symbol_sql, upsert_group_acc_sql, clear_zero_position_risk_sql)
+
+    return [
+        ("value_float_em_sql", value_float_em_sql),
+        ("clear_zero_position_risk_sql", clear_zero_position_risk_sql),
+        ("upsert_group_acc_sql", upsert_group_acc_sql),
+        ("upsert_group_symbol_sql", upsert_group_symbol_sql),
+    ]
+
+
 # 合并后的同步路由：顺序执行实时估值 → 持仓归零清空风险敞口 → 标的汇总 → 账户汇总
 @router.post("/sync/group")
 def sync_group():
@@ -804,18 +823,34 @@ def sync_group():
     → upsert_group_acc_sql → upsert_group_symbol_sql。
     （原末段 persist_risk_grid 已于 2026-11-14 随落库链路下线删除。）
     """
-    from server_fast.app.bills.services.value_calc import value_float_em_sql
-    from server_fast.app.bills.services.group_summary import (
-        upsert_group_symbol_sql, upsert_group_acc_sql, clear_zero_position_risk_sql)
+    return _run_sync_steps(_build_group_steps())
 
-    return _run_sync_steps(
-        [
-            ("value_float_em_sql", value_float_em_sql),
-            ("clear_zero_position_risk_sql", clear_zero_position_risk_sql),
-            ("upsert_group_acc_sql", upsert_group_acc_sql),
-            ("upsert_group_symbol_sql", upsert_group_symbol_sql),
-        ]
-    )
+
+# =========================================================================
+# 宏观一键同步「持仓行情」段执行器（注册表注入，bds 不反向 import bills，规则 4.12）
+# =========================================================================
+def _run_position_quote_stage() -> int:
+    """持仓行情四步，整段原子：任一步异常即终止并上抛，返回已完成步数。
+
+    与 /bills/sync/group 同源，但失败语义对齐 bills_import 任务：后三步依赖前两步
+    产物，带病续跑会把错误状态算进汇总表。子步明细（含失败点）写进
+    result.stages[].steps；异常由 bds 兜成 -1 并把原因写进 errors。
+    """
+    done: list[str] = []
+    for name, fn in _build_group_steps():
+        try:
+            fn()
+        except Exception as e:
+            done.append(f"{name} 失败：{type(e).__name__}: {e}")
+            set_stage_runtime("position_quote", steps=done)
+            raise
+        done.append(name)
+    set_stage_runtime("position_quote", steps=done)
+    return len(done)
+
+
+# 注册发生在 router 加载期（main.py 按 bds → bills → irs 顺序 include_router）
+register_stage_runner("position_quote", _run_position_quote_stage)
 
 
 # =========================================================================

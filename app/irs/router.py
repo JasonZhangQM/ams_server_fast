@@ -21,7 +21,12 @@ from server_fast.app.irs import service
 from server_fast.app.bds.config import Config as BdsCfg
 from server_fast.app.bds.models import BdsSyncTask
 from server_fast.app.bds.schemas import BdsSyncTaskOut
-from server_fast.app.bds.sync_task_utils import STOP_EVENTS, cleanup_zombies
+from server_fast.app.bds.sync_task_utils import (
+    STOP_EVENTS,
+    cleanup_zombies,
+    register_stage_runner,
+    set_stage_runtime,
+)
 from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
@@ -93,6 +98,27 @@ SYNC_MAP: Dict[str, List[Callable]] = {
     "underlying-monitor-hlc": [service.update_underlying_monitor_hlc_sql],
     "underlying-monitor":     [service.update_underlying_monitor_em_orm],
 }
+
+
+# =========================================================================
+# 宏观一键同步「标的行情」段执行器（注册表注入，bds 不反向 import irs，规则 4.12）
+# =========================================================================
+def _run_underlying_quote_stage() -> int:
+    """刷新监测标的价，返回更新的标的数（0 = 无数据）。
+
+    与 /irs/sync/underlying-monitor 共用同一个 service 函数，只是把返回
+    (insert, update) 归一成 bds._run_sync_item 的 int 计数口径。异常向上抛，
+    由 bds 兜成 -1 并把具体原因写进 bds_sync_task.errors。
+    """
+    _inserted, updated = service.update_underlying_monitor_em_orm()
+    n = int(updated or 0)
+    set_stage_runtime("underlying_quote", steps=[f"更新 {n} 个标的价"])
+    return n
+
+
+# 注册发生在 router 加载期（main.py 按 bds → bills → irs 顺序 include_router）。
+# bds 的同步线程在运行时按名取用，源码里不出现 import irs。
+register_stage_runner("underlying_quote", _run_underlying_quote_stage)
 
 
 def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:

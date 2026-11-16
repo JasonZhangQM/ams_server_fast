@@ -142,6 +142,12 @@ logger = logging.getLogger("uvicorn.error")
 # 也要注册到这里，供 POST /bds/stop/batch-sync 统一触发；此处别名保持本文件引用不变
 from server_fast.app.bds.sync_task_utils import STOP_EVENTS as _stop_events
 from server_fast.app.bds.sync_task_utils import cleanup_zombies as _cleanup_zombies
+# 跨模块段执行器：bds 不 import irs / bills（规则 4.12），只从注册表按名取用
+from server_fast.app.bds.sync_task_utils import (
+    get_stage_runner,
+    pop_stage_runtime,
+    set_stage_runtime,
+)
 
 router = APIRouter(prefix="/bds", tags=["bds"])
 
@@ -1647,7 +1653,7 @@ def sync_daily_indicators_all():
 
 
 # ============================================================================
-# 一键同步（基础数据 + 宏观数据）：七段固定顺序执行，复用 bds_sync_task 轮询进度
+# 一键同步（基础数据 + 宏观数据）：十段固定顺序执行，复用 bds_sync_task 轮询进度
 # 方案：docs/基础数据并入同步卡片方案_2026-10-22.md
 #       docs/宏观同步合并一键顺序执行方案_2026-10-21.md（初版，仅宏观三段）
 #
@@ -1667,14 +1673,25 @@ def sync_daily_indicators_all():
 #
 # 🔴 option_info 必须排在 option_market **之前**：行情同步要从字典取「逐合约乘数」
 #    与「权威到期日」，当天新挂牌的合约若还没进字典，行情会 MISS 跳过。
+# 🔴 underlying_quote / position_quote 必须紧跟 option_market：两步吃的是期权快照
+#    更新后的价，且不必等 wscn / gold 这些慢段（gold 20 国约 5.5min）。这两段由
+#    irs / bills 实现，经 sync_task_utils 的注册表注入，bds 不反向 import（规则 4.12）。
 SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "history_market", "option_info",
-                    "option_market", "wscn", "daily", "gold"]
+                    "option_market", "underlying_quote", "position_quote",
+                    "wscn", "daily", "gold"]
+
+# 非 bds 域同步段：执行器由 irs / bills 在 router 加载期注册到 bds.sync_task_utils。
+# 这两段不报写入行数（unit=symbol / step），前端分段摘要按 unit 显示「N 个标的 / N 步」。
+EXTRA_STAGE_KEYS = {"underlying_quote", "position_quote"}
+
 SYNC_STAGE_NAMES = {
     "trade_date": "交易日历",
     "symbol_info": "证券信息",
     "history_market": "历史行情",
     "option_info": "期权合约字典",
     "option_market": "期权行情",
+    "underlying_quote": "标的行情（监测标的价）",
+    "position_quote": "持仓行情（bills 四步汇总）",
     "wscn": "经济指标（华尔街见闻）",
     "daily": "美债收益率（FRED）",
     "gold": "黄金储备（IMF）",
@@ -1687,6 +1704,8 @@ SYNC_STAGE_GROUPS = {
     "history_market": "basic",
     "option_info": "basic",
     "option_market": "basic",
+    "underlying_quote": "basic",
+    "position_quote": "basic",
     "wscn": "macro",
     "daily": "macro",
     "gold": "macro",
@@ -1702,6 +1721,9 @@ def _sync_stage_items(stage: str) -> list:
       （清单由 get_macro_history_targets 运行时推导；Config 仅在信息表为空时兜底）
     - option_market：按「品种 × 到期月」逐组（= 一次接口请求），与 /option-market/sync 的分组口径一致；
       清单为空时给一个 `__no_config__` 伪项，让失败明细能说清原因，而不是 0 项静默通过
+    - underlying_quote / position_quote：整体各 1 项。持仓行情内部是 4 步流水线且
+      **必须整段原子**（任一步失败即终止，带病续跑会把错误状态算进汇总表），拆成
+      4 个计项会破坏该语义；4 个子步明细由执行器写进 result.stages[].steps。
     - wscn：service 内部按自然月分批（首次全量 141 批起）**不可切分** ⇒ 整体 1 项
     - daily / gold：按配置逐项，与前端 store 列出的条目同源
     """
@@ -1724,6 +1746,10 @@ def _sync_stage_items(stage: str) -> list:
             (f"{g['option_name']}|{g['end_month']}", f"{g['option_name']}/{g['end_month'] or 'ALL'}")
             for g in groups
         ]
+    if stage == "underlying_quote":
+        return [("all", "刷新监测标的价")]
+    if stage == "position_quote":
+        return [("all", "实时估值→清零→账户→标的汇总")]
     if stage == "wscn":
         return [("wscn", "全部指标")]
     if stage == "daily":
@@ -1778,9 +1804,21 @@ def _run_sync_item(stage: str, key: str) -> int:
             return upsert_daily_indicator_sql(key)
         if stage == "gold":
             return upsert_gold_reserve_sql(key)
+        if stage in EXTRA_STAGE_KEYS:
+            # 执行器由 irs / bills 注入；未注册必须显式失败，否则「勾了却没跑」无法发现
+            runner = get_stage_runner(stage)
+            if runner is None:
+                raise RuntimeError(
+                    f"执行器未注册：{stage}（irs / bills router 未被加载？禁止静默跳过）"
+                )
+            return runner()
         return -1
     except Exception as e:
-        print(f"[sync] {stage}/{key} 异常: {type(e).__name__}: {e}")
+        msg = f"{type(e).__name__}: {e}"
+        print(f"[sync] {stage}/{key} 异常: {msg}")
+        # 跨模块段把具体异常回传给任务线程，让 errors 明细能定位，而不是通用「取数失败」
+        if stage in EXTRA_STAGE_KEYS:
+            set_stage_runtime(stage, error=msg)
         return -1
 
 
@@ -1807,6 +1845,10 @@ def _run_sync_thread(task_id: int, stages: list):
         for s, items in plan:
             stats[s] = {"key": s, "name": SYNC_STAGE_NAMES[s], "group": SYNC_STAGE_GROUPS[s],
                         "total": len(items), "done": 0, "ok": 0, "no_data": 0, "error": 0, "rows": 0}
+            if s in EXTRA_STAGE_KEYS:
+                # 跨模块段不报写入行数：标的行情报「更新标的数」，持仓行情报「完成步数」。
+                # 前端「条数合计」列按 unit 换算成「N 个标的 / N 步」，避免口径失真。
+                stats[s]["unit"] = "symbol" if s == "underlying_quote" else "step"
 
         done = ok = no_data = err = 0
 
@@ -1833,9 +1875,13 @@ def _run_sync_thread(task_id: int, stages: list):
                 if stop_event and stop_event.is_set():
                     break
                 count = _run_sync_item(stage, key)
+                # 跨模块段回传的子步明细 / 异常原因：每项完成后取走，避免污染下一项
+                runtime = pop_stage_runtime(stage) if stage in EXTRA_STAGE_KEYS else {}
                 done += 1
                 st = stats[stage]
                 st["done"] += 1
+                if runtime.get("steps"):
+                    st["steps"] = runtime["steps"]
                 if count > 0:
                     ok += 1
                     st["ok"] += 1
@@ -1846,9 +1892,13 @@ def _run_sync_thread(task_id: int, stages: list):
                 else:
                     err += 1
                     st["error"] += 1
-                    # option_market 的伪项给明确原因，别让「清单为空」看起来像接口挂了
-                    msg = ("期权同步清单为空，请先在「期权同步清单」里配置要同步的合约"
-                           if key == "__no_config__" else "取数失败（count=-1，详见后端日志）")
+                    # option_market 伪项 / 跨模块执行器异常各给明确原因，别只写通用「取数失败」
+                    if key == "__no_config__":
+                        msg = "期权同步清单为空，请先在「期权同步清单」里配置要同步的合约"
+                    elif runtime.get("error"):
+                        msg = runtime["error"]
+                    else:
+                        msg = "取数失败（count=-1，详见后端日志）"
                     errors.append({
                         "symbol": key,
                         "table": SYNC_STAGE_NAMES[stage],
@@ -1900,15 +1950,22 @@ def sync_macro(req: MacroSyncRequest):
     """一键同步（后台线程异步执行，返回 task 供轮询进度）。
 
     请求体：`{"stages": ["symbol_info", "history_market", "wscn", "daily"]}`，只跑传入的段。
-    **执行顺序固定 trade_date → symbol_info → history_market → wscn → daily → gold**，
-    不按入参数组顺序（基础数据是下游依赖，且整体快 → 慢，中途停止的代价最小）。
+    **执行顺序固定**（不按入参数组顺序）：trade_date → symbol_info → history_market →
+    option_info → option_market → underlying_quote → position_quote → wscn → daily → gold。
+    基础数据是下游依赖排在前面；两段行情链紧跟 option_market 吃新快照；整体快 → 慢，
+    中途停止的代价最小。后两段由 irs / bills 注入执行器（见 sync_task_utils 注册表）。
 
     进度：`total_count` = 各段条目数之和（trade_date 1 + symbol_info 2 + history_market
-    「A股指数 ∪ 监测标的」每标的 1 + wscn 1 + daily 每指标 1 + gold 每国 1），每完成一项 `done_count` +1。
-    `result.stages` 存各段 total/done/ok/no_data/error/rows（含 group 供前端分组），
+    「A股指数 ∪ 监测标的」每标的 1 + option_info 1 + option_market 按品种×到期月逐组 +
+    underlying_quote 1 + position_quote 1 + wscn 1 + daily 每指标 1 + gold 每国 1），
+    每完成一项 `done_count` +1。
+    `result.stages` 存各段 total/done/ok/no_data/error/rows（含 group 供前端分组）；
+    两段行情链额外带 `unit`（symbol=更新标的数 / step=完成步数）与 `steps` 子步明细，
+    前端「条数合计」列据此换算，不与「写入行数」混用。
     `result.stage` 存当前段 —— wscn 首轮全量时进度条会停在该段，靠它显示"正在跑哪一段"。
 
     计数口径：`count>0`→success / `count==0`→no_data / `count==-1`→error（同时写 errors 明细）。
+    跨模块段的异常原因会写进 errors.message，不再是通用「取数失败」。
 
     停止：`POST /bds/stop/batch-sync?task_id=<id>`，项间生效（当前项是 HTTP 请求，最坏再等一国约 16s）。
     ⚠️ 与 /run/batch-sync、/sync/index-constituent 共用 bds_sync_task ⇒ **全局互斥**（有 running 则 409）。
