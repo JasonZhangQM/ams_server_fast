@@ -165,13 +165,13 @@ class FundIncomeOut(BaseModel):
     inc_tax: Optional[Decimal] = Field(default=None, description="所得税费用")
     net_prof: Optional[Decimal] = Field(default=None, description="净利润")
     net_prof_pcom: Optional[Decimal] = Field(default=None, description="归母净利润")
+    net_prof_pcom_cut: Optional[Decimal] = Field(default=None, description="扣非归母净利润")
     # ---- 每股收益 ----
     eps_base: Optional[Decimal] = Field(default=None, description="基本每股收益")
     eps_dil: Optional[Decimal] = Field(default=None, description="稀释每股收益")
-    # ---- 综合收益及其他 ----
+    # ---- 营业外收支 ----
     inc_noper: Optional[Decimal] = Field(default=None, description="营业外收入")
     exp_noper: Optional[Decimal] = Field(default=None, description="营业外支出")
-    ttl_comp_inc: Optional[Decimal] = Field(default=None, description="综合收益总额")
     create_time: datetime = Field(description="创建时间")
     update_time: datetime = Field(description="更新时间")
 

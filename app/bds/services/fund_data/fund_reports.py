@@ -58,7 +58,7 @@ def _to_date(v):
 FUND_BALANCE_FIELDS = "mny_cptl,acct_rcv,invt,ttl_cur_ast,fix_ast,lt_eqy_inv,intg_ast,gw,ttl_ncur_ast,ttl_ast,sht_ln,acct_pay,ttl_cur_liab,lt_ln,ttl_ncur_liab,ttl_liab,cptl_rsv,ret_prof,ttl_eqy_pcom,ttl_eqy"
 
 # 利润表
-FUND_INCOME_FIELDS = "ttl_inc_oper,inc_oper,ttl_cost_oper,cost_oper,exp_sell,exp_adm,exp_rd,exp_fin,inc_inv,inc_fv_chg,oper_prof,ttl_prof,inc_tax,net_prof,net_prof_pcom,eps_base,eps_dil,inc_noper,exp_noper,ttl_comp_inc"
+FUND_INCOME_FIELDS = "ttl_inc_oper,inc_oper,ttl_cost_oper,cost_oper,exp_sell,exp_adm,exp_rd,exp_fin,inc_inv,inc_fv_chg,oper_prof,ttl_prof,inc_tax,net_prof,net_prof_pcom,net_prof_pcom_cut,eps_base,eps_dil,inc_noper,exp_noper"
 
 # 现金流量表
 FUND_CASHFLOW_FIELDS = "cash_rcv_sale,cf_in_oper,cash_pur_gds_svc,cash_pay_emp,cash_pay_tax,cf_out_oper,net_cf_oper,cash_rcv_sale_inv,cf_in_inv,pur_fix_intg_ast,net_cf_inv,brw_rcv,cf_in_fin,cash_rpay_brw,net_cf_fin,net_prof,efct_er_chg_cash,net_incr_cash_eq,cash_cash_eq_bgn,cash_cash_eq_end"

@@ -464,13 +464,13 @@ class FundIncome(Base, BaseModel):
     inc_tax: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="所得税费用")
     net_prof: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="净利润")
     net_prof_pcom: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="归母净利润")
+    net_prof_pcom_cut: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="扣非归母净利润")
     # ---- 每股收益 ----
     eps_base: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="基本每股收益")
     eps_dil: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="稀释每股收益")
-    # ---- 综合收益及其他 ----
+    # ---- 营业外收支 ----
     inc_noper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业外收入")
     exp_noper: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="营业外支出")
-    ttl_comp_inc: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2), nullable=True, comment="综合收益总额")
 
     # 联合唯一约束 + 列表页排序索引（同 FundBalance）
     __table_args__ = (
