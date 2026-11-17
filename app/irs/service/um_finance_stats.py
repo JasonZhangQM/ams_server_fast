@@ -6,7 +6,13 @@
 - 个股与指数零分流：统一 symbol 查询，deriv 行个股/指数混表靠 sec_type 区分，
   本模块读数不过滤 sec_type（一个 symbol 只会有一种主体类型的行）
 - 外盘标的（SPX / GC00Y）无财务数据 ⇒ empty=true HTTP 200 空态，不猜数
-- 近 N 年年报口径（默认 5 年，N ∈ {3,5,10}）+ 最新报告期快照卡（含 TTM 差分）
+- 双口径（方案 v8，2026-11-17）：freq=annual 近 N 年年报（默认 5，N ∈ {3,5,10}）/
+  freq=latest 近 12 个标准报告期（含单季差分与单季同比）；响应统一字段 series
+- 最新报告期快照卡（含 TTM 差分）
+
+单季口径（方案 v8）：
+- 单季 = 本期累计 − 上一日历季度累计（Q1 = 累计本身），资产负债表时点值不做单季
+- 单季同比 = 本季单季 vs 去年同期单季（%），去年单季缺失或非正 → None
 
 数据源（bds 只读，🔒4.12 irs → bds 允许）：
 - bds_finance_deriv：17 指标直取（个股 gm 口径 / 指数整体法派生，比率均 ×100 存百分比）
@@ -30,6 +36,9 @@ from server_fast.common.db import SessionLocal
 
 # 年报口径：报告期月日集合（快报 rpt_type=99 的月末日天然被过滤）
 ANNUAL_MD = "12-31"
+
+# 标准报告期月日集合（freq=latest 展示窗口；快报 rpt_type=99 的非季末月末日天然被过滤）
+STANDARD_MD = {"03-31", "06-30", "09-30", "12-31"}
 
 # deriv 直取列（比率 ×100 存百分比 / 周转天数存天，单位口径统一）
 DERIV_RATIO_COLS = [
@@ -122,10 +131,90 @@ def _annual_deriv(deriv_rows: list, years: int) -> list:
     return annual[-years:] if annual else []
 
 
-def build(symbol: str, years: int = 5, db: Optional[Session] = None) -> dict:
+def _rpt_label(rpt: date) -> tuple:
+    """报告期标签：(rpt_label, q_tag)，如 ('2025FY', 'FY') / ('2026Q1', 'Q1')。
+
+    非标准报告期（理论上不会出现在序列里）回落 ISO 日期 + 空串。
+    """
+    q = {"03-31": "Q1", "06-30": "Q2", "09-30": "Q3", "12-31": "FY"}.get(
+        rpt.strftime("%m-%d"))
+    if q is None:
+        return rpt.isoformat(), ""
+    return f"{rpt.year}{q}", q
+
+
+def _prev_quarter(rpt: date) -> Optional[date]:
+    """上一个日历季度报告期；非标准报告期返回 None。"""
+    md = rpt.strftime("%m-%d")
+    if md == "03-31":
+        return date(rpt.year - 1, 12, 31)
+    if md == "06-30":
+        return date(rpt.year, 3, 31)
+    if md == "09-30":
+        return date(rpt.year, 6, 30)
+    if md == "12-31":
+        return date(rpt.year, 9, 30)
+    return None
+
+
+# 单季差分科目：输出字段 → (三表表名, 累计值列)
+_SQ_COLS = [
+    ("sq_net_prof", "bds_fund_income", "net_prof_pcom"),
+    ("sq_net_prof_cut", "bds_fund_income", "net_prof_pcom_cut"),
+    ("sq_revenue", "bds_fund_income", "ttl_inc_oper"),
+    ("sq_ocf", "bds_fund_cashflow", "net_cf_oper"),
+]
+
+
+def _quarterly_enrich(std_rows: list, inc_map: dict, cf_map: dict) -> dict:
+    """对标准报告期计算单季差分与单季同比（方案 v8）。
+
+    单季 = 本期累计 − 上一日历季度累计（Q1 = 累计本身）；上期行缺失 → None。
+    上期按日历推算而非「序列前一行」：中间缺报告期时差分跨度错误，宁缺毋错。
+    单季同比 = 本季 vs 去年同期单季（%），去年单季缺失或非正 → None（负基数无意义）。
+    需比展示窗口多取一年历史行，首期同比才可算——本函数对全量 std_rows 计算，
+    窗口截取由调用方完成。
+    :return: {rpt_date: {"sq_*": 元, "sq_*_yoy": %}}
+    """
+    table_maps = {"bds_fund_income": inc_map, "bds_fund_cashflow": cf_map}
+
+    def cum(table, rpt, col):
+        row = table_maps[table].get(rpt)
+        return row.get(col) if row else None
+
+    def sq_val(rpt, table, col):
+        cur = cum(table, rpt, col)
+        if cur is None:
+            return None
+        if rpt.month == 3:
+            return cur  # Q1：累计值当年起算，单季即累计本身（不可减上年年报）
+        prev_rpt = _prev_quarter(rpt)
+        prev = cum(table, prev_rpt, col) if prev_rpt else None
+        return None if prev is None else cur - prev
+
+    out = {}
+    for r in std_rows:
+        rpt = r["rpt_date"]
+        item = {}
+        for key, table, col in _SQ_COLS:
+            sq = sq_val(rpt, table, col)
+            item[key] = _r2(sq)
+            prev_sq = sq_val(_prev_year_same(rpt), table, col)
+            if sq is not None and prev_sq is not None and prev_sq > 0:
+                item[key + "_yoy"] = _f((sq - prev_sq) / prev_sq * 100)
+            else:
+                item[key + "_yoy"] = None
+        out[rpt] = item
+    return out
+
+
+def build(symbol: str, years: int = 5, freq: str = "annual",
+          db: Optional[Session] = None) -> dict:
     """一次返回财务分析 Tab 全部数据。`symbol` 是业务主键（id 会漂移，禁用 id 关联）。
 
-    默认近 5 年年报（2026-11-17 用户拍板），与路由 Query(5)、前端 years 初值三处同步。
+    freq=annual：近 N 年年报（默认 5 年，2026-11-17 用户拍板，与路由 Query(5)、
+    前端 years 初值三处同步）；freq=latest：近 12 个标准报告期（含单季差分，
+    years 被忽略，期数固定 12）。
     """
     own = db is None
     session = SessionLocal() if own else db
@@ -145,25 +234,42 @@ def build(symbol: str, years: int = 5, db: Optional[Session] = None) -> dict:
         annual_deriv = _annual_deriv(deriv_rows, years)
         annual_rpts = [r["rpt_date"] for r in annual_deriv]
 
-        # ---- 年报序列：deriv 直取 + 查询层派生（净现比/扣非占比/绝对值） ----
-        annual = []
-        for r in annual_deriv:
+        # ---- 序列：annual=近 N 年年报 / latest=近 12 个标准报告期（含单季差分） ----
+        def make_item(r):
             rpt = r["rpt_date"]
             inc = inc_map.get(rpt, {})
             cf = cf_map.get(rpt, {})
+            label, q_tag = _rpt_label(rpt)
             item = {
                 "rpt_date": rpt.isoformat(),
                 "pub_date": r["pub_date"].isoformat() if r["pub_date"] else None,
+                "rpt_label": label,
+                "q_tag": q_tag,
             }
             item.update({c: _f(r[c]) for c in DERIV_RATIO_COLS})
             npcom = inc.get("net_prof_pcom")
             item["net_cash_ratio"] = _r2(_div(cf.get("net_cf_oper"), npcom))
             item["cut_ratio"] = _f(_pct100(inc.get("net_prof_pcom_cut"), npcom))
-            item["net_prof"] = _r2(inc.get("net_prof_pcom"))
+            item["net_prof"] = _r2(npcom)
             item["net_prof_cut"] = _r2(inc.get("net_prof_pcom_cut"))
             item["revenue"] = _r2(inc.get("ttl_inc_oper"))
             item["ocf"] = _r2(cf.get("net_cf_oper"))
-            annual.append(item)
+            return item
+
+        if freq == "latest":
+            std_rows = [r for r in deriv_rows
+                        if r["rpt_date"].strftime("%m-%d") in STANDARD_MD]
+            sq_map = _quarterly_enrich(std_rows, inc_map, cf_map)
+            window = std_rows[-12:]
+            series = []
+            for r in window:
+                item = make_item(r)
+                item.update(sq_map.get(r["rpt_date"], {}))
+                series.append(item)
+            series_rpts = [r["rpt_date"] for r in window]
+        else:
+            series = [make_item(r) for r in annual_deriv]
+            series_rpts = annual_rpts
 
         # ---- 最新报告期快照卡（含 TTM 差分） ----
         # 快照报告期优先取 deriv 最新且有利润表行的报告期（快报 rpt_type=99 无三表行，
@@ -213,7 +319,7 @@ def build(symbol: str, years: int = 5, db: Optional[Session] = None) -> dict:
             "deriv_rows": len(deriv_rows),
             "three_table_rows": len(bal_map) + len(inc_map) + len(cf_map),
             "latest_rpt_date": deriv_rows[-1]["rpt_date"].isoformat() if deriv_rows else None,
-            "data_start": annual_rpts[0] if annual_rpts else None,
+            "data_start": series_rpts[0].isoformat() if series_rpts else None,
             "empty": empty,
             "empty_reason": "无财务数据落表（外盘 / 商品类标的）" if empty else None,
         }
@@ -230,16 +336,17 @@ def build(symbol: str, years: int = 5, db: Optional[Session] = None) -> dict:
                 and coverage["coverage_pct"] < 85:
             message = (f"指数成分覆盖不足（聚合 {coverage.get('agg_cons_cnt')}/快照 "
                        f"{coverage.get('snap_cons_cnt')}），财务指标系统性偏低，判读需谨慎。")
-        elif not annual:
-            message = "该标的暂无年报口径财务数据，仅展示最新报告期快照。"
+        elif not series:
+            message = "该标的暂无所选取径的财务序列，仅展示最新报告期快照。"
 
         return {
             "symbol": symbol,
             "name": info_row.name if info_row else None,
             "subject_type": subject_type,
             "years": years,
+            "freq": freq,
             "coverage": coverage,
-            "annual": annual,
+            "series": series,
             "latest": latest,
             "message": message,
         }

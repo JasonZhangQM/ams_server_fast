@@ -267,19 +267,22 @@ def get_um_market_stats(
 @router.get("/um-finance-stats")
 def get_um_finance_stats(
     symbol: str = Query(..., description="标的代码（= irs_underlying_monitor.symbol）"),
-    years: int = Query(5, ge=3, le=10, description="近 N 年年报口径，默认 5 年"),
+    years: int = Query(5, ge=3, le=10, description="近 N 年年报口径（freq=annual 时生效），默认 5 年"),
+    freq: str = Query(
+        "annual", pattern="^(annual|latest)$",
+        description="口径：annual=近N年年报 / latest=近12个标准报告期（含单季差分）"),
     db: Session = Depends(get_db),
 ):
-    """标的档案抽屉「财务分析」Tab（2026-11-17）。
+    """标的档案抽屉「财务分析」Tab（2026-11-17，方案 v8）。
 
-    一次返回三块：meta（主体类型 / 覆盖率 / 空态）、近 N 年年报序列（deriv 直取 +
-    查询层派生净现比 / 扣非占比 / 绝对值）、最新报告期快照卡（含 TTM 差分）。
-    个股与指数统一 symbol 查询零分流；外盘标的 empty=true HTTP 200，不猜数。
-    口径全在后端算，前端零计算。
+    一次返回三块：meta（主体类型 / 覆盖率 / 空态）、财务序列 series（口径全在后端
+    算好：annual=近 N 年年报；latest=近 12 个标准报告期，含单季差分与单季同比）、
+    最新报告期快照卡（含 TTM 差分）。个股与指数统一 symbol 查询零分流；
+    外盘标的 empty=true HTTP 200，不猜数。前端零计算。
 
     ⚠️ 关联键一律用 symbol：主表 id 会漂移。
     """
-    return service.um_finance_stats.build(symbol, years, db)
+    return service.um_finance_stats.build(symbol, years, freq, db)
 
 
 @router.post("/um-finance-sync")
