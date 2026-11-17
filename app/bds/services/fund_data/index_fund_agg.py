@@ -13,17 +13,26 @@
   （成员当时均无财报）同样不落行
 - 幂等：每次对该指数全历史重算覆盖，唯一键 (symbol, rpt_date)
 
+财务指标派生（2026-11-17 增）：
+- 三表落库后，从库内该指数聚合行（balance+income）派生 bds_finance_deriv 指标
+  （整体法，比率类 ×100 存百分比，与 gm 个股行口径一致），sec_type='index' 幂等落库；
+  deriv 无成分股可加总的字段（roe_weight 加权口径、ebitda_toi 无折旧摊销科目）落 NULL
+- deriv 全历史重算、不受 start_date 限制：派生自三表聚合行，确定性可重算，
+  避免 start_date 场景下平均类/YoY 找不到上年参考行的边界问题
+
 性能约定：每指数每表一次 IN 查询（uk(symbol, rpt_date) 支撑），pandas 内存聚合，
 避免逐 symbol 查询；量级每指数每表约 80 行聚合结果。
 """
 import logging
 from bisect import bisect_right
+from datetime import date
 
 import pandas as pd
 from sqlalchemy import Numeric
 
 from server_fast.common.db import SessionLocal
 from server_fast.app.bds.models import (
+    FinanceDeriv,
     FundBalance,
     FundCashflow,
     FundIncome,
@@ -32,7 +41,8 @@ from server_fast.app.bds.models import (
 
 logger = logging.getLogger("uvicorn.error")
 
-# 参与聚合的三张财务报表（FinanceDeriv 不动：比率类指标逐股求和无业务意义）
+# 参与聚合的三张财务报表（FinanceDeriv 不做成分股加总：比率类指标逐股求和无业务意义，
+# 指数行由 _compute_deriv_rows 从三表聚合行整体法派生）
 AGG_MODELS = [FundBalance, FundIncome, FundCashflow]
 
 TABLE_LABELS = {
@@ -128,8 +138,12 @@ def _compute_index_rows(df, numeric_cols, snap_map, snap_dates):
     return computed, reasons
 
 
-def _upsert_index_rows(db, model, index_code, computed):
-    """按 (symbol=index_code, rpt_date) 幂等覆盖写入聚合行，返回写入行数。"""
+def _upsert_index_rows(db, model, index_code, computed, coverage=None):
+    """按 (symbol=index_code, rpt_date) 幂等覆盖写入聚合行，返回写入行数。
+
+    coverage=(snap_cons_cnt, agg_cons_cnt) 仅三表聚合行传入；FinanceDeriv 派生行
+    无覆盖率两列，传 None（不能给没有这两列的模型传非 None，否则字段不存在）。
+    """
     saved = 0
     for row in computed:
         values = row["values"]
@@ -138,26 +152,29 @@ def _upsert_index_rows(db, model, index_code, computed):
             .filter(model.symbol == index_code, model.rpt_date == row["rpt_date"])
             .first()
         )
+        # 元数据 kwarg 条件构造：coverage 两列是三表专有，FinanceDeriv 没有
+        meta = {
+            "symbol": index_code,
+            "rpt_date": row["rpt_date"],
+            "pub_date": row["pub_date"],
+            "rpt_type": row["rpt_type"],
+            "data_type": None,
+            "sec_type": "index",
+        }
+        if coverage:
+            meta["snap_cons_cnt"] = coverage[0]
+            meta["agg_cons_cnt"] = coverage[1]
         if existing is None:
-            db.add(model(
-                symbol=index_code,
-                rpt_date=row["rpt_date"],
-                pub_date=row["pub_date"],
-                rpt_type=row["rpt_type"],
-                data_type=None,
-                sec_type="index",
-                snap_cons_cnt=row["snap_cons_cnt"],
-                agg_cons_cnt=row["agg_cons_cnt"],
-                **values,
-            ))
+            db.add(model(**meta, **values))
         else:
             # 全历史重算口径：无条件覆盖（聚合结果由成员与数据确定，非增量追加）
             existing.pub_date = row["pub_date"]
             existing.rpt_type = row["rpt_type"]
             existing.data_type = None
             existing.sec_type = "index"
-            existing.snap_cons_cnt = row["snap_cons_cnt"]
-            existing.agg_cons_cnt = row["agg_cons_cnt"]
+            if coverage:
+                existing.snap_cons_cnt = coverage[0]
+                existing.agg_cons_cnt = coverage[1]
             for col, val in values.items():
                 setattr(existing, col, val)
         saved += 1
@@ -165,16 +182,148 @@ def _upsert_index_rows(db, model, index_code, computed):
     return saved
 
 
+# ==================== 财务指标派生（整体法） ====================
+#
+# 由三表聚合行派生 bds_finance_deriv 指数行。设计取舍：
+# - 比率类 ×100 存百分比、周转天数存天，与 gm 个股行单位一致，前端展示零分支
+# - gm 专属口径落 NULL：roe_weight（按资本存续时间加权，指数层面无法复现）、
+#   ebitda_toi（三表无折旧摊销科目）
+# - 近似口径：roic/ebit_toi 的 EBIT≈利润总额+财务费用（利息费用以财务费用近似）、
+#   投入资本≈短期借款+长期借款+归母权益（无应付债券科目）；acct_rcv_turnover_days
+#   仅含应收账款（无应收票据科目）
+# - 依赖上年参考行的指标（roe_avg/周转类/YoY）：期初取上年末(12-31)聚合行、
+#   上年同期取上年同月日聚合行，缺失落 NULL（各指数起始后的第一年受影响）
+
+
+def _div(numer, denom):
+    """None 安全除法：分母为 0/None 返回 None。"""
+    if numer is None or not denom:
+        return None
+    return numer / denom
+
+
+def _pct(numer, denom):
+    """None 安全除法后 ×100（比率类存百分比，与 gm 个股口径一致）。"""
+    val = _div(numer, denom)
+    return val * 100 if val is not None else None
+
+
+def _add(*vals):
+    """None 安全求和：任一项为 None 返回 None。"""
+    if any(v is None for v in vals):
+        return None
+    return sum(vals)
+
+
+def _sub(a, b):
+    """None 安全减法。"""
+    if a is None or b is None:
+        return None
+    return a - b
+
+
+def _avg(cur, prev):
+    """None 安全平均（期初+期末)/2。"""
+    if cur is None or prev is None:
+        return None
+    return (cur + prev) / 2
+
+
+def _yoy(cur, prev):
+    """None 安全同比增长率（×100 存百分比）。"""
+    if cur is None or not prev:
+        return None
+    return (cur / prev - 1) * 100
+
+
+def _load_index_agg_rows(db, model, index_code):
+    """读回该指数已落库的三表聚合行（sec_type='index'），供 deriv 派生。
+
+    :return: {rpt_date: {"pub_date", "rpt_type", "values": {科目: 值}}}；无行返回 {}
+    """
+    numeric_cols = [c.name for c in model.__table__.columns if isinstance(c.type, Numeric)]
+    rows = db.query(
+        model.rpt_date, model.pub_date, model.rpt_type,
+        *[getattr(model, c) for c in numeric_cols],
+    ).filter(model.symbol == index_code, model.sec_type == "index").all()
+    by_rpt = {}
+    for rpt, pub, rtype, *vals in rows:
+        if rpt is None:
+            continue
+        by_rpt[rpt] = {"pub_date": pub, "rpt_type": rtype, "values": dict(zip(numeric_cols, vals))}
+    return by_rpt
+
+
+def _compute_deriv_rows(bal_by_rpt, inc_by_rpt):
+    """由聚合行派生财务指标（纯计算，不写库），返回 computed 行列表。
+
+    以 income ∪ balance 的报告期为驱动；仅两表均缺某科目时对应指标落 NULL。
+    行结构同三表聚合：{"rpt_date", "pub_date", "rpt_type", "values"}。
+    """
+    computed = []
+    for rpt in sorted(set(bal_by_rpt) | set(inc_by_rpt)):
+        bal = bal_by_rpt.get(rpt, {}).get("values", {})
+        inc = inc_by_rpt.get(rpt, {}).get("values", {})
+        bal_prev = bal_by_rpt.get(date(rpt.year - 1, 12, 31), {}).get("values", {})
+        inc_prev = inc_by_rpt.get(date(rpt.year - 1, rpt.month, rpt.day), {}).get("values", {})
+
+        # EBIT 近似：利润总额 + 财务费用；投入资本近似：有息负债(短借+长借) + 归母权益
+        ebit = _add(inc.get("ttl_prof"), inc.get("exp_fin"))
+        icap = _add(bal.get("sht_ln"), bal.get("lt_ln"), bal.get("ttl_eqy_pcom"))
+        # 平均类指标的分母参考值（期初=上年末聚合行）
+        eqy_avg = _avg(bal.get("ttl_eqy_pcom"), bal_prev.get("ttl_eqy_pcom"))
+        ast_avg = _avg(bal.get("ttl_ast"), bal_prev.get("ttl_ast"))
+        rcv_avg = _avg(bal.get("acct_rcv"), bal_prev.get("acct_rcv"))
+        invt_avg = _avg(bal.get("invt"), bal_prev.get("invt"))
+
+        values = {
+            "roe": _pct(inc.get("net_prof_pcom"), bal.get("ttl_eqy_pcom")),
+            # gm 加权 ROE 按资本存续时间加权，指数层面无法复现，恒 NULL
+            "roe_weight": None,
+            "roe_avg": _pct(inc.get("net_prof_pcom"), eqy_avg),
+            "roa": _pct(inc.get("net_prof"), bal.get("ttl_ast")),
+            "roic": _pct(ebit, icap),
+            "sale_gpm": _pct(_sub(inc.get("inc_oper"), inc.get("cost_oper")), inc.get("inc_oper")),
+            "sale_npm": _pct(inc.get("net_prof"), inc.get("inc_oper")),
+            # 三表无折旧摊销科目，EBITDA 不可算，恒 NULL
+            "ebitda_toi": None,
+            "ebit_toi": _pct(ebit, inc.get("ttl_inc_oper")),
+            "ast_liab_rate": _pct(bal.get("ttl_liab"), bal.get("ttl_ast")),
+            "curr_rate": _pct(bal.get("ttl_cur_ast"), bal.get("ttl_cur_liab")),
+            "quick_rate": _pct(_sub(bal.get("ttl_cur_ast"), bal.get("invt")), bal.get("ttl_cur_liab")),
+            "liab_eqy_rate": _pct(bal.get("ttl_liab"), bal.get("ttl_eqy")),
+            "ttl_ast_turnover_rate": _pct(inc.get("ttl_inc_oper"), ast_avg),
+            # 360 × 平均应收账款 / 营业收入（天；无应收票据科目，口径近似）
+            "acct_rcv_turnover_days": _div(rcv_avg * 360 if rcv_avg is not None else None, inc.get("inc_oper")),
+            "inv_turnover_days": _div(invt_avg * 360 if invt_avg is not None else None, inc.get("cost_oper")),
+            "net_prof_pcom_yoy": _yoy(inc.get("net_prof_pcom"), inc_prev.get("net_prof_pcom")),
+            "ttl_inc_oper_yoy": _yoy(inc.get("ttl_inc_oper"), inc_prev.get("ttl_inc_oper")),
+            "net_prof_yoy": _yoy(inc.get("net_prof"), inc_prev.get("net_prof")),
+            "ttl_asset_yoy": _yoy(bal.get("ttl_ast"), bal_prev.get("ttl_ast")),
+        }
+
+        pubs = [m["pub_date"] for m in (bal_by_rpt.get(rpt), inc_by_rpt.get(rpt)) if m and m["pub_date"]]
+        rtypes = [m["rpt_type"] for m in (bal_by_rpt.get(rpt), inc_by_rpt.get(rpt)) if m and m["rpt_type"]]
+        computed.append({
+            "rpt_date": rpt,
+            "pub_date": max(pubs) if pubs else None,
+            "rpt_type": rtypes[0] if rtypes else None,
+            "values": values,
+        })
+    return computed
+
+
 def aggregate_index_fund(index_codes, start_date=None):
-    """对每个指数聚合三大财务报表（纯库内计算，不调 gm）。
+    """对每个指数聚合三大财务报表并派生财务指标（纯库内计算，不调 gm）。
 
     单指数失败不中断后续指数。
 
     :param index_codes: 指数代码列表
     :param start_date: 重算起点（date，可选）。不传=对该指数全历史重算覆盖；
-        传入=仅聚合该日及之后的报告期，更早报告期的已有聚合行保持不动
+        传入=仅三表聚合该日及之后的报告期，更早报告期的已有聚合行保持不动；
+        deriv 派生始终全历史重算
     :return: (steps, errors)
-        steps: {index_code: 三表合计落库行数}，-1 表示该指数整体失败
+        steps: {index_code: 三表+deriv 合计落库行数}，-1 表示该指数整体失败
         errors: {index_code: 失败/跳过原因}，值截断 500 字符
     """
     steps, errors = {}, {}
@@ -190,9 +339,11 @@ def aggregate_index_fund(index_codes, start_date=None):
 
 
 def _aggregate_one_index(index_code, errors, start_date=None):
-    """单指数聚合三张表，返回合计落库行数；无快照/跳过原因写入 errors[index_code]。
+    """单指数聚合三张表并派生财务指标，返回合计落库行数。
 
-    start_date（可选）：仅聚合该日及之后的报告期，更早报告期不重算不覆盖。
+    无快照/跳过原因写入 errors[index_code]。
+    start_date（可选）：仅聚合该日及之后的报告期，更早报告期不重算不覆盖；
+    deriv 派生不受 start_date 限制（确定性派生自库内聚合行，全历史重算）。
     """
     with SessionLocal() as db:
         snap = _load_snapshot_map(db, index_code)
@@ -214,6 +365,12 @@ def _aggregate_one_index(index_code, errors, start_date=None):
             total_saved += _upsert_index_rows(db, model, index_code, computed)
             if reasons:
                 reasons_by_model[model] = reasons
+        # ---- 财务指标派生（整体法）：三表落库后从库内聚合行重算，幂等覆盖 ----
+        deriv_rows = _compute_deriv_rows(
+            _load_index_agg_rows(db, FundBalance, index_code),
+            _load_index_agg_rows(db, FundIncome, index_code),
+        )
+        total_saved += _upsert_index_rows(db, FinanceDeriv, index_code, deriv_rows)
     if reasons_by_model:
         errors[index_code] = "；".join(
             f"{TABLE_LABELS[m]}：{'；'.join(rs)}" for m, rs in reasons_by_model.items()

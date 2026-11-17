@@ -1045,8 +1045,8 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
     """通用财务报表查询（FundBalance/FundIncome/FundCashflow/FinanceDeriv 共用）。
 
     过滤规则：symbol 精确匹配、rpt_type 精确匹配、rpt_date 起始日；
-    sec_type 可选精确匹配（stock=个股 / index=指数成分股聚合行），仅三张财务报表
-    端点暴露该参数（finance-derivs 无此列，恒为 None）。
+    sec_type 可选精确匹配（stock=个股 / index=指数成分股聚合行），四端点均暴露
+    该参数（不传=不过滤；指数行由聚合同步写入）。
     排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
 
     分页采用「先取 id 再回表」两步：
@@ -1213,12 +1213,17 @@ def list_finance_derivs(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
     start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    sec_type: Optional[str] = Query(
+        default=None,
+        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤（默认看个股）",
+    ),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """查询财务指标数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
-    return _query_fund_reports(FinanceDeriv, db, symbol, rpt_type, start_date, limit, offset)
+    return _query_fund_reports(FinanceDeriv, db, symbol, rpt_type, start_date, limit, offset,
+                               sec_type=sec_type)
 
 
 @router.post("/sync/daily-valuation")

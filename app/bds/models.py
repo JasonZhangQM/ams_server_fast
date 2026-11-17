@@ -575,6 +575,7 @@ class FinanceDeriv(Base, BaseModel):
     rpt_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="报告日期")
     rpt_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="报表类型")
     data_type: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="数据类型")
+    sec_type: Mapped[str] = mapped_column(String(16), nullable=False, default="stock", server_default="stock", comment="主体类型：stock=个股，index=指数")
 
     # ---- 收益率字段 ----
     roe: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="净资产收益率ROE(摊薄)")

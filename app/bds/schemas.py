@@ -243,6 +243,7 @@ class FinanceDerivOut(BaseModel):
     rpt_date: Optional[date] = Field(default=None, description="报告日期")
     rpt_type: Optional[int] = Field(default=None, description="报表类型")
     data_type: Optional[int] = Field(default=None, description="数据类型")
+    sec_type: str = Field(description="主体类型：stock=个股，index=指数")
     # ---- 收益率字段 ----
     roe: Optional[Decimal] = Field(default=None, description="净资产收益率ROE(摊薄)")
     roe_weight: Optional[Decimal] = Field(default=None, description="净资产收益率ROE(加权)")
