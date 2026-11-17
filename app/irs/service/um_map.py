@@ -140,20 +140,29 @@ def subject_exposure_expr() -> str:
     )
 
 
-def subject_exposure_map(db: Session) -> dict[str, float]:
-    """全标的敞口合计 map（列表回填用），与 subject_exposure_expr 同一口径。"""
+def subject_group_stats_map(db: Session) -> dict[str, dict[str, float | None]]:
+    """全标的 group-symbols 聚合 map（列表回填用），与 subject_exposure_expr 同一口径。
+
+    一次查询同时聚合三项：风险敞口（SUM(risk_exposure)）、当前市值（SUM(value_total)）、
+    浮动盈亏（SUM(pf_total)，账面口径与 /bills/group-symbols 页面同源）；
+    各字段独立判 NULL——某项全为 NULL 时该项为 None，不伪造 0。
+    """
     sql = text(f"""
         SELECT COALESCE(g.underlying_symbol, g.symbol) AS um_symbol,
-               SUM(g.risk_exposure) AS exposure
+               SUM(g.risk_exposure) AS exposure,
+               SUM(g.value_total) AS value_total,
+               SUM(g.pf_total) AS pf_total
         FROM bills_group_symbol g
         WHERE {attachable_sql('g')}
         GROUP BY COALESCE(g.underlying_symbol, g.symbol)
     """)
-    return {
-        r["um_symbol"]: round(float(r["exposure"]), 2)
-        for r in db.execute(sql).mappings().all()
-        if r["exposure"] is not None
-    }
+    out: dict[str, dict[str, float | None]] = {}
+    for r in db.execute(sql).mappings().all():
+        out[r["um_symbol"]] = {
+            k: (round(float(r[k]), 2) if r[k] is not None else None)
+            for k in ("exposure", "value_total", "pf_total")
+        }
+    return out
 
 
 def groups_of(

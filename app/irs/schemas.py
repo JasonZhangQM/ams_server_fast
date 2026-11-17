@@ -91,6 +91,8 @@ class UnderlyingMonitorOut(BaseModel):
     next_review: Optional[date] = None         # 下次复核
     plan_active: Optional[int] = None          # 生效剧本数
     risk_exposure: Optional[float] = None      # 标的项下持仓风险敞口合计（bills_group_symbol 按归属汇总，NULL=未设置）
+    value_total: Optional[float] = None        # 标的项下持仓市值合计（bills_group_symbol 按归属汇总 SUM(value_total)，NULL=无数据）
+    pf_total: Optional[float] = None           # 标的项下浮动盈亏合计（bills_group_symbol 按归属汇总 SUM(pf_total)，账面口径）
     id: int                                    # 主键
     create_time: datetime                      # 创建时间
     update_time: datetime                      # 更新时间

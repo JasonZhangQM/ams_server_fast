@@ -196,12 +196,15 @@ def _enrich_underlying_monitors(db: Session, items: list) -> list:
     except Exception:
         pct_map = {}
 
-    # 标的项下持仓风险敞口合计（与 /irs/simulate subject_exposure 同源、同一 SQL 口径）
-    exposure_map = service.um_map.subject_exposure_map(db)
+    # 标的项下持仓聚合（敞口 / 市值 / 浮动盈亏，与 /irs/simulate subject_exposure 同源、同一 SQL 口径）
+    stats_map = service.um_map.subject_group_stats_map(db)
 
     for it in items:
         s = it["symbol"]
-        it["risk_exposure"] = exposure_map.get(s)
+        st = stats_map.get(s) or {}
+        it["risk_exposure"] = st.get("exposure")
+        it["value_total"] = st.get("value_total")
+        it["pf_total"] = st.get("pf_total")
         it["pp_effective_date"] = cur_date.get(s)
         it["pp_version_count"] = ver_count.get(s, 0)
         it["pp_pending_date"] = pend.get(s)
