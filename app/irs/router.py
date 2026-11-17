@@ -264,6 +264,37 @@ def get_um_market_stats(
     return service.um_market_stats.build(symbol, range_, metric, db)
 
 
+@router.get("/um-finance-stats")
+def get_um_finance_stats(
+    symbol: str = Query(..., description="标的代码（= irs_underlying_monitor.symbol）"),
+    years: int = Query(5, ge=3, le=10, description="近 N 年年报口径，默认 5 年"),
+    db: Session = Depends(get_db),
+):
+    """标的档案抽屉「财务分析」Tab（2026-11-17）。
+
+    一次返回三块：meta（主体类型 / 覆盖率 / 空态）、近 N 年年报序列（deriv 直取 +
+    查询层派生净现比 / 扣非占比 / 绝对值）、最新报告期快照卡（含 TTM 差分）。
+    个股与指数统一 symbol 查询零分流；外盘标的 empty=true HTTP 200，不猜数。
+    口径全在后端算，前端零计算。
+
+    ⚠️ 关联键一律用 symbol：主表 id 会漂移。
+    """
+    return service.um_finance_stats.build(symbol, years, db)
+
+
+@router.post("/um-finance-sync")
+def sync_um_finance(
+    symbol: str = Query(..., description="标的代码；个股走 gm 4 函数链，指数走纯库内聚合"),
+):
+    """按标的触发财务数据同步（2026-11-17）。
+
+    主体类型在后端判定：指数调 aggregate_index_fund（纯库内，秒级）；
+    个股依次调 bds 三表 + deriv 的 gm 同步函数（函数内自带 30s 超时保护）。
+    同步接口（与 /irs/sync/{target} 同款返回结构），前端 executeSync 直接复用。
+    """
+    return service.um_finance_stats.sync(symbol)
+
+
 @router.get("/underlying-monitors", response_model=PageResponse[UnderlyingMonitorOut])
 def list_underlying_monitors(
     symbol: Optional[str] = Query(None, description="代码精确匹配"),
