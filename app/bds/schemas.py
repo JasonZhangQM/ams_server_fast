@@ -901,15 +901,6 @@ class OptionMarketOut(BaseModel):
     update_time: datetime = Field(description="更新时间")
 
 
-class OptionSyncPlanOut(BaseModel):
-    """同步前置确认信息（点「行情同步」时弹窗用）。"""
-
-    symbol_count: int = Field(description="启用配置的合约张数")
-    group_count: int = Field(description="品种×到期月组合数（= 接口请求次数）")
-    option_names: list[str] = Field(description="涉及的期权品种")
-    groups: list[dict] = Field(description="组合明细 [{option_name, end_month}]")
-
-
 class OptionMarketUpdate(BaseModel):
     """手工修改期权行情字段（PUT /bds/option-market/{id}）。
 

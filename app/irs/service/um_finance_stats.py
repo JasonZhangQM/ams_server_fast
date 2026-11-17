@@ -449,7 +449,7 @@ def sync(symbol: str) -> dict:
 
     ok = all(r["result"] is not None for r in steps) and not errors
     status = "success" if ok else "error"
-    mode = "指数聚合" if subject_type == "index" else "个股 gm 链"
+    mode = "指数" if subject_type == "index" else "个股 gm 链"
     msg = (f"同步完成：{symbol}（{mode}）" if ok
            else f"同步完成但有失败项：{symbol}（{mode}）；" + "；".join(errors))
     return {

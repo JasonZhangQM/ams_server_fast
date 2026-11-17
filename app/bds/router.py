@@ -86,7 +86,6 @@ from server_fast.app.bds.schemas import (
     OptionInfoProductOut,
     OptionMarketOut,
     OptionMarketUpdate,
-    OptionSyncPlanOut,
     SymbolInfoOut,
     TradeDateOut,
     ValuationPctSubjectOut,
@@ -567,7 +566,8 @@ def list_history_markets(
     keyword: Optional[str] = Query(None, description="代码 / 名称模糊搜索（远程搜索用）"),
     sec_type: Optional[str] = Query(
         None, pattern="^(stock|index)$", description="标的类型筛选: stock=个股/index=指数，不传=全部"),
-    start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    start_date: Optional[str] = Query(None, description="交易期间起始日 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="交易期间截止日 YYYY-MM-DD"),
     limit: int = Query(100, ge=1),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -602,8 +602,10 @@ def list_history_markets(
         query = query.filter(HistoryMarket.sec_type == "stock")
     if start_date:
         query = query.filter(HistoryMarket.trade_date >= start_date)
+    if end_date:
+        query = query.filter(HistoryMarket.trade_date <= end_date)
     total, total_estimated = resolve_total(
-        db, query, HistoryMarket, bool(symbol or keyword or sec_type or start_date))
+        db, query, HistoryMarket, bool(symbol or keyword or sec_type or start_date or end_date))
     items = (
         query.order_by(HistoryMarket.trade_date.desc(), HistoryMarket.id.desc())
         .offset(offset).limit(limit).all()
@@ -1033,6 +1035,9 @@ def sync_fund_balance(
 
     默认先比对库内该标的 MAX(rpt_date) 与 bds_symbol_info.latest_rpt_date，
     已追平则判定数据已最新，不调 gm 直接返回 no_data；force=True 可绕过该判断。
+
+    🔴 批量同步落点：sync_runner 逐标的 POST 本端点（table='fund-balance'），
+    前端列表页已无同步入口（统一走批量同步），但本端点不可删除。
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
@@ -1041,10 +1046,10 @@ def sync_fund_balance(
 
 
 def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit, offset,
-                        sec_type=None):
+                        sec_type=None, end_date=None):
     """通用财务报表查询（FundBalance/FundIncome/FundCashflow/FinanceDeriv 共用）。
 
-    过滤规则：symbol 精确匹配、rpt_type 精确匹配、rpt_date 起始日；
+    过滤规则：symbol 精确匹配、rpt_type 精确匹配、rpt_date 起止日（报告期间）；
     sec_type 可选精确匹配（stock=个股 / index=指数成分股聚合行），四端点均暴露
     该参数（不传=不过滤；指数行由聚合同步写入）。
     排序规则：rpt_date 降序，同 rpt_date 按 pub_date 降序。
@@ -1067,8 +1072,8 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
 
     ⚠️ 无筛选时 total 读 bds_table_stat 缓存（财务四表与两张日频表同属批量同步
     TABLES，收尾 targets=tables 自动重算），缓存缺失/过旧回落 information_schema
-    估算并置 total_is_estimated=true；有任一筛选（symbol / rpt_type / start_date）
-    一律走精确 COUNT(*)。offset 受 MAX_LIST_OFFSET 护栏限制，前端
+    估算并置 total_is_estimated=true；有任一筛选（symbol / rpt_type / start_date /
+    end_date）一律走精确 COUNT(*)。offset 受 MAX_LIST_OFFSET 护栏限制，前端
     setPaginationTotal 同步截断可达页数并提示「请用筛选缩小范围」。
     """
     _guard_list_offset(offset)
@@ -1079,10 +1084,12 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
         query = query.filter(model.rpt_type == rpt_type)
     if start_date:
         query = query.filter(model.rpt_date >= start_date)
+    if end_date:
+        query = query.filter(model.rpt_date <= end_date)
     if sec_type:
         query = query.filter(model.sec_type == sec_type)
     # rpt_type 用 is not None 判（与过滤条件一致），避免将来出现 0 值时误判成「无筛选」
-    has_filter = bool(symbol or rpt_type is not None or start_date or sec_type)
+    has_filter = bool(symbol or rpt_type is not None or start_date or end_date or sec_type)
     total, total_estimated = resolve_total(db, query, model, has_filter)
 
     id_rows = (
@@ -1110,18 +1117,19 @@ def _query_fund_reports(model, db: Session, symbol, rpt_type, start_date, limit,
 def list_fund_balances(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
-    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    start_date: Optional[date] = Query(default=None, description="报告期间起始日"),
+    end_date: Optional[date] = Query(default=None, description="报告期间截止日"),
     sec_type: Optional[str] = Query(
         default=None,
-        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤（默认看个股）",
+        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤",
     ),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询资产负债表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
+    """查询资产负债表数据，支持代码精确匹配、报表类型和报告期间筛选。"""
     return _query_fund_reports(FundBalance, db, symbol, rpt_type, start_date, limit, offset,
-                               sec_type=sec_type)
+                               sec_type=sec_type, end_date=end_date)
 
 
 @router.post("/sync/fund-income")
@@ -1133,6 +1141,9 @@ def sync_fund_income(
 
     默认先比对库内该标的 MAX(rpt_date) 与 bds_symbol_info.latest_rpt_date，
     已追平则判定数据已最新，不调 gm 直接返回 no_data；force=True 可绕过该判断。
+
+    🔴 批量同步落点：sync_runner 逐标的 POST 本端点（table='fund-income'），
+    前端列表页已无同步入口（统一走批量同步），但本端点不可删除。
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
@@ -1144,18 +1155,19 @@ def sync_fund_income(
 def list_fund_incomes(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
-    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    start_date: Optional[date] = Query(default=None, description="报告期间起始日"),
+    end_date: Optional[date] = Query(default=None, description="报告期间截止日"),
     sec_type: Optional[str] = Query(
         default=None,
-        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤（默认看个股）",
+        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤",
     ),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询利润表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
+    """查询利润表数据，支持代码精确匹配、报表类型和报告期间筛选。"""
     return _query_fund_reports(FundIncome, db, symbol, rpt_type, start_date, limit, offset,
-                               sec_type=sec_type)
+                               sec_type=sec_type, end_date=end_date)
 
 
 @router.post("/sync/fund-cashflow")
@@ -1167,6 +1179,9 @@ def sync_fund_cashflow(
 
     默认先比对库内该标的 MAX(rpt_date) 与 bds_symbol_info.latest_rpt_date，
     已追平则判定数据已最新，不调 gm 直接返回 no_data；force=True 可绕过该判断。
+
+    🔴 批量同步落点：sync_runner 逐标的 POST 本端点（table='fund-cashflow'），
+    前端列表页已无同步入口（统一走批量同步），但本端点不可删除。
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
@@ -1178,18 +1193,19 @@ def sync_fund_cashflow(
 def list_fund_cashflows(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
-    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    start_date: Optional[date] = Query(default=None, description="报告期间起始日"),
+    end_date: Optional[date] = Query(default=None, description="报告期间截止日"),
     sec_type: Optional[str] = Query(
         default=None,
-        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤（默认看个股）",
+        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤",
     ),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询现金流量表数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
+    """查询现金流量表数据，支持代码精确匹配、报表类型和报告期间筛选。"""
     return _query_fund_reports(FundCashflow, db, symbol, rpt_type, start_date, limit, offset,
-                               sec_type=sec_type)
+                               sec_type=sec_type, end_date=end_date)
 
 
 @router.post("/sync/finance-deriv")
@@ -1201,6 +1217,9 @@ def sync_finance_deriv(
 
     默认先比对库内该标的 MAX(rpt_date) 与 bds_symbol_info.latest_rpt_date，
     已追平则判定数据已最新，不调 gm 直接返回 no_data；force=True 可绕过该判断。
+
+    🔴 批量同步落点：sync_runner 逐标的 POST 本端点（table='finance-deriv'），
+    前端列表页已无同步入口（统一走批量同步），但本端点不可删除。
     """
     if not symbol:
         return {"status": "error", "message": "symbol 不能为空"}
@@ -1212,18 +1231,19 @@ def sync_finance_deriv(
 def list_finance_derivs(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
     rpt_type: Optional[int] = Query(default=None, description="报表类型 1/6/9/12"),
-    start_date: Optional[date] = Query(default=None, description="报告日期起始日"),
+    start_date: Optional[date] = Query(default=None, description="报告期间起始日"),
+    end_date: Optional[date] = Query(default=None, description="报告期间截止日"),
     sec_type: Optional[str] = Query(
         default=None,
-        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤（默认看个股）",
+        description="主体类型筛选: stock=个股 / index=指数成分股聚合；不传=不过滤",
     ),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """查询财务指标数据，支持代码精确匹配、报表类型和报告日期起始日筛选。"""
+    """查询财务指标数据，支持代码精确匹配、报表类型和报告期间筛选。"""
     return _query_fund_reports(FinanceDeriv, db, symbol, rpt_type, start_date, limit, offset,
-                               sec_type=sec_type)
+                               sec_type=sec_type, end_date=end_date)
 
 
 @router.post("/sync/daily-valuation")
@@ -1242,7 +1262,8 @@ def sync_daily_valuation(symbol: str = Query(..., description="股票代码，�
 @router.get("/daily-valuations", response_model=PageResponse[DailyValuationOut])
 def list_daily_valuations(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
-    start_date: Optional[date] = Query(default=None, description="交易日期起始日"),
+    start_date: Optional[date] = Query(default=None, description="交易期间起始日"),
+    end_date: Optional[date] = Query(default=None, description="交易期间截止日"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -1264,7 +1285,9 @@ def list_daily_valuations(
         query = query.filter(DailyValuation.symbol == symbol)
     if start_date:
         query = query.filter(DailyValuation.trade_date >= start_date)
-    total, total_estimated = resolve_total(db, query, DailyValuation, bool(symbol or start_date))
+    if end_date:
+        query = query.filter(DailyValuation.trade_date <= end_date)
+    total, total_estimated = resolve_total(db, query, DailyValuation, bool(symbol or start_date or end_date))
     items = (
         query.order_by(DailyValuation.trade_date.desc())
         .offset(offset).limit(limit).all()
@@ -1294,7 +1317,8 @@ def sync_daily_mktvalue(symbol: str = Query(..., description="股票代码，精
 @router.get("/daily-mktvalues", response_model=PageResponse[DailyMktvalueOut])
 def list_daily_mktvalues(
     symbol: Optional[str] = Query(default=None, description="股票代码精确匹配"),
-    start_date: Optional[date] = Query(default=None, description="交易日期起始日"),
+    start_date: Optional[date] = Query(default=None, description="交易期间起始日"),
+    end_date: Optional[date] = Query(default=None, description="交易期间截止日"),
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -1313,7 +1337,9 @@ def list_daily_mktvalues(
         query = query.filter(DailyMktvalue.symbol == symbol)
     if start_date:
         query = query.filter(DailyMktvalue.trade_date >= start_date)
-    total, total_estimated = resolve_total(db, query, DailyMktvalue, bool(symbol or start_date))
+    if end_date:
+        query = query.filter(DailyMktvalue.trade_date <= end_date)
+    total, total_estimated = resolve_total(db, query, DailyMktvalue, bool(symbol or start_date or end_date))
     items = (
         query.order_by(DailyMktvalue.trade_date.desc())
         .offset(offset).limit(limit).all()
@@ -3406,6 +3432,9 @@ def list_option_market(
     trade_date: Optional[date] = Query(
         default=None,
         description="**起始**行情日期（含当日，筛到最新）；不传=全部历史，按交易日倒序"),
+    trade_date_end: Optional[date] = Query(
+        default=None,
+        description="**截止**行情日期（含当日，2026-11-17 加，与起始日组成交易期间）；不传=筛到最新"),
     latest_only: bool = Query(
         default=False,
         description="只取当前筛选范围内最新交易日的快照（T 型报价页用，品种级最新）"),
@@ -3415,9 +3444,10 @@ def list_option_market(
 ):
     """分页查询期权行情。
 
-    **日期口径（2026-10-27 改）**：
+    **日期口径（2026-10-27 改，2026-11-17 加截止日）**：
     - 不传 `trade_date` ⇒ 返回**全部历史**（按 `trade_date` 倒序，最新日在前）；
     - 传 `trade_date` ⇒ 它是**起始日**（`>=`），从该日起一直筛到最新；
+    - 传 `trade_date_end` ⇒ **截止日**（`<=`），与起始日组成闭区间（前端「交易期间」）；
     - `latest_only=true` ⇒ 在上述筛选之上只保留**当前筛选范围内最新交易日**的快照
       （供 T 型报价页取「各品种自己的最新」，与全局最新日解耦）。
 
@@ -3483,6 +3513,10 @@ def list_option_market(
     #    —— 兜底会让「全部历史」永远无法通过接口表达（日期为空即被强制收窄）。
     if trade_date is not None:
         query = query.filter(OptionMarket.trade_date >= trade_date)
+    # 截止日（2026-11-17 加）：前端「交易期间」区间选择器的右端点，闭区间；
+    # 与起始日独立可选——只填截止日 = 从全部历史筛到该日
+    if trade_date_end is not None:
+        query = query.filter(OptionMarket.trade_date <= trade_date_end)
 
     # latest_only：只取「当前筛选范围内」最新交易日的快照（2026-10-29 加，供 T 型报价页）。
     # 为什么不用全局 latest-date 端点：某品种当日漏同步时（如 au 已同步、ETF 停在昨日），
@@ -3497,7 +3531,8 @@ def list_option_market(
     # latest_only 把查询收窄到「当前范围内最新日」，此时绝不能读全表总数缓存；
     # 其余任一筛选同理，只有完全无筛选才走 bds_table_stat。
     has_filter = bool(und_key or option_name or end_month or option_type
-                      or contract_id or trade_date is not None or latest_only)
+                      or contract_id or trade_date is not None
+                      or trade_date_end is not None or latest_only)
     total, total_estimated = resolve_total(db, query, OptionMarket, has_filter)
     rows = (
         # trade_date 必须排最前：跨日混排先按日分组，最新在前
@@ -3628,12 +3663,6 @@ def get_option_market_filters(db: Session = Depends(get_db)):
         "end_months": end_months,
         "und_keys": sorted({m["und_key"] for m in Config.option_varieties()}),
     }
-
-
-@router.get("/option-market/config-count", response_model=OptionSyncPlanOut)
-def get_option_market_config_count():
-    """同步前置确认：启用几张合约、几个品种×到期月组合（= 几次接口请求）。"""
-    return option_market.build_sync_plan()
 
 
 @router.post("/option-market/sync", response_model=BdsSyncTaskOut)
