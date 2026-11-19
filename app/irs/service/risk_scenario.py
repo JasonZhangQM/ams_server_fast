@@ -15,11 +15,13 @@
 1. 风险度双口径：真实=保证金/净资产（扣融资），交易所=保证金/客户权益（含融资）；
    预警看真实口径，追保判定（breached/首个追保点）用交易所口径——期货公司只看它。
 2. **净值按盯市价**：净值 = 系统净值 + Σ(方向 × 模型市值 − 系统市值)。
-   盯市价 = `settle > price`（当日结算价优先；IO/ETF 无 settle 时退回最新价）。
+   盯市价 = `price > settle`（2026-11-19 起全链统一**收盘价优先**；个别快照缺收盘价
+   时退回结算价兜底，与账单报表 value_calc 的 `price→settle→pre_settle` 头部一致）。
    旧公式「市值 − |成本|」在 2026-10-27 市值重算后已失效，会重复扣减。
-3. **保证金结算价另用一条链**：`settle > pre_settle > price`。
-   交易所公式（ETF 12% / CFFEX 15% / SHFE 期货保证金）写的是「前结算价」，
-   与盯市口径不是一回事，两者不可混用。
+3. **保证金价同样收盘优先**：`price > pre_settle > settle`（2026-11-19 起与盯市同口径，
+   消除大跌日「结算 vs 收盘」的跨口径假矛盾；交易所公式的官方输入虽是结算价，
+   统一后义务仓保证金与权利金同源，与账单报表不再有价源差）。
+   交易所公式（ETF 12% / CFFEX 15% / SHFE 期货保证金）的费率结构不变。
 4. 保证金是下跌/上涨的反向变量：义务仓结算价取 max(盯市价, 内在价值)，对风险侧保守。
 5. **方向取字典 `cp` + 账单成本符号**：负成本 = 义务仓。短 call 的下行「收益」是假象，
    必须有上行情景档才能度量风险；到期合约直接剔除，不按 days=0 硬算。
@@ -45,7 +47,14 @@ from server_fast.common.db import SessionLocal
 # 默认行为完全未变（风险看板 / budget / simulate 零回归）；启用后「价格冻结的
 # 其它持仓」不随时点重估，其 Δ 盈亏恒 0、保证金照计，修掉到期列混入与本标的
 # 无关的期权时间价值（SHSE.000300 中档实测 +5928）。
-ENGINE_VER = "v2.2"
+# v2.3（2026-11-19）：时间价值闸的校验权利金从盯市价（settle 优先）改为收盘价
+# （与 S0=price_ud 同快照口径），消除大跌日「结算 vs 收盘」跨口径假 409；
+# 盯市 / 保证金两条链不变。详见 _option_position 时间价值闸注释。
+# v2.4（2026-11-19，用户定稿）：**全链口径统一到收盘价**——盯市链 price>settle、
+# 保证金链 price>pre_settle>settle，两条链头部一致；时间价值闸回到 px_equity
+# （此时它已是收盘优先，同口径由取价链保证）。引擎盯市与账单报表（value_calc
+# price→settle→pre_settle）不再有价源差，mark_adj 只剩 BS 模型价 vs 收盘报价。
+ENGINE_VER = "v2.4"
 
 # 情景档位：负数=上涨（短 call 的风险方向），0%=即期基准
 UPSIDE_STEPS = [-0.20, -0.10, -0.05]
@@ -397,9 +406,13 @@ def _option_position(g: Group, contracts: dict, cfg_info: dict, market: dict,
             f"期权 {g.symbol}（contract_id={c.contract_id}）没有本地行情快照"
             f"（bds_option_market），拒绝用假设价估算")
 
-    # 盯市价（净值口径）与保证金价（交易所公式口径）是两条不同的降级链
-    px_equity = _pos_px(mkt.settle, mkt.price)
-    px_margin = _pos_px(mkt.settle, mkt.pre_settle, mkt.price)
+    # 盯市价（净值口径）与保证金价（交易所公式口径）：2026-11-19 起统一**收盘优先**，
+    # 两条链只是兜底顺序不同（盯市直接退结算；保证金先退前结再退结算）。
+    # 大跌日 SHFE 结算价=全天成交量加权、与收盘分离可达 11 元/克，旧「结算优先」
+    # 与标的收盘快照（price_ud）跨口径拼接曾造成假 409（au2612P840 2026-11-18：
+    # 收盘 30.58 / 结算 22.58 / 收盘内在 26.74 → 时间价值 −4.16 拒算）。
+    px_equity = _pos_px(mkt.price, mkt.settle)
+    px_margin = _pos_px(mkt.price, mkt.pre_settle, mkt.settle)
     if px_equity is None or px_margin is None:
         raise ValueError(f"期权 {g.symbol} 行情三列价格全空/全 0（{mkt.trade_date}）")
     S0 = _pos_px(mkt.price_ud)
@@ -421,11 +434,15 @@ def _option_position(g: Group, contracts: dict, cfg_info: dict, market: dict,
 
     # 时间价值闸：无套利下权利金不可能低于内在价值。一旦为负，说明标的价与
     # 权利金不同日或不同合约，后续 BS 重估与保证金公式全都没有意义。
+    # 口径（2026-11-19）：权利金必须与 S0 同口径——S0=price_ud 是标的**收盘**快照。
+    # v2.4 起取价链统一收盘优先，px_equity 已与 S0 同口径，闸直接吃 px_equity；
+    # 仅当快照缺收盘价（罕见，回退 settle）时两列仍可能异源，此闸继续兜底拦截
+    # 真正的错列 / 跨日混拼。
     cp_chk = (spec.cp or "P").upper()
     iv0 = intrinsic(S0, k_num, cp_chk)
     if px_equity - iv0 < 0:
         raise ValueError(
-            f"{g.symbol} 权利金 {px_equity:g} 低于按 S0={S0:g} 计的内在价值 {iv0:g}，"
+            f"{g.symbol} 权利金（收盘口径）{px_equity:g} 低于按 S0={S0:g} 计的内在价值 {iv0:g}，"
             f"时间价值为负（{mkt.trade_date}），行情自相矛盾，拒绝计算")
 
     # shex 义务仓保证金要用标的期货的保证金率（scope='{交易所}.{品种}'）
@@ -471,25 +488,28 @@ def _option_value(p: dict, S: float, horizon: str, iv_mult: float) -> float:
 
 
 def _option_margin(p: dict, S: float) -> float:
-    """卖出期权义务仓保证金：结算价取 max(保证金价, 内在价值)。
+    """卖出期权义务仓保证金：保证金价取 max(取价链价, 内在价值)。
 
     公式族（不可互套）：
-    - cffex: (结算价 + max(15%×S − 虚值, 7%×S)) × mult
-    - etf:   (结算价 + max(12%×S − 虚值, 7%×S)) × mult
-    - shex:  结算价×mult + max(期货保证金 − 虚值额/2, 期货保证金×0.5)
+    - cffex: (保证金价 + max(15%×S − 虚值, 7%×S)) × mult
+    - etf:   (保证金价 + max(12%×S − 虚值, 7%×S)) × mult
+    - shex:  保证金价×mult + max(期货保证金 − 虚值额/2, 期货保证金×0.5)
+
+    交易所公式的官方输入是结算价，2026-11-19 起取价链统一收盘优先（口径 3），
+    费率结构不变；与盯市/账单同口径后，义务仓保证金不再有「结算 vs 收盘」价源差。
 
     虚值方向随合约方向翻转：认购=K−S，认沽=S−K。
     """
     strike, mult = p["strike"], p["mult"]
-    settle = max(p["px_margin"], intrinsic(S, strike, p["cp"]))
+    px_m = max(p["px_margin"], intrinsic(S, strike, p["cp"]))
     otm = max(strike - S, 0.0) if p["cp"] == "C" else max(S - strike, 0.0)
     if p["mtype"] == "cffex":
-        per = (settle + max(0.15 * S - otm, 0.07 * S)) * mult
+        per = (px_m + max(0.15 * S - otm, 0.07 * S)) * mult
     elif p["mtype"] == "etf":
-        per = (settle + max(0.12 * S - otm, 0.07 * S)) * mult
+        per = (px_m + max(0.12 * S - otm, 0.07 * S)) * mult
     else:  # shex
         fut_m = S * mult * p["fut_m_rate"]
-        per = settle * mult + max(fut_m - otm * mult / 2, fut_m * 0.5)
+        per = px_m * mult + max(fut_m - otm * mult / 2, fut_m * 0.5)
     return per * p["qty"]
 
 
@@ -497,7 +517,9 @@ def _net0(ctx: dict, iv_mult: float) -> dict[str, float]:
     """按盯市口径修正系统净值，逐账户。**基线恒为当前盯市（即期 BS），不随时点变**。
 
     旧口径「− (市值 − |成本|)」已废止：2026-10-27 起 bills_group 已按市值入账，
-    v2.0 只补「模型盯市价 − 系统市值」的差额（au 的 settle vs price 即属此类）。
+    v2.0 只补「模型盯市价 − 系统市值」的差额；v2.4（2026-11-19）取价链统一收盘
+    优先后，与账单报表（value_calc price→settle→pre_settle）同口径，此差额只剩
+    「BS 模型价 vs 收盘报价」的模型差，不再含结算 vs 收盘的价源差。
 
     v2.1（2026-11-11）修复：v2.0 把 horizon 传进来，令 expiry 的 net0 直接按内在
     价值估值，把「时间价值归零」的收益藏进基准净值 ⇒ 到期 Δ 盈亏对虚值义务仓
@@ -518,11 +540,11 @@ def mark_adj_map(ctx: dict, iv_mult: float) -> dict[tuple[str, str], float]:
     """「模型盯市市值 − 报表市值」按 (账户, 合约) 聚合，供推演侧统一当前盈亏口径。
 
     与 _net0 的 ``v - p["sys_value"]``、run() 期权分支的 v0 三者完全同源（同一个
-    ``_option_value(p, S0, "now", iv_mult)``）。报表市值按收盘价（value_calc 的
-    price→settle）、引擎盯市按结算价（settle→price），商品期权两者常不等；若把
-    模型口径的 Δ 直接加到账面浮盈上，到期累计盈亏会凭空多出这段价源差。
-
-    例：au2612P840 收盘 14.94 / 结算 17.32，义务仓修正量 = −17,320 −(−14,940) = −2,380。
+    ``_option_value(p, S0, "now", iv_mult)``）。v2.4（2026-11-19）取价链统一收盘
+    优先，引擎盯市与账单报表（value_calc 的 price→settle→pre_settle）头部一致，
+    商品期权的「结算 vs 收盘」价源差消失；此项只剩 BS 模型价 vs 收盘报价的
+    模型差（IV 平滑、BS 假设所致），量级远小于旧口径的价源差。
+    （旧口径例：au2612P840 收盘 14.94 / 结算 17.32，义务仓修正量 −2,380。）
     """
     out: dict[tuple[str, str], float] = {}
     for p in ctx["positions"]:
