@@ -675,8 +675,11 @@ def delete_bill(
 
     副作用：
     - bills_profit 中 bill_id 对应的行一并删除；
-    - 受影响的 bills_group 行 profit_time 置 NULL，标记待重算
-      （end_time 不会因为删行自动变小，不清就不会触发重算）。
+    - 该账户全部 bills_group 行 profit_time 置 NULL，标记待重算
+      （end_time 不会因为删行自动变小，不清就不会触发重算）。必须按账户整包清，
+      不能只按 category+symbol 精确匹配：cash 行的资金余额由全部出入金流水累加得来，
+      删一笔出入金会同时让 cash 行过期；漏清则 cash 行 end_time==profit_time 不触发
+      重算，重导入金后与出入金行 diff_dw 口径不一致，status 校验差出两倍金额。
     """
     bill = db.get(Bill, id_)
     if bill is None:
@@ -694,20 +697,19 @@ def delete_bill(
             ),
         )
 
-    account, category, symbol = bill.account, bill.category, bill.symbol
+    account = bill.account
     try:
         # 先删子表再删主表，不依赖数据库层 ON DELETE CASCADE 是否真的建成
         deleted_profit = (
             db.query(Profit).filter(Profit.bill_id == id_).delete(synchronize_session=False)
         )
         db.delete(bill)
-        # 派生汇总标记过期：不显式清，end_time==profit_time 会让重算条件不成立
+        # 派生汇总标记过期：不显式清，end_time==profit_time 会让重算条件不成立。
+        # 按账户整包清（含 cash 行），别只按 category+symbol 精确匹配——cash 行也依赖出入金流水。
         flagged_groups = (
             db.query(Group)
             .filter(
                 Group.account == account,
-                Group.category == category,
-                Group.symbol == symbol,
                 Group.profit_time.isnot(None),
             )
             .update({Group.profit_time: None}, synchronize_session=False)
