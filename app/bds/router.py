@@ -1707,13 +1707,16 @@ def sync_daily_indicators_all():
 # 🔴 underlying_quote / position_quote 必须紧跟 option_market：两步吃的是期权快照
 #    更新后的价，且不必等 wscn / gold 这些慢段（gold 20 国约 5.5min）。这两段由
 #    irs / bills 实现，经 sync_task_utils 的注册表注入，bds 不反向 import（规则 4.12）。
+# 🔴 underlying_hlc 必须排在 underlying_quote **之前**（2026-11-20 新增）：它写的是
+#    py_close/y_high/y_low 三个年度基准，而 pv_* 全部由 price 与这三个基准在钩子里算出。
+#    先基准后现价，pv_* 才算在新口径上；反过来要等下一次 price 更新才纠偏。
 SYNC_STAGE_ORDER = ["trade_date", "symbol_info", "history_market", "option_info",
-                    "option_market", "underlying_quote", "position_quote",
+                    "option_market", "underlying_hlc", "underlying_quote", "position_quote",
                     "wscn", "daily", "gold"]
 
 # 非 bds 域同步段：执行器由 irs / bills 在 router 加载期注册到 bds.sync_task_utils。
-# 这两段不报写入行数（unit=symbol / step），前端分段摘要按 unit 显示「N 个标的 / N 步」。
-EXTRA_STAGE_KEYS = {"underlying_quote", "position_quote"}
+# 这三段不报写入行数（unit=symbol / step），前端分段摘要按 unit 显示「N 个标的 / N 步」。
+EXTRA_STAGE_KEYS = {"underlying_hlc", "underlying_quote", "position_quote"}
 
 SYNC_STAGE_NAMES = {
     "trade_date": "交易日历",
@@ -1721,6 +1724,7 @@ SYNC_STAGE_NAMES = {
     "history_market": "历史行情",
     "option_info": "期权合约字典",
     "option_market": "期权行情",
+    "underlying_hlc": "标的年度行情（年初至今高低收）",
     "underlying_quote": "标的行情（监测标的价）",
     "position_quote": "持仓行情（bills 四步汇总）",
     "wscn": "经济指标（华尔街见闻）",
@@ -1735,6 +1739,7 @@ SYNC_STAGE_GROUPS = {
     "history_market": "basic",
     "option_info": "basic",
     "option_market": "basic",
+    "underlying_hlc": "basic",
     "underlying_quote": "basic",
     "position_quote": "basic",
     "wscn": "macro",
@@ -1752,7 +1757,7 @@ def _sync_stage_items(stage: str) -> list:
       （清单由 get_macro_history_targets 运行时推导；Config 仅在信息表为空时兜底）
     - option_market：按「品种 × 到期月」逐组（= 一次接口请求），与 /option-market/sync 的分组口径一致；
       清单为空时给一个 `__no_config__` 伪项，让失败明细能说清原因，而不是 0 项静默通过
-    - underlying_quote / position_quote：整体各 1 项。持仓行情内部是 4 步流水线且
+    - underlying_hlc / underlying_quote / position_quote：整体各 1 项。持仓行情内部是 4 步流水线且
       **必须整段原子**（任一步失败即终止，带病续跑会把错误状态算进汇总表），拆成
       4 个计项会破坏该语义；4 个子步明细由执行器写进 result.stages[].steps。
     - wscn：service 内部按自然月分批（首次全量 141 批起）**不可切分** ⇒ 整体 1 项
@@ -1777,6 +1782,9 @@ def _sync_stage_items(stage: str) -> list:
             (f"{g['option_name']}|{g['end_month']}", f"{g['option_name']}/{g['end_month'] or 'ALL'}")
             for g in groups
         ]
+    if stage == "underlying_hlc":
+        # 整批一次 gm history 请求 + 一批 UPSERT，拆项只会让进度条变长
+        return [("all", "刷新年初至今高低收")]
     if stage == "underlying_quote":
         return [("all", "刷新监测标的价")]
     if stage == "position_quote":
@@ -1877,9 +1885,9 @@ def _run_sync_thread(task_id: int, stages: list):
             stats[s] = {"key": s, "name": SYNC_STAGE_NAMES[s], "group": SYNC_STAGE_GROUPS[s],
                         "total": len(items), "done": 0, "ok": 0, "no_data": 0, "error": 0, "rows": 0}
             if s in EXTRA_STAGE_KEYS:
-                # 跨模块段不报写入行数：标的行情报「更新标的数」，持仓行情报「完成步数」。
+                # 跨模块段不报写入行数：年度行情 / 标的行情报「更新标的数」，持仓行情报「完成步数」。
                 # 前端「条数合计」列按 unit 换算成「N 个标的 / N 步」，避免口径失真。
-                stats[s]["unit"] = "symbol" if s == "underlying_quote" else "step"
+                stats[s]["unit"] = "step" if s == "position_quote" else "symbol"
 
         done = ok = no_data = err = 0
 
@@ -1982,16 +1990,18 @@ def sync_macro(req: MacroSyncRequest):
 
     请求体：`{"stages": ["symbol_info", "history_market", "wscn", "daily"]}`，只跑传入的段。
     **执行顺序固定**（不按入参数组顺序）：trade_date → symbol_info → history_market →
-    option_info → option_market → underlying_quote → position_quote → wscn → daily → gold。
-    基础数据是下游依赖排在前面；两段行情链紧跟 option_market 吃新快照；整体快 → 慢，
-    中途停止的代价最小。后两段由 irs / bills 注入执行器（见 sync_task_utils 注册表）。
+    option_info → option_market → underlying_hlc → underlying_quote → position_quote →
+    wscn → daily → gold。
+    基础数据是下游依赖排在前面；三段行情链紧跟 option_market 吃新快照（年度基准先于现价，
+    否则 pv_* 会算在旧基准上）；整体快 → 慢，中途停止的代价最小。后三段由 irs / bills
+    注入执行器（见 sync_task_utils 注册表）。
 
     进度：`total_count` = 各段条目数之和（trade_date 1 + symbol_info 2 + history_market
     「A股指数 ∪ 监测标的」每标的 1 + option_info 1 + option_market 按品种×到期月逐组 +
-    underlying_quote 1 + position_quote 1 + wscn 1 + daily 每指标 1 + gold 每国 1），
-    每完成一项 `done_count` +1。
+    underlying_hlc 1 + underlying_quote 1 + position_quote 1 + wscn 1 + daily 每指标 1 +
+    gold 每国 1），每完成一项 `done_count` +1。
     `result.stages` 存各段 total/done/ok/no_data/error/rows（含 group 供前端分组）；
-    两段行情链额外带 `unit`（symbol=更新标的数 / step=完成步数）与 `steps` 子步明细，
+    三段行情链额外带 `unit`（symbol=更新标的数 / step=完成步数）与 `steps` 子步明细，
     前端「条数合计」列据此换算，不与「写入行数」混用。
     `result.stage` 存当前段 —— wscn 首轮全量时进度条会停在该段，靠它显示"正在跑哪一段"。
 

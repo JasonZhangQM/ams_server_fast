@@ -184,8 +184,16 @@ def value_float_em_sql():
         WHERE end_time<>value_time
             OR cost_total>0
             OR p_total>0
-            OR value_time IS NULL;
+            OR value_time IS NULL
+            OR (p_total=0
+                AND (COALESCE(value_long,0)<>0 OR COALESCE(value_short,0)<>0));
         '''
+    # ↑ 末条（2026-11-20）：平仓行（p_total=0）收益试算后 cost_* 已清零，若
+    # end_time==value_time，原四个条件一个都不满足，持仓时最后一轮的
+    # value_long/value_total/pf_total 快照永久固化（首例 IO2611 三张到期交割后
+    # 仍显示市值 -2.47万/-20/-20）。补选后 value_float 走「无持仓则市值=成本(0)」
+    # 分支自然清零，汇总阶段（第 10/11 步）联动刷新 GroupAcc/GroupSymbol。
+    # 幂等：市值清零后不再满足末条，不会反复捞取。
     df = get_sql_to_df(sql, _engine)
     df = df.fillna(0)
     df = df.astype(filter_dtypes(list(df.columns), _mdl.to_dtype()))

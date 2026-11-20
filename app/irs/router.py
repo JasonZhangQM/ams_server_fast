@@ -121,6 +121,25 @@ def _run_underlying_quote_stage() -> int:
 register_stage_runner("underlying_quote", _run_underlying_quote_stage)
 
 
+def _run_underlying_hlc_stage() -> int:
+    """刷新监测标的年初至今高低收（py_close / y_high / y_low），返回写入标的数。
+
+    2026-11-20 新增。此前该能力只挂在手动端点 POST /irs/sync/underlying-monitor-hlc，
+    不在宏观同步链里，结果 y_low 长期冻结（11-17~11-20 连续四天没动静），
+    最终出现「现价 3,525 < 年内最低 3,955.40」的自相矛盾数据。
+
+    顺序上必须排在 underlying_quote **之前**：hlc 先写入 py_close/y_high/y_low，
+    紧接着 underlying_quote 改 price 时，模型钩子才会用新的年度基准算 pv_*；
+    反过来的话 pv_* 会用旧基准算一遍，得等到下一次 price 更新才纠正。
+    """
+    n = service.update_underlying_monitor_hlc_sql()
+    set_stage_runtime("underlying_hlc", steps=[f"更新 {int(n or 0)} 个标的年度行情"])
+    return int(n or 0)
+
+
+register_stage_runner("underlying_hlc", _run_underlying_hlc_stage)
+
+
 def _run_sync_chain(target: str, funcs: List[Callable]) -> dict:
     """依次执行同步函数链；参照 bds 模块返回 status 字段。
 

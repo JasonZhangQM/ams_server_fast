@@ -125,7 +125,17 @@ def _group_filters(category: str | None, symbol: str | None) -> tuple[str, dict]
 # SUM(risk_exposure)，只取可归属行。与 /irs/simulate 的 subject_exposure 逐值一致
 # （那里按 (账户, 合约) 聚合 bills_group 后再求和，只是同一份人工值的另一条汇总路径）。
 # NULL = 未设置，SUM 自动跳过；全为 NULL 的标的返回 NULL，列表显示 '-' 且排最后。
+#
+# 在仓过滤（2026-11-20）：p_total IS NULL OR p_total <> 0。bills 重算后已平仓行
+# p_total=0，但 value_total/pf_total 保留平仓瞬间快照不清零（bills 自身口径），
+# 无条件 SUM 会把「已无持仓标的」的历史市值/浮盈加出来（首例：IO2611 今天到期
+# 交割后，沪深300 卡片仍显示 市值 -2.5万 / 盈亏 -1.0万，而风险引擎按 p_total!=0
+# 早已不认这些行）。三项聚合统一加过滤，与风险引擎持仓口径对齐。
 # =========================================================================
+
+# 在仓过滤片段：p_total IS NULL 视为在仓（缺数量信息的行不清零，不误杀）
+IN_POSITION_SQL = "(g.p_total IS NULL OR g.p_total <> 0)"
+
 
 def subject_exposure_expr() -> str:
     """相关子查询表达式（供主表 ORDER BY 用，外层务必自行加括号）。
@@ -136,7 +146,7 @@ def subject_exposure_expr() -> str:
     return (
         "SELECT SUM(g.risk_exposure) FROM bills_group_symbol g "
         "WHERE COALESCE(g.underlying_symbol, g.symbol) = irs_underlying_monitor.symbol "
-        f"AND {attachable_sql('g')}"
+        f"AND {attachable_sql('g')} AND {IN_POSITION_SQL}"
     )
 
 
@@ -146,6 +156,8 @@ def subject_group_stats_map(db: Session) -> dict[str, dict[str, float | None]]:
     一次查询同时聚合三项：风险敞口（SUM(risk_exposure)）、当前市值（SUM(value_total)）、
     浮动盈亏（SUM(pf_total)，账面口径与 /bills/group-symbols 页面同源）；
     各字段独立判 NULL——某项全为 NULL 时该项为 None，不伪造 0。
+    仅统计在仓行（p_total IS NULL OR p_total <> 0，见上方口径块）：
+    标的项下持仓全部平仓后，市值/盈亏/敞口回落为 NULL，卡片显示 '-'。
     """
     sql = text(f"""
         SELECT COALESCE(g.underlying_symbol, g.symbol) AS um_symbol,
@@ -153,7 +165,7 @@ def subject_group_stats_map(db: Session) -> dict[str, dict[str, float | None]]:
                SUM(g.value_total) AS value_total,
                SUM(g.pf_total) AS pf_total
         FROM bills_group_symbol g
-        WHERE {attachable_sql('g')}
+        WHERE {attachable_sql('g')} AND {IN_POSITION_SQL}
         GROUP BY COALESCE(g.underlying_symbol, g.symbol)
     """)
     out: dict[str, dict[str, float | None]] = {}
@@ -177,6 +189,8 @@ def groups_of(
 
     排序：风险敞口倒序、id 倒序兜底，保证分页结果确定。
     MySQL 中 NULL 被视为最小值，``DESC`` 天然把 NULL 排在最后，无需额外的 NULL 兜底键。
+    仅统计在仓行（p_total IS NULL OR p_total <> 0，见上方口径块）：抽屉「持仓中」
+    不得出现已平仓行（首例：IO2611 平仓快照残留被列出，2026-11-20）。
     """
     conds, params = _group_filters(category, symbol)
     params.update({"s": underlying_symbol, "lim": limit, "off": offset})
@@ -187,7 +201,8 @@ def groups_of(
                (SELECT COUNT(*) FROM bills_bill b
                  WHERE b.category = g.category AND b.symbol = g.symbol) AS bill_rows
         FROM bills_group_symbol g
-        WHERE g.underlying_symbol = :s{conds}
+        WHERE g.underlying_symbol = :s
+          AND {IN_POSITION_SQL}{conds}
         ORDER BY g.risk_exposure DESC, g.id DESC
         LIMIT :lim OFFSET :off
     """)
@@ -200,12 +215,12 @@ def count_groups(
     category: str | None = None,
     symbol: str | None = None,
 ) -> int:
-    """与 groups_of 同口径的合约行总数。"""
+    """与 groups_of 同口径的合约行总数（含同一在仓过滤）。"""
     conds, params = _group_filters(category, symbol)
     params["s"] = underlying_symbol
     sql = text(f"""
         SELECT COUNT(*) FROM bills_group_symbol g
-        WHERE g.underlying_symbol = :s{conds}
+        WHERE g.underlying_symbol = :s AND {IN_POSITION_SQL}{conds}
     """)
     return int(db.execute(sql, params).scalar_one())
 

@@ -54,7 +54,10 @@ from server_fast.common.db import SessionLocal
 # 保证金链 price>pre_settle>settle，两条链头部一致；时间价值闸回到 px_equity
 # （此时它已是收盘优先，同口径由取价链保证）。引擎盯市与账单报表（value_calc
 # price→settle→pre_settle）不再有价源差，mark_adj 只剩 BS 模型价 vs 收盘报价。
-ENGINE_VER = "v2.4"
+# v2.5（2026-11-20）：时间价值闸新增小幅容差——深度实值临到期合约尾盘成交价
+# 贴平/略低于内在价值（贴水 ≤2%×内在）属正常行情，warning 放行替代拒算；
+# 到期日豁免（days=0）并入同一分支。真错列远超容差仍拒算。见 TV_TOLERANCE。
+ENGINE_VER = "v2.5"
 
 # 情景档位：负数=上涨（短 call 的风险方向），0%=即期基准
 UPSIDE_STEPS = [-0.20, -0.10, -0.05]
@@ -82,6 +85,10 @@ SEC_UND_KEY = {"513100": "nasdaq", "510500": "csi500etf", "510300": "csi300", "1
 RISK_FREE_RATE = 0.015
 # IV 反解失败时的兜底波动率（仅用于即期重估，不参与保证金）
 DEFAULT_SIGMA = 0.20
+# 时间价值闸容差：贴水 ≤ 2%×内在价值视为深度实值临到期合约尾盘贴平内在的
+# 正常行情（warning 放行）；超过仍拒算。实测分界：正常贴平 −0.33% / −0.9%，
+# 真错列 −15.6%，2% 可干净区分（见 _option_position 时间价值闸注释）。
+TV_TOLERANCE = 0.02
 
 
 def _norm_cdf(x: float) -> float:
@@ -198,7 +205,7 @@ def _load_latest_market(db, contract_ids: list[str],
 
     - max_date=None：行为不变，全区间取每合约最新一行。
     - max_date 有值：只看 trade_date ≤ max_date 的行，供混日回退统一到某个
-      公共快照日时使用（风险引擎要求所有在仓期权同一个横截面做 BS 重估）。
+      公共快照日时使用（同一标的的所有在仓期权必须同日横截面做 BS 重估）。
     """
     if not contract_ids:
         return {}
@@ -260,9 +267,10 @@ def load_context() -> dict:
                 contracts[key] = c
         # ===== 段 A 探测：全量每合约取最新快照，构造持仓，收集行情日期 =====
         # 盘中时点各品种行情到达时间不同（如 ETF 上午可到、黄金收盘后才有），
-        # 不同品种的期权最新快照日期可能不一致。风险引擎要求所有期权同一个
-        # 横截面做 BS 重估与保证金公式，否则同 underlying 跨日 S0 混合导致 Δ、
-        # 保证金、风险度全链口径不自洽。先取最新，若混日则段 B 统一到公共最早快照日。
+        # 不同品种的期权最新快照日期可能不一致。同一标的多张合约共享同一 S0 做
+        # 情景推演，组内必须同日，否则跨日 S0 混合导致 Δ、保证金、风险度全链
+        # 口径不自洽；不同标的的情景互相独立（见 run 的 MODES 分组），允许异日。
+        # 先取最新，若某标的组内混日则段 B 仅该标的回退到组内最早公共快照日。
         all_contract_ids = [c.contract_id for c in cfg_rows]
         market = _load_latest_market(db, all_contract_ids)
 
@@ -316,19 +324,34 @@ def load_context() -> dict:
             # 已到期被剔除的行走 continue，不会执行到这里。
             positions[-1]["pf_now"] = float(g.pf_total or 0)
 
-        # ===== 段 B 回退：混日统一到 min(market_dates) 快照，重建期权持仓 =====
-        # 回退只改「取哪一行快照」，估值逻辑不动；期货/股票不涉及行情横截面，
-        # 持仓原样保留。
-        if len(market_dates) > 1:
-            common_date = min(market_dates)
-            warnings.append(
-                f"在仓期权行情日期不一致 {sorted(market_dates)}，"
-                f"已统一回退到 {common_date} 快照计算")
-            market = _load_latest_market(db, all_contract_ids, max_date=common_date)
+        # ===== 段 B 回退（2026-11-20 起按标的分组）：同一标的多张合约共享同一
+        # S0 做情景推演，组内必须同日；不同标的的情景互相独立，允许各用各的
+        # 快照日（美股/黄金时区差异本来就混日）。检测到某标的组内混日时，仅该
+        # 标的双双回退到组内最早公共快照日并按标的点名告警，其余标的保留最新。
+        # 回退只改「取哪一行快照」，估值逻辑不动；期货/股票不涉及行情横截面。
+        dates_by_und: dict[str, set[date]] = {}
+        for p in positions:
+            if p["kind"] in ("call", "put"):
+                dates_by_und.setdefault(p["und_key"], set()).add(p["market_date"])
+        mixed: dict[str, date] = {  # und_key → 组内最早公共快照日
+            k: min(v) for k, v in dates_by_und.items() if len(v) > 1}
+        if mixed:
+            for und_key in sorted(mixed):
+                warnings.append(
+                    f"{und_key} 在仓期权行情日期不一致 {sorted(dates_by_und[und_key])}，"
+                    f"已回退到 {mixed[und_key]} 快照计算")
+            # 按目标日期分组重载受影响标的的快照：不同标的的目标日可能不同，
+            # 不能用全局 min 一次过滤，否则会把其它标的回退过头。
+            for common_date in sorted(set(mixed.values())):
+                fb_ids = [p["contract_id"] for p in positions
+                          if p["kind"] in ("call", "put")
+                          and mixed.get(p["und_key"]) == common_date]
+                market.update(_load_latest_market(db, fb_ids, max_date=common_date))
             expired_set = set(expired)  # 段 A 已判定到期，不再重建
             opt_positions: list[dict] = []
             und_px.clear()
             market_dates.clear()
+            check_dates: dict[str, set[date]] = {}
             for g in pos_rows:
                 if not g.category.startswith("期权"):
                     continue
@@ -345,20 +368,22 @@ def load_context() -> dict:
                         f"{p['und_key']} 同日标的价不一致：{und_px[p['und_key']]} vs {p['S0']}")
                 und_px.setdefault(p["und_key"], p["S0"])
                 market_dates.add(p["market_date"])
+                check_dates.setdefault(p["und_key"], set()).add(p["market_date"])
                 opt_positions.append(p)
                 opt_positions[-1]["pf_now"] = float(g.pf_total or 0)
             non_opt = [p for p in positions if p["kind"] not in ("call", "put")]
             positions = non_opt + opt_positions
-            # 防御：回退后仍存在多日属异常（理论上不可能，min() 应全部 ≤ common_date）
-            if len(market_dates) > 1:
+            # 防御：回退后每个标的组内必须收敛为 1 日（跨标的异日是允许的常态）
+            bad = {k: sorted(v) for k, v in check_dates.items() if len(v) > 1}
+            if bad:
                 raise ValueError(
-                    f"回退到 {common_date} 后仍存在混日：{sorted(market_dates)}，拒绝计算")
+                    f"按标的回退后仍存在组内混日：{bad}，拒绝计算")
 
-        # 新鲜度哨兵（改判 common_date；段 B 已收敛为 1 日，段 A 路径零回归）
+        # 新鲜度哨兵：data_as_of 取全引擎最旧快照日（按标的分组回退后跨标的
+        # 允许异日，min() 仍是最保守口径）
         data_as_of = stale = None
         if market_dates:
-            common_date = min(market_dates)
-            data_as_of = common_date
+            data_as_of = min(market_dates)
             ref, allowed_min = _trade_date_window(db, today)
             if data_as_of < allowed_min:
                 raise ValueError(
@@ -438,12 +463,28 @@ def _option_position(g: Group, contracts: dict, cfg_info: dict, market: dict,
     # v2.4 起取价链统一收盘优先，px_equity 已与 S0 同口径，闸直接吃 px_equity；
     # 仅当快照缺收盘价（罕见，回退 settle）时两列仍可能异源，此闸继续兜底拦截
     # 真正的错列 / 跨日混拼。
+    # 容差放行（2026-11-20 v2.5）：深度实值、临到期、低流动性合约的尾盘最后一笔
+    # 成交价贴平/略低于收盘内在价值是正常行情，逐日豁免追着补不完——首例
+    # IO2611-P-4000 到期日（92.0 vs 92.8491，−0.9%），次例 au2612P840 到期前
+    # 4 天（黄金单日 −4.45% 后收盘 73.28 vs 内在 73.52，−0.33%）。改为贴水幅度
+    # ≤ TV_TOLERANCE 或 days=0 时 warning 放行；真错列（11-18 旧口径跨源拼接
+    # −15.6%）远超容差仍拒算。放行后 IV 反解自然失败退默认 σ，义务仓保证金
+    # 另有 max(价, 内在) 保护，无口径风险。
     cp_chk = (spec.cp or "P").upper()
     iv0 = intrinsic(S0, k_num, cp_chk)
+    days = max((expiry - today).days, 0)
     if px_equity - iv0 < 0:
-        raise ValueError(
-            f"{g.symbol} 权利金（收盘口径）{px_equity:g} 低于按 S0={S0:g} 计的内在价值 {iv0:g}，"
-            f"时间价值为负（{mkt.trade_date}），行情自相矛盾，拒绝计算")
+        neg_pct = (iv0 - px_equity) / iv0  # 走到此处 iv0 必 >0（px_equity >0）
+        if days > 0 and neg_pct > TV_TOLERANCE:
+            raise ValueError(
+                f"{g.symbol} 权利金（收盘口径）{px_equity:g} 低于按 S0={S0:g} 计的内在价值 {iv0:g}，"
+                f"时间价值为负（贴水 {neg_pct:.1%} > 容差 {TV_TOLERANCE:.0%}，{mkt.trade_date}），"
+                f"行情自相矛盾，拒绝计算")
+        scope = "到期日豁免" if days == 0 else f"容差 {TV_TOLERANCE:.0%} 内放行"
+        warnings.append(
+            f"{g.symbol} 尾盘成交价 {px_equity:g} 低于收盘内在价值 {iv0:g}"
+            f"（贴水 {iv0 - px_equity:g}，{neg_pct:.1%}），{scope}：深度实值临到期"
+            f"正常行情，盯市按收盘价、义务仓保证金按 max(价, 内在) 保守计")
 
     # shex 义务仓保证金要用标的期货的保证金率（scope='{交易所}.{品种}'）
     fut_m_rate = None
@@ -458,8 +499,7 @@ def _option_position(g: Group, contracts: dict, cfg_info: dict, market: dict,
     cp = (spec.cp or "P").upper()
     sign = -1 if float(g.cost_total or 0) < 0 else 1
     qty = abs(int(g.p_total))
-    days = max((expiry - today).days, 0)
-    T = days / 365.0
+    T = days / 365.0  # days 已在时间价值闸前算出（到期日豁免判断要用）
     sigma = implied_vol(px_equity, S0, float(spec.strike), T, cp)
     if sigma is None:
         sigma = DEFAULT_SIGMA

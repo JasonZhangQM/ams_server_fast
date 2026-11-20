@@ -166,6 +166,14 @@ def _compute_underlying_monitor(mapper, connection, target):
                   "pv_el_y", "pv_l_y", "pv_m_y", "pv_h_y", "pv_eh_y"):
             setattr(target, f, None)
         return
+    # py_close 为空时下面全部是 Decimal/None 除法（TypeError），必须同样清空：
+    # 新增标的尚未跑过年度行情同步时就是这个状态，不能让它把整段任务打挂。
+    if not target.py_close:
+        for f in ("pv_yh", "pv_yl", "pv_yy",
+                  "pv_el", "pv_l", "pv_m", "pv_h", "pv_eh",
+                  "pv_el_y", "pv_l_y", "pv_m_y", "pv_h_y", "pv_eh_y"):
+            setattr(target, f, None)
+        return
     # 相对上年末收益率 = (行情价/上年末 - 1) * 100
     target.pv_yh = (target.y_high / target.py_close - Decimal("1")) * Decimal("100")
     target.pv_yl = (target.y_low / target.py_close - Decimal("1")) * Decimal("100")

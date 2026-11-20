@@ -7,8 +7,10 @@ POST /bds/stop/batch-sync。停止信号与僵尸清理必须放在两处都能 
 依赖方向是 bills → bds（规则 4.12，bds 只能被依赖），故放 bds 模块内。
 
 2026-11-16 起另承载「跨模块同步段执行器注册表」：宏观一键同步的
-underlying_quote / position_quote 两段由 irs / bills 实现，bds 不能反向 import
-（规则 4.12）。改由上层在 router 加载期把执行函数注入这里，bds 只按名取用。
+underlying_hlc / underlying_quote / position_quote 三段由 irs / bills 实现，bds 不能
+反向 import（规则 4.12）。改由上层在 router 加载期把执行函数注入这里，bds 只按名取用。
+（underlying_hlc 于 2026-11-20 补入：此前年度高低收只挂在手动端点，不在同步链，
+导致 y_low 长期冻结、出现「现价低于年内最低」的矛盾数据。）
 """
 import threading
 from datetime import datetime, timedelta
