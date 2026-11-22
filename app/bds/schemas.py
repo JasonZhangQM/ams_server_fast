@@ -461,6 +461,30 @@ class BatchSyncRequest(BaseModel):
     )
 
 
+class ChainCardItem(BaseModel):
+    """串联同步的单张卡片项（POST /bds/run/chained-sync 请求体元素）。
+
+    params 为该卡片原启动请求体的字段集合（如 batch_sync → BatchSyncRequest 的字段），
+    链线程内按卡片标识反序列化为对应请求模型再走原有校验与建任务逻辑。
+    """
+
+    card: str = Field(description="卡片标识: macro_sync/bills_import/batch_sync/index_backfill/"
+                                 "index_fund_agg/index_valuation/valuation_pct/um_pct_latest")
+    params: dict = Field(default_factory=dict, description="该卡片原启动端点的请求参数（JSON）")
+
+
+class ChainSyncRequest(BaseModel):
+    """串联同步请求体（POST /bds/run/chained-sync）。
+
+    后端按 CHAIN_CARD_ORDER 固定依赖顺序执行，忽略入参数组顺序；
+    每张卡片作为独立子任务（bds_sync_task 一行）依次串行执行，失败继续。
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    cards: list[ChainCardItem] = Field(description="要串联执行的卡片清单（至少一张）")
+
+
 class HistoryTargetsResolveRequest(BaseModel):
     """历史行情目标校验请求（POST /bds/sync/targets/resolve）。
 

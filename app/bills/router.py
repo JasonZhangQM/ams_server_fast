@@ -26,6 +26,7 @@ from server_fast.app.bds.sync_task_utils import (
     STOP_EVENTS,
     cleanup_zombies,
     register_stage_runner,
+    register_chain_card_runner,
     set_stage_runtime,
 )
 from server_fast.app.bills.config import Config
@@ -1036,6 +1037,14 @@ def run_batch_import_task(db: Session = Depends(get_db)):
     if running:
         raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
+    task = _create_bills_import_task(db)
+    threading.Thread(target=_run_import_thread, args=(task.id,), daemon=True).start()
+    return task
+
+
+def _create_bills_import_task(db: Session) -> BdsSyncTask:
+    """建交易明细导入任务行并注册停止信号（POST /bills/run/batch-import-task
+    与串联同步链复用）。"""
     task = BdsSyncTask(
         scope=IMPORT_SCOPE,
         # 前端用 scope_params.stages 回填勾选状态，与一键同步任务口径一致
@@ -1056,11 +1065,27 @@ def run_batch_import_task(db: Session = Depends(get_db)):
     db.add(task)
     db.commit()
     db.refresh(task)
-
-    # 注册停止信号（复用 /bds/stop/batch-sync）后立即返回，流水线在后台线程执行
+    # 注册停止信号（复用 /bds/stop/batch-sync）
     STOP_EVENTS[task.id] = threading.Event()
-    threading.Thread(target=_run_import_thread, args=(task.id,), daemon=True).start()
     return task
+
+
+def _run_bills_import_card(params: dict) -> int:
+    """串联同步链卡片：交易明细批量导入（建任务行 + 内联执行，不开线程）。
+
+    经 register_chain_card_runner 注册（bills → bds 合规，规则 4.12）；
+    params 忽略（该卡片无参数），接口与其它链卡片保持一致。
+    """
+    db = SessionLocal()
+    try:
+        task = _create_bills_import_task(db)
+        _run_import_thread(task.id)
+        return task.id
+    finally:
+        db.close()
+
+
+register_chain_card_runner("bills_import", _run_bills_import_card)
 
 
 # =========================================================================

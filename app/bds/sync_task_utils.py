@@ -48,6 +48,30 @@ def get_stage_runner(stage: str) -> Callable[[], int] | None:
     return STAGE_RUNNERS.get(stage)
 
 
+# ---------------------------------------------------------------------------
+# 串联同步链卡片执行器（依赖倒置，/bds/run/chained-sync 消费）
+# ---------------------------------------------------------------------------
+# key = 卡片标识（macro_sync / bills_import / batch_sync / index_backfill /
+# index_fund_agg / index_valuation / valuation_pct / um_pct_latest）；
+# value = fn(params: dict) -> int，语义：**同步地**建子任务行并内联执行（不开新线程），
+# 结束时子任务行状态落定，返回子任务 id 供链线程回读结果；建任务/校验失败时抛异常，
+# 由链线程捕获记该卡 failed 并继续（失败继续语义）。
+# 🔴 未注册时链线程必须显式报错并终止，禁止静默跳过：注册发生在 router 加载期，
+#    --reload / 单模块测试都可能让注册表为空。
+CHAIN_CARD_RUNNERS: dict[str, Callable[[dict], int]] = {}
+
+
+def register_chain_card_runner(card: str, fn: Callable[[dict], int]) -> None:
+    """注册串联同步链卡片的执行函数（bds router 加载期注册 bds 域卡片，
+    bills router 加载期注册 bills_import——bills 依赖 bds 合规，规则 4.12）。"""
+    CHAIN_CARD_RUNNERS[card] = fn
+
+
+def get_chain_card_runner(card: str) -> Callable[[dict], int] | None:
+    """取链卡片执行器；未注册返回 None，调用方必须显式报错。"""
+    return CHAIN_CARD_RUNNERS.get(card)
+
+
 def set_stage_runtime(stage: str, **fields) -> None:
     """执行器回传 steps 明细或异常原因（按字段更新，不覆盖已有字段）。"""
     _STAGE_RUNTIME.setdefault(stage, {}).update(fields)

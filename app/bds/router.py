@@ -62,6 +62,7 @@ from server_fast.app.bds.models import (
 from server_fast.app.bds.schemas import (
     BdsSyncTaskOut,
     BatchSyncRequest,
+    ChainSyncRequest,
     DailyIndicatorOut,
     DailyMktvalueOut,
     DailyValuationOut,
@@ -144,6 +145,8 @@ from server_fast.app.bds.sync_task_utils import cleanup_zombies as _cleanup_zomb
 # 跨模块段执行器：bds 不 import irs / bills（规则 4.12），只从注册表按名取用
 from server_fast.app.bds.sync_task_utils import (
     get_stage_runner,
+    get_chain_card_runner,
+    register_chain_card_runner,
     pop_stage_runtime,
     set_stage_runtime,
 )
@@ -787,25 +790,7 @@ def sync_index_constituent(req: IndexConstituentSyncRequest):
             raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
         # 3. 建任务（scope=index_backfill，与批量同步的 scope 区分开）
-        task = BdsSyncTask(
-            scope="index_backfill",
-            scope_params={
-                "index_codes": [p["code"] for p in plan["per_index"]],
-                "start_date": req.start_date.isoformat() if req.start_date else None,
-            },
-            tables=["index-constituent"],
-            status="running",
-            total_count=plan["total"],
-            done_count=0,
-            success_count=0,
-            no_data_count=0,
-            error_count=0,
-            progress=0,
-            errors=None,
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
+        task = _create_index_backfill_task(db, req, plan)
 
         # 4. 注册停止信号并启动后台线程（daemon=True：进程退出时自动终止）
         _stop_events[task.id] = threading.Event()
@@ -820,6 +805,33 @@ def sync_index_constituent(req: IndexConstituentSyncRequest):
 
     finally:
         db.close()
+
+
+def _create_index_backfill_task(db: Session, req: IndexConstituentSyncRequest, plan: dict) -> BdsSyncTask:
+    """建指数成分股回填任务行（POST /bds/sync/index-constituent 与串联同步链复用）。
+
+    plan 为 plan_index_constituent_backfill 的产物；校验失败抛 HTTPException。
+    """
+    task = BdsSyncTask(
+        scope="index_backfill",
+        scope_params={
+            "index_codes": [p["code"] for p in plan["per_index"]],
+            "start_date": req.start_date.isoformat() if req.start_date else None,
+        },
+        tables=["index-constituent"],
+        status="running",
+        total_count=plan["total"],
+        done_count=0,
+        success_count=0,
+        no_data_count=0,
+        error_count=0,
+        progress=0,
+        errors=None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 @router.post("/sync/index-fund-agg", response_model=BdsSyncTaskOut)
@@ -854,25 +866,7 @@ def sync_index_fund_agg(req: IndexFundAggSyncRequest):
             raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
         # 3. 建任务（scope=index_fund_agg，14 字符 ≤16；与批量同步的 scope 区分开）
-        task = BdsSyncTask(
-            scope="index_fund_agg",
-            scope_params={
-                "index_codes": codes,
-                "start_date": req.start_date.isoformat() if req.start_date else None,
-            },
-            tables=["fund-balance", "fund-income", "fund-cashflow"],
-            status="running",
-            total_count=len(codes),
-            done_count=0,
-            success_count=0,
-            no_data_count=0,
-            error_count=0,
-            progress=0,
-            errors=None,
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
+        task = _create_index_fund_agg_task(db, codes, req.start_date)
 
         # 4. 注册停止信号并启动后台线程（daemon=True：进程退出时自动终止）
         _stop_events[task.id] = threading.Event()
@@ -887,6 +881,33 @@ def sync_index_fund_agg(req: IndexFundAggSyncRequest):
 
     finally:
         db.close()
+
+
+def _create_index_fund_agg_task(db: Session, codes: list, start_date) -> BdsSyncTask:
+    """建指数财务聚合任务行（POST /bds/sync/index-fund-agg 与串联同步链复用）。
+
+    codes 为去重校验后的指数清单；校验失败抛 HTTPException。
+    """
+    task = BdsSyncTask(
+        scope="index_fund_agg",
+        scope_params={
+            "index_codes": codes,
+            "start_date": start_date.isoformat() if start_date else None,
+        },
+        tables=["fund-balance", "fund-income", "fund-cashflow"],
+        status="running",
+        total_count=len(codes),
+        done_count=0,
+        success_count=0,
+        no_data_count=0,
+        error_count=0,
+        progress=0,
+        errors=None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 @router.get("/index-cum-returns")
@@ -2013,51 +2034,61 @@ def sync_macro(req: MacroSyncRequest):
     """
     db = next(get_db())
     try:
-        picked = set(req.stages or [])
-        unknown = picked - set(SYNC_STAGE_ORDER)
-        if unknown:
-            raise HTTPException(
-                status_code=400,
-                detail=f"非法 stages: {sorted(unknown)}（应为 {SYNC_STAGE_ORDER} 的子集）",
-            )
-        # 固定顺序，忽略入参数组顺序
-        stages = [s for s in SYNC_STAGE_ORDER if s in picked]
-        if not stages:
-            raise HTTPException(status_code=400, detail="stages 不能为空（至少选一段）")
-
         # 清理僵尸任务 + 互斥检查（与批量同步/成分股同步同一口径）
         _cleanup_zombies(db, minutes=5)
         running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
         if running:
             raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
-        total = sum(len(_sync_stage_items(s)) for s in stages)
-        task = BdsSyncTask(
-            scope="macro_sync",
-            scope_params={"stages": stages},
-            tables=stages,
-            mark_synced=0,
-            trading_status="trading",
-            max_symbols=0,
-            status="pending",
-            total_count=total,
-            done_count=0,
-            success_count=0,
-            no_data_count=0,
-            error_count=0,
-            progress=0,
-            errors=None,
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
+        # 建任务（stages 校验在 _create_macro_sync_task 内）
+        task = _create_macro_sync_task(db, req.stages or [])
 
         # 注册停止信号（复用 /stop/batch-sync）
         _stop_events[task.id] = threading.Event()
-        threading.Thread(target=_run_sync_thread, args=(task.id, stages), daemon=True).start()
+        threading.Thread(target=_run_sync_thread, args=(task.id, task.tables), daemon=True).start()
         return task
     finally:
         db.close()
+
+
+def _create_macro_sync_task(db: Session, stages: list) -> BdsSyncTask:
+    """校验 stages + 建一键同步任务行（POST /bds/sync/macro 与串联同步链复用）。
+
+    校验失败抛 HTTPException；互斥检查由调用方负责（链线程内联调用时全局锁本就只被链持有）。
+    """
+    picked = set(stages)
+    unknown = picked - set(SYNC_STAGE_ORDER)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法 stages: {sorted(unknown)}（应为 {SYNC_STAGE_ORDER} 的子集）",
+        )
+    # 固定顺序，忽略入参数组顺序
+    ordered = [s for s in SYNC_STAGE_ORDER if s in picked]
+    if not ordered:
+        raise HTTPException(status_code=400, detail="stages 不能为空（至少选一段）")
+
+    total = sum(len(_sync_stage_items(s)) for s in ordered)
+    task = BdsSyncTask(
+        scope="macro_sync",
+        scope_params={"stages": ordered},
+        tables=ordered,
+        mark_synced=0,
+        trading_status="trading",
+        max_symbols=0,
+        status="pending",
+        total_count=total,
+        done_count=0,
+        success_count=0,
+        no_data_count=0,
+        error_count=0,
+        progress=0,
+        errors=None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 
@@ -2572,77 +2603,8 @@ def run_batch_sync(req: BatchSyncRequest):
         if running:
             raise HTTPException(status_code=409, detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
-        # scope 参数校验
-        if req.scope not in ("all", "index", "industry", "explicit", "watch"):
-            raise HTTPException(status_code=400, detail=f"非法 scope: {req.scope}")
-        if req.scope == "index":
-            # 指数多选：index_codes 为准，index_code 单值写法兼容折成列表；
-            # 归一化后写回 req.index_codes ⇒ 后台线程只认这一个字段（不再读 index_code）
-            codes = [c.strip() for c in (req.index_codes or []) if c and c.strip()]
-            if not codes and req.index_code and req.index_code.strip():
-                codes = [req.index_code.strip()]
-            seen, uniq = set(), []
-            for c in codes:
-                if c not in seen:
-                    seen.add(c)
-                    uniq.append(c)
-            if not uniq:
-                raise HTTPException(status_code=400, detail="scope=index 时 index_codes 必填（至少选一个指数）")
-            req.index_codes = uniq
-        if req.scope == "industry" and not req.industry:
-            raise HTTPException(status_code=400, detail="scope=industry 时 industry 必填")
-        if req.scope == "explicit" and not req.symbols:
-            raise HTTPException(status_code=400, detail="scope=explicit 时 symbols 必填")
-        if req.scope == "watch" and not req.symbols:
-            # 旧「监测标的」档（前端选项 2026-11-15 取消），仅为 API / 历史任务兼容保留
-            raise HTTPException(
-                status_code=400,
-                detail="scope=watch 时 symbols 必填（旧档，前端选项已取消）",
-            )
-        # 退市口径校验（schema 未加 pattern ⇒ 由这里统一返 400，与 scope 的校验方式保持一致）
-        if req.trading_status not in ("trading", "delisted", "all"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"非法 trading_status: {req.trading_status}（应为 trading/delisted/all）",
-            )
-
-        # 组装 scope_params
-        scope_params = {}
-        if req.scope == "index":
-            # 多选：存清单而不是单值（前端「运行中回填」按 index_codes 还原勾选）
-            scope_params["index_codes"] = req.index_codes
-        elif req.scope == "industry":
-            scope_params["industry_name"] = req.industry
-        elif req.scope == "explicit":
-            scope_params["symbols"] = req.symbols
-        elif req.scope == "watch":
-            # 旧档兼容：清单仍由调用方显式提交（宏观卡片已改为后端自行读监测表）
-            scope_params["symbols"] = req.symbols
-            scope_params["source"] = "irs.underlying-monitors"
-        # 行为参数存进 JSON 而不是新增表列：历史任务缺该键 ⇒ 一律按 False（不跳过）解读，
-        # 无需 DDL、无需回填历史行；前端「运行中回填」也从这里还原开关状态
-        scope_params["skip_latest_rpt_check"] = bool(req.skip_latest_rpt_check)
-
-        task = BdsSyncTask(
-            scope=req.scope,
-            scope_params=scope_params,
-            tables=req.tables or TABLES,
-            mark_synced=1 if req.mark_synced else 0,
-            exclude_synced_since=req.exclude_synced_since,
-            trading_status=req.trading_status,
-            max_symbols=req.max_symbols,
-            status="pending",
-            total_count=0,
-            done_count=0,
-            success_count=0,
-            no_data_count=0,
-            error_count=0,
-            progress=0,
-            errors=None,
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
+        # scope 参数校验 + 建任务（串联同步链复用同一辅助函数）
+        task = _create_batch_sync_task(db, req)
 
         # 注册停止信号（后台线程从 _stop_events[task.id] 取；/stop/batch-sync 端点 set）
         _stop_events[task.id] = threading.Event()
@@ -2655,6 +2617,85 @@ def run_batch_sync(req: BatchSyncRequest):
 
     finally:
         db.close()
+
+
+def _create_batch_sync_task(db: Session, req: BatchSyncRequest) -> BdsSyncTask:
+    """批量同步 scope 校验 + 建任务行（POST /bds/run/batch-sync 与串联同步链复用）。
+
+    校验失败抛 HTTPException；互斥检查由调用方负责（链线程内联调用时全局锁本就只被链持有）。
+    """
+    # scope 参数校验
+    if req.scope not in ("all", "index", "industry", "explicit", "watch"):
+        raise HTTPException(status_code=400, detail=f"非法 scope: {req.scope}")
+    if req.scope == "index":
+        # 指数多选：index_codes 为准，index_code 单值写法兼容折成列表；
+        # 归一化后写回 req.index_codes ⇒ 后台线程只认这一个字段（不再读 index_code）
+        codes = [c.strip() for c in (req.index_codes or []) if c and c.strip()]
+        if not codes and req.index_code and req.index_code.strip():
+            codes = [req.index_code.strip()]
+        seen, uniq = set(), []
+        for c in codes:
+            if c not in seen:
+                seen.add(c)
+                uniq.append(c)
+        if not uniq:
+            raise HTTPException(status_code=400, detail="scope=index 时 index_codes 必填（至少选一个指数）")
+        req.index_codes = uniq
+    if req.scope == "industry" and not req.industry:
+        raise HTTPException(status_code=400, detail="scope=industry 时 industry 必填")
+    if req.scope == "explicit" and not req.symbols:
+        raise HTTPException(status_code=400, detail="scope=explicit 时 symbols 必填")
+    if req.scope == "watch" and not req.symbols:
+        # 旧「监测标的」档（前端选项 2026-11-15 取消），仅为 API / 历史任务兼容保留
+        raise HTTPException(
+            status_code=400,
+            detail="scope=watch 时 symbols 必填（旧档，前端选项已取消）",
+        )
+    # 退市口径校验（schema 未加 pattern ⇒ 由这里统一返 400，与 scope 的校验方式保持一致）
+    if req.trading_status not in ("trading", "delisted", "all"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"非法 trading_status: {req.trading_status}（应为 trading/delisted/all）",
+        )
+
+    # 组装 scope_params
+    scope_params = {}
+    if req.scope == "index":
+        # 多选：存清单而不是单值（前端「运行中回填」按 index_codes 还原勾选）
+        scope_params["index_codes"] = req.index_codes
+    elif req.scope == "industry":
+        scope_params["industry_name"] = req.industry
+    elif req.scope == "explicit":
+        scope_params["symbols"] = req.symbols
+    elif req.scope == "watch":
+        # 旧档兼容：清单仍由调用方显式提交（宏观卡片已改为后端自行读监测表）
+        scope_params["symbols"] = req.symbols
+        scope_params["source"] = "irs.underlying-monitors"
+    # 行为参数存进 JSON 而不是新增表列：历史任务缺该键 ⇒ 一律按 False（不跳过）解读，
+    # 无需 DDL、无需回填历史行；前端「运行中回填」也从这里还原开关状态
+    scope_params["skip_latest_rpt_check"] = bool(req.skip_latest_rpt_check)
+
+    task = BdsSyncTask(
+        scope=req.scope,
+        scope_params=scope_params,
+        tables=req.tables or TABLES,
+        mark_synced=1 if req.mark_synced else 0,
+        exclude_synced_since=req.exclude_synced_since,
+        trading_status=req.trading_status,
+        max_symbols=req.max_symbols,
+        status="pending",
+        total_count=0,
+        done_count=0,
+        success_count=0,
+        no_data_count=0,
+        error_count=0,
+        progress=0,
+        errors=None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 @router.get("/sync-tasks", response_model=List[BdsSyncTaskOut])
@@ -2720,6 +2761,24 @@ def stop_batch_sync(task_id: int = Query(..., description="要停止的任务 ID
 
     ev.set()
     print(f'[batch-sync] 已发送停止信号 task #{task_id}')
+
+    # 串联链级停止：同时停掉「当前正在跑的子卡」（项间生效），链线程会在
+    # 当前卡结束后终止剩余卡片（失败继续语义下唯一的中断入口就是这里）。
+    # 子卡定位走库内查询（全局互斥 ⇒ 非链任务里 running/pending 的最新一行即当前子卡），
+    # 不依赖内存态，后端重启后照样能联动。
+    task = db.query(BdsSyncTask).get(task_id)
+    if task is not None and task.scope == "chained_sync":
+        child = (db.query(BdsSyncTask)
+                 .filter(BdsSyncTask.status.in_(("running", "pending")),
+                         BdsSyncTask.scope != "chained_sync")
+                 .order_by(BdsSyncTask.id.desc())
+                 .first())
+        if child is not None:
+            child_ev = _stop_events.get(child.id)
+            if child_ev is not None:
+                child_ev.set()
+                print(f'[batch-sync] 串联链 #{task_id} 联动停止当前子卡 #{child.id}')
+
     return {"status": "stopping", "message": f"任务 #{task_id} 停止信号已发出，正在等待当前请求返回..."}
 
 # ============================================================================
@@ -2867,25 +2926,7 @@ def sync_index_valuation(req: IndexValuationSyncRequest):
     db = next(get_db())
     try:
         # 1. 参数校验（先于建任务，避免非法入参在任务表里留下垃圾记录）
-        today = date.today()
-        if req.start_date and req.start_date < date(2005, 1, 1):
-            raise HTTPException(status_code=400,
-                                detail="start_date 不能早于 2005-01-01（该表最早数据起点）")
-        if req.end_date is not None:
-            if req.end_date > today:
-                raise HTTPException(status_code=400,
-                                    detail=f"end_date 不能晚于今天（{today}）：未来日期无数据，跑了只会空转")
-            if req.start_date and req.end_date < req.start_date:
-                raise HTTPException(status_code=400, detail="end_date 不能早于 start_date")
-        try:
-            plan = index_valuation.plan_index_valuation_backfill(
-                req.index_codes, req.start_date, req.end_date, req.days)
-        except ValueError as ex:
-            raise HTTPException(status_code=400, detail=str(ex))
-        if plan["total_ranges"] == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="该区间内没有可算的交易日（各指数最早成分快照晚于 end_date？）")
+        plan = _validate_index_valuation_req(req)
 
         # 2. 僵尸清理 + 互斥检查
         _cleanup_zombies(db, minutes=5)
@@ -2895,32 +2936,7 @@ def sync_index_valuation(req: IndexValuationSyncRequest):
                                 detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
         # 3. 建任务（scope=index_valuation，与 index_backfill 区分开）
-        task = BdsSyncTask(
-            scope="index_valuation",
-            scope_params={
-                "index_codes": [p["code"] for p in plan["per_index"]],
-                "start_date": req.start_date.isoformat() if req.start_date else None,
-                "end_date": req.end_date.isoformat() if req.end_date else None,
-                # days 只在「两端都不传」的纯增量模式下参与计算（指定任一端点时
-                # 起点由 start_date 或最早快照决定）。此处写 null 而非原值，
-                # 否则审计时会把 days=5 误读成「本次重算了 5 个交易日」
-                # —— 实际只传 end_date 时会从最早快照算起（如 #140 实算 110 行）。
-                "days": req.days if (req.start_date is None and req.end_date is None) else None,
-                "with_median": req.with_median,
-            },
-            tables=["index-valuation"],
-            status="running",
-            total_count=plan["total_ranges"],
-            done_count=0,
-            success_count=0,
-            no_data_count=0,
-            error_count=0,
-            progress=0,
-            errors=None,
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
+        task = _create_index_valuation_task(db, req, plan)
 
         # 4. 注册停止信号并启动后台线程
         _stop_events[task.id] = threading.Event()
@@ -2934,6 +2950,68 @@ def sync_index_valuation(req: IndexValuationSyncRequest):
 
     finally:
         db.close()
+
+
+def _validate_index_valuation_req(req: IndexValuationSyncRequest) -> dict:
+    """指数估值重算参数校验 + 生成计划（POST /bds/sync/index-valuation 与串联同步链复用）。
+
+    校验失败抛 HTTPException；返回 plan_index_valuation_backfill 的计划 dict。
+    """
+    today = date.today()
+    if req.start_date and req.start_date < date(2005, 1, 1):
+        raise HTTPException(status_code=400,
+                            detail="start_date 不能早于 2005-01-01（该表最早数据起点）")
+    if req.end_date is not None:
+        if req.end_date > today:
+            raise HTTPException(status_code=400,
+                                detail=f"end_date 不能晚于今天（{today}）：未来日期无数据，跑了只会空转")
+        if req.start_date and req.end_date < req.start_date:
+            raise HTTPException(status_code=400, detail="end_date 不能早于 start_date")
+    try:
+        plan = index_valuation.plan_index_valuation_backfill(
+            req.index_codes, req.start_date, req.end_date, req.days)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+    if plan["total_ranges"] == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="该区间内没有可算的交易日（各指数最早成分快照晚于 end_date？）")
+    return plan
+
+
+def _create_index_valuation_task(db: Session, req: IndexValuationSyncRequest, plan: dict) -> BdsSyncTask:
+    """建指数估值重算任务行（POST /bds/sync/index-valuation 与串联同步链复用）。
+
+    plan 为 plan_index_valuation_backfill 的产物；参数校验由调用方先完成（校验在
+    端点里先于建任务，避免非法入参在任务表里留下垃圾记录），本函数只落任务行。
+    """
+    task = BdsSyncTask(
+        scope="index_valuation",
+        scope_params={
+            "index_codes": [p["code"] for p in plan["per_index"]],
+            "start_date": req.start_date.isoformat() if req.start_date else None,
+            "end_date": req.end_date.isoformat() if req.end_date else None,
+            # days 只在「两端都不传」的纯增量模式下参与计算（指定任一端点时
+            # 起点由 start_date 或最早快照决定）。此处写 null 而非原值，
+            # 否则审计时会把 days=5 误读成「本次重算了 5 个交易日」
+            # —— 实际只传 end_date 时会从最早快照算起（如 #140 实算 110 行）。
+            "days": req.days if (req.start_date is None and req.end_date is None) else None,
+            "with_median": req.with_median,
+        },
+        tables=["index-valuation"],
+        status="running",
+        total_count=plan["total_ranges"],
+        done_count=0,
+        success_count=0,
+        no_data_count=0,
+        error_count=0,
+        progress=0,
+        errors=None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 def _run_valuation_pct_thread(task_id: int, mode: str,
@@ -3030,13 +3108,7 @@ def sync_valuation_percentile(req: ValuationPctSyncRequest):
     db = next(get_db())
     try:
         # 1. 参数校验（先于建任务，避免非法入参在任务表里留下垃圾记录）
-        try:
-            p = percentile_store.plan(
-                subjects=req.subjects, mode=req.mode, from_date=req.from_date)
-        except ValueError as ex:
-            raise HTTPException(status_code=400, detail=str(ex))
-        if p["total_count"] == 0:
-            raise HTTPException(status_code=400, detail="所选标的在估值源表里没有任何交易日")
+        p = _validate_valuation_pct_req(req)
 
         # 2. 僵尸清理 + 全局互斥
         _cleanup_zombies(db, minutes=5)
@@ -3046,28 +3118,7 @@ def sync_valuation_percentile(req: ValuationPctSyncRequest):
                                 detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
         # 3. 建任务（scope=valuation_pct，14 字符 ≤ String(16)）
-        task = BdsSyncTask(
-            scope="valuation_pct",
-            scope_params={
-                "mode": req.mode,
-                "subjects": p["subjects"],
-                "from_date": req.from_date.isoformat() if req.from_date else None,
-                "prune_orphans": req.prune_orphans,
-                "subjects_explicit": req.subjects is not None,
-                # 本次运行时默认清单快照，便于事后回溯「当时监测表里有什么」
-                "default_subjects": p["default_subjects"],
-                "excluded_no_data": p["excluded_no_data"],
-                "monitor_fallback": p["monitor_fallback"],
-            },
-            tables=["valuation-percentile"],
-            status="running",
-            total_count=p["total_count"],
-            done_count=0, success_count=0, no_data_count=0, error_count=0,
-            progress=0, errors=None,
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
+        task = _create_valuation_pct_task(db, req, p)
 
         # 4. 注册停止信号并启动后台线程
         # 🔴 线程收 `req.subjects`（原始值，可为 None），不能收 `p["subjects"]`：
@@ -3083,6 +3134,48 @@ def sync_valuation_percentile(req: ValuationPctSyncRequest):
         return task
     finally:
         db.close()
+
+
+def _validate_valuation_pct_req(req: ValuationPctSyncRequest) -> dict:
+    """估值分位落盘参数校验 + 生成计划（POST /bds/sync/valuation-percentile 与串联同步链复用）。
+
+    校验失败抛 HTTPException；返回 percentile_store.plan 的计划 dict。
+    """
+    try:
+        p = percentile_store.plan(
+            subjects=req.subjects, mode=req.mode, from_date=req.from_date)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
+    if p["total_count"] == 0:
+        raise HTTPException(status_code=400, detail="所选标的在估值源表里没有任何交易日")
+    return p
+
+
+def _create_valuation_pct_task(db: Session, req: ValuationPctSyncRequest, p: dict) -> BdsSyncTask:
+    """建估值分位落盘任务行（POST /bds/sync/valuation-percentile 与串联同步链复用）。"""
+    task = BdsSyncTask(
+        scope="valuation_pct",
+        scope_params={
+            "mode": req.mode,
+            "subjects": p["subjects"],
+            "from_date": req.from_date.isoformat() if req.from_date else None,
+            "prune_orphans": req.prune_orphans,
+            "subjects_explicit": req.subjects is not None,
+            # 本次运行时默认清单快照，便于事后回溯「当时监测表里有什么」
+            "default_subjects": p["default_subjects"],
+            "excluded_no_data": p["excluded_no_data"],
+            "monitor_fallback": p["monitor_fallback"],
+        },
+        tables=["valuation-percentile"],
+        status="running",
+        total_count=p["total_count"],
+        done_count=0, success_count=0, no_data_count=0, error_count=0,
+        progress=0, errors=None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 @router.get("/valuation-percentile/subjects", response_model=List[ValuationPctSubjectOut])
@@ -4049,3 +4142,346 @@ def delete_option_config(cfg_id: int, db: Session = Depends(get_db)):
     db.delete(row)
     db.commit()
     return {"status": "ok", "message": f"已删除配置 {row.contract_id}（行情历史保留）"}
+
+
+# ============================================================================
+# 串联同步（/batch-sync 页面「串联同步」卡片，2026-11-22 方案）
+#
+# 需求：页面 7 张同步卡片原本各自启动独立进程且全局互斥，跑完一张要手动启动下一张；
+#      改为单条后端链任务按固定依赖顺序依次执行用户勾选的卡片，关页面/刷新不中断。
+#
+# 设计（用户定稿）：
+# - 后端编排：POST /bds/run/chained-sync 建一条 scope='chained_sync' 链任务行，
+#   链线程逐卡「建子任务行 + 内联执行」——子任务行与单卡启动完全同构，
+#   各卡片前端进度面板零改动即可认领展示；链行只记编排进度（result.cards）。
+# - 失败继续：某卡校验失败/执行失败/被停不影响后续卡，仅链级停止中断整链。
+# - 固定依赖顺序 CHAIN_CARD_ORDER（宏观→批量→成分→财务聚合→估值重算→
+#   分位落盘→最新截面），估值分位卡片「必须最后跑」的依赖序由顺序保证。
+# - 跨模块卡片经 CHAIN_CARD_RUNNERS 注册表依赖倒置（bds router 注册 bds 域 6 卡，
+#   bills router 注册 bills_import，irs router 注册 um_pct_latest——bills/irs
+#   依赖 bds 合规，规则 4.12），未注册显式报错禁止静默跳过（与 STAGE_RUNNERS 同规则）。
+# - 心跳防僵尸：链行在单卡长执行期间可能 >5 分钟不更新，会被 cleanup_zombies
+#   误杀（列表页/其它启动端点都会触发清理）——链线程起 daemon 心跳定期 touch 链行。
+# ============================================================================
+
+# 固定依赖顺序（链单元，非页面卡片数：宏观卡拆为 macro_sync + bills_import 两个单元）
+CHAIN_CARD_ORDER = [
+    "macro_sync",       # 宏观与基础数据（stages 减去 bills_import）
+    "bills_import",     # 交易明细批量导入（宏观卡勾选时紧跟其后，对齐前端接续语义）
+    "batch_sync",       # 财务及行情批量同步
+    "index_backfill",   # 指数成分股同步/回填
+    "index_fund_agg",   # 指数成分股财务聚合
+    "index_valuation",  # 指数估值重算
+    "valuation_pct",    # 估值分位按日落盘
+    "um_pct_latest",    # 标的监测最新分位刷新
+]
+
+
+def _chain_heartbeat(chain_id: int, stop_event: Optional[threading.Event],
+                     interval: float = 60.0):
+    """链行心跳：每 60s touch 一次 update_time，防 cleanup_zombies 把「单卡长执行、
+    链行不动」误判为僵尸（GET /sync-tasks 等都会触发清理）。链停止或终态后退出。"""
+    while True:
+        if stop_event is not None and stop_event.wait(interval):
+            return  # 链停止信号已置位 → 心跳退出
+        s = SessionLocal()
+        try:
+            t = s.query(BdsSyncTask).get(chain_id)
+            if t is None or t.status not in ("running", "pending"):
+                return
+            t.update_time = datetime.now()
+            s.commit()
+        except Exception as e:  # noqa: BLE001
+            s.rollback()
+            print(f"[chained-sync #{chain_id}] 心跳 touch 失败（不中断）: {type(e).__name__}: {e}")
+        finally:
+            s.close()
+
+
+def _update_chain_progress(db: Session, chain_id: int,
+                           card_results: list, current_card: Optional[str]):
+    """链行进度推进：done_count=已跑完卡片数，progress=百分比，result.cards 全量覆盖。
+
+    每次赋新 dict 而非原地改（JSON 列检测不到内嵌 list 的原地变更）。
+    """
+    chain = db.query(BdsSyncTask).get(chain_id)
+    total = chain.total_count or 0
+    chain.done_count = len(card_results)
+    chain.progress = round(len(card_results) / total * 100, 2) if total else 100
+    chain.result = {"cards": card_results, "current_card": current_card}
+    db.commit()
+
+
+def _read_child_result(db: Session, card: str, child_id: Optional[int]) -> dict:
+    """回读子任务行终态 → 链行 result.cards 的一个条目。"""
+    if child_id is None:
+        return {"card": card, "task_id": None, "status": "failed",
+                "done": 0, "total": 0, "success": 0, "error": 0, "message": None}
+    t = db.query(BdsSyncTask).get(child_id)
+    if t is None:
+        return {"card": card, "task_id": None, "status": "failed",
+                "done": 0, "total": 0, "success": 0, "error": 0,
+                "message": f"子任务 #{child_id} 行丢失"}
+    # 错误摘要取最后一条 message（errors 为 list[dict]，含 symbol/table/message）
+    msg = None
+    if isinstance(t.errors, list) and t.errors:
+        last = t.errors[-1]
+        msg = last.get("message") if isinstance(last, dict) else str(last)
+    return {"card": card, "task_id": t.id, "status": t.status,
+            "done": t.done_count or 0, "total": t.total_count or 0,
+            "success": t.success_count or 0, "error": t.error_count or 0,
+            "message": msg}
+
+
+def _run_chained_sync_thread(chain_id: int, cards: list, params_map: dict):
+    """链线程：按固定顺序逐卡执行（内联调用，不开新线程），失败继续。
+
+    每张卡作为独立子任务行执行（与单卡启动完全同构）；执行器抛异常（校验/建任务
+    失败）由这里捕获记该卡 failed 并继续。链行终态：stopped / failed（有卡失败）/
+    done（全部成功）。
+    """
+    stop_event = _stop_events.get(chain_id)
+    threading.Thread(target=_chain_heartbeat, args=(chain_id, stop_event), daemon=True).start()
+
+    card_results: list = []
+    db = SessionLocal()
+    try:
+        chain = db.query(BdsSyncTask).get(chain_id)
+        if chain is None:
+            return
+        chain.status = "running"
+        chain.start_time = datetime.now()
+        chain.result = {"cards": card_results, "current_card": None}
+        db.commit()
+
+        stopped = False
+        for card in cards:
+            # 链停止检查：卡间生效（当前卡内部的停止由链停止端点联动子卡完成）
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                break
+
+            runner = get_chain_card_runner(card)
+            if runner is None:
+                # 🔴 未注册显式报错记失败，禁止静默跳过（与 STAGE_RUNNERS 同规则）
+                card_results.append({
+                    "card": card, "task_id": None, "status": "failed",
+                    "done": 0, "total": 0, "success": 0, "error": 0,
+                    "message": f"链卡片执行器未注册：{card}（router 加载顺序或模块缺失）",
+                })
+                _update_chain_progress(db, chain_id, card_results, card)
+                continue
+
+            chain.result = {"cards": card_results, "current_card": card}
+            db.commit()
+            child_id = None
+            try:
+                child_id = runner(params_map.get(card, {}))
+            except Exception as e:  # noqa: BLE001
+                card_results.append({
+                    "card": card, "task_id": None, "status": "failed",
+                    "done": 0, "total": 0, "success": 0, "error": 0,
+                    "message": f"{type(e).__name__}: {e}",
+                })
+                _update_chain_progress(db, chain_id, card_results, card)
+                continue
+
+            # 回读子任务终态（读前必 commit：REPEATABLE READ 下新事务才能看到子行最终提交）
+            card_results.append(_read_child_result(db, card, child_id))
+            _update_chain_progress(db, chain_id, card_results, card)
+
+        if stopped:
+            chain.status = "stopped"
+        elif any(r["status"] == "failed" for r in card_results):
+            chain.status = "failed"
+        else:
+            chain.status = "done"
+        chain.done_count = len(card_results)
+        chain.progress = 100
+        chain.result = {"cards": card_results, "current_card": None}
+        chain.end_time = datetime.now()
+        db.commit()
+        print(f"[chained-sync #{chain_id}] {chain.status}："
+              f"{len(card_results)}/{len(cards)} 卡完成"
+              + ("（链停止提前终止）" if stopped else ""))
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        # 兜底：链线程自身异常也要落终态，避免永久 running（僵尸清理 5 分钟再兜一层）
+        try:
+            s2 = SessionLocal()
+            t2 = s2.query(BdsSyncTask).get(chain_id)
+            if t2 is not None:
+                t2.status = "failed"
+                t2.errors = (t2.errors or []) + [{
+                    "symbol": "", "table": "chained-sync",
+                    "message": f"链线程异常: {type(e).__name__}: {e}"}]
+                t2.end_time = datetime.now()
+                s2.commit()
+                s2.close()
+        except Exception:  # noqa: BLE001
+            pass
+        print(f"[chained-sync #{chain_id}] 链线程异常: {e}")
+    finally:
+        _stop_events.pop(chain_id, None)
+        db.close()
+
+
+# ---- bds 域链卡片执行器（建任务辅助函数复用各启动端点抽取的版本）----
+# 约定：fn(params: dict) -> 子任务 id；校验/建任务失败抛异常由链线程记 failed。
+
+
+def _run_macro_sync_card(params: dict) -> int:
+    """链卡片：宏观与基础数据同步（建任务行 + 内联执行，不开线程）。"""
+    req = MacroSyncRequest(**params)
+    db = SessionLocal()
+    try:
+        task = _create_macro_sync_task(db, req.stages or [])
+        _stop_events[task.id] = threading.Event()
+        _run_sync_thread(task.id, task.tables)
+        return task.id
+    finally:
+        db.close()
+
+
+def _run_batch_sync_card(params: dict) -> int:
+    """链卡片：财务及行情批量同步。"""
+    req = BatchSyncRequest(**params)
+    db = SessionLocal()
+    try:
+        task = _create_batch_sync_task(db, req)
+        _stop_events[task.id] = threading.Event()
+        _run_batch_sync_thread(task.id, req)
+        return task.id
+    finally:
+        db.close()
+
+
+def _run_index_backfill_card(params: dict) -> int:
+    """链卡片：指数成分股同步/回填。"""
+    req = IndexConstituentSyncRequest(**params)
+    plan = plan_index_constituent_backfill(req.index_codes, req.start_date)  # ValueError → 链记失败
+    db = SessionLocal()
+    try:
+        task = _create_index_backfill_task(db, req, plan)
+        _stop_events[task.id] = threading.Event()
+        _run_constituent_thread(task.id, [p["code"] for p in plan["per_index"]], req.start_date)
+        return task.id
+    finally:
+        db.close()
+
+
+def _run_index_fund_agg_card(params: dict) -> int:
+    """链卡片：指数成分股财务聚合。"""
+    req = IndexFundAggSyncRequest(**params)
+    codes = list(dict.fromkeys((c or "").strip() for c in req.index_codes if c and c.strip()))
+    if not codes:
+        raise ValueError("index_codes 不能为空，至少选择一个指数")
+    unknown = [c for c in codes if c not in Config.INDEX_CODE]
+    if unknown:
+        raise ValueError(f"未知指数代码：{unknown}")
+    db = SessionLocal()
+    try:
+        task = _create_index_fund_agg_task(db, codes, req.start_date)
+        _stop_events[task.id] = threading.Event()
+        _run_index_fund_agg_thread(task.id, codes, req.start_date)
+        return task.id
+    finally:
+        db.close()
+
+
+def _run_index_valuation_card(params: dict) -> int:
+    """链卡片：指数估值重算。"""
+    req = IndexValuationSyncRequest(**params)
+    plan = _validate_index_valuation_req(req)
+    db = SessionLocal()
+    try:
+        task = _create_index_valuation_task(db, req, plan)
+        _stop_events[task.id] = threading.Event()
+        _run_valuation_thread(task.id, plan, req.start_date, req.end_date, req.with_median)
+        return task.id
+    finally:
+        db.close()
+
+
+def _run_valuation_pct_card(params: dict) -> int:
+    """链卡片：估值分位按日落盘重算。"""
+    req = ValuationPctSyncRequest(**params)
+    p = _validate_valuation_pct_req(req)
+    db = SessionLocal()
+    try:
+        task = _create_valuation_pct_task(db, req, p)
+        _stop_events[task.id] = threading.Event()
+        # 与端点同口径：线程收原始 subjects 而非 plan 展开值（P0-1 prune 语义）
+        _run_valuation_pct_thread(task.id, req.mode, req.subjects, req.from_date,
+                                  p["total_count"], req.prune_orphans)
+        return task.id
+    finally:
+        db.close()
+
+
+register_chain_card_runner("macro_sync", _run_macro_sync_card)
+register_chain_card_runner("batch_sync", _run_batch_sync_card)
+register_chain_card_runner("index_backfill", _run_index_backfill_card)
+register_chain_card_runner("index_fund_agg", _run_index_fund_agg_card)
+register_chain_card_runner("index_valuation", _run_index_valuation_card)
+register_chain_card_runner("valuation_pct", _run_valuation_pct_card)
+
+
+@router.post("/run/chained-sync", response_model=BdsSyncTaskOut)
+def run_chained_sync(req: ChainSyncRequest):
+    """启动串联同步链（后台线程按固定依赖顺序逐卡执行），返回链任务供轮询。
+
+    请求体：`{"cards": [{"card": "<卡片标识>", "params": {...}}, ...]}`；
+    后端按 CHAIN_CARD_ORDER 固定依赖顺序执行，忽略入参数组顺序；空清单/未知卡 → 400。
+
+    - 每张卡作为独立子任务行（bds_sync_task 一行）串行执行，失败继续；
+      链行 result.cards 记各卡结果（card/task_id/status/done/total/success/error/message）。
+    - 互斥：与其它启动端点同口径（有 running 则 409）；链运行期间子任务 running
+      同样让其它端点 409，全局互斥语义自然保持。
+    - 停止：POST /bds/stop/batch-sync?task_id=<链id>——停当前卡（项间生效）并终止剩余。
+    """
+    db = next(get_db())
+    try:
+        picked = {c.card: (c.params or {}) for c in (req.cards or [])}
+        unknown = set(picked) - set(CHAIN_CARD_ORDER)
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"未知卡片: {sorted(unknown)}（合法: {CHAIN_CARD_ORDER}）")
+        # 固定依赖顺序，忽略入参数组顺序
+        cards = [c for c in CHAIN_CARD_ORDER if c in picked]
+        if not cards:
+            raise HTTPException(status_code=400, detail="cards 不能为空（至少选择一张卡片）")
+
+        # 僵尸清理 + 互斥检查（与其它启动端点同一口径）
+        _cleanup_zombies(db, minutes=5)
+        running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
+        if running:
+            raise HTTPException(status_code=409,
+                                detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
+
+        task = BdsSyncTask(
+            scope="chained_sync",           # 12 字符 ≤ String(16)
+            scope_params={"cards": cards, "params": picked},
+            tables=["chained-sync"],
+            mark_synced=0,
+            trading_status="trading",
+            max_symbols=0,
+            status="pending",
+            total_count=len(cards),
+            done_count=0,
+            success_count=0,
+            no_data_count=0,
+            error_count=0,
+            progress=0,
+            errors=None,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+
+        _stop_events[task.id] = threading.Event()
+        threading.Thread(target=_run_chained_sync_thread,
+                         args=(task.id, cards, picked), daemon=True).start()
+        return task
+    finally:
+        db.close()

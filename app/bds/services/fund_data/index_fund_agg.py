@@ -138,11 +138,12 @@ def _compute_index_rows(df, numeric_cols, snap_map, snap_dates):
     return computed, reasons
 
 
-def _upsert_index_rows(db, model, index_code, computed, coverage=None):
+def _upsert_index_rows(db, model, index_code, computed):
     """按 (symbol=index_code, rpt_date) 幂等覆盖写入聚合行，返回写入行数。
 
-    coverage=(snap_cons_cnt, agg_cons_cnt) 仅三表聚合行传入；FinanceDeriv 派生行
-    无覆盖率两列，传 None（不能给没有这两列的模型传非 None，否则字段不存在）。
+    覆盖率（snap_cons_cnt/agg_cons_cnt）直接从 computed 行字典逐行读取——
+    三表聚合行每报告期对应各自时点快照，覆盖率本就逐行不同；FinanceDeriv
+    派生行无这两个键，天然落 NULL，无需调用侧区分。
     """
     saved = 0
     for row in computed:
@@ -161,9 +162,10 @@ def _upsert_index_rows(db, model, index_code, computed, coverage=None):
             "data_type": None,
             "sec_type": "index",
         }
-        if coverage:
-            meta["snap_cons_cnt"] = coverage[0]
-            meta["agg_cons_cnt"] = coverage[1]
+        # 覆盖率逐行写入：三表聚合行带键（快照数/聚合数），deriv 行不带键落 NULL
+        if "snap_cons_cnt" in row:
+            meta["snap_cons_cnt"] = row["snap_cons_cnt"]
+            meta["agg_cons_cnt"] = row["agg_cons_cnt"]
         if existing is None:
             db.add(model(**meta, **values))
         else:
@@ -172,9 +174,9 @@ def _upsert_index_rows(db, model, index_code, computed, coverage=None):
             existing.rpt_type = row["rpt_type"]
             existing.data_type = None
             existing.sec_type = "index"
-            if coverage:
-                existing.snap_cons_cnt = coverage[0]
-                existing.agg_cons_cnt = coverage[1]
+            if "snap_cons_cnt" in row:
+                existing.snap_cons_cnt = row["snap_cons_cnt"]
+                existing.agg_cons_cnt = row["agg_cons_cnt"]
             for col, val in values.items():
                 setattr(existing, col, val)
         saved += 1

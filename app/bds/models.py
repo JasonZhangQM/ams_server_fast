@@ -849,7 +849,7 @@ class BdsSyncTask(Base, BaseModel):
     #                   供 /irs/today 与 /irs/underlying-monitors 读取）
     # bills_risk      = 风险情景网格落库（bills 域 POST /bills/sync/group 末段自动触发，
     #                   10 字符；2026-11-06 新增。失败不阻断账单净值汇总）
-    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill/index_valuation/macro_sync/bills_import/bills_risk/option_market/option_info/valuation_pct/um_pct_latest")
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, comment="同步范围: all/index/industry/explicit/index_backfill/index_fund_agg/index_valuation/macro_sync/bills_import/bills_risk/option_market/option_info/valuation_pct/um_pct_latest/chained_sync(串联链,子卡各自成行)")
     scope_params: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="范围参数: {index_code/industry_name/symbols} 或 {index_codes/start_date} 或 {stages}")
     tables: Mapped[list] = mapped_column(JSON, nullable=False, comment="要同步的表列表")
     mark_synced: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1", comment="全部成功后是否写 sync_at: 1=是 0=否")

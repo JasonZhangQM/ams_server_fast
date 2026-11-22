@@ -25,6 +25,7 @@ from server_fast.app.bds.sync_task_utils import (
     STOP_EVENTS,
     cleanup_zombies,
     register_stage_runner,
+    register_chain_card_runner,
     set_stage_runtime,
 )
 from server_fast.app.irs.config import Config as IrsCfg
@@ -1242,40 +1243,18 @@ def sync_um_percentile():
     """
     db = next(get_db())
     try:
-        # 1. 先校验范围，避免非法状态在任务表留垃圾记录
-        symbols = service.um_percentile.monitor_symbols(db)
-        if not symbols:
-            raise HTTPException(status_code=400,
-                                detail="标的监测表为空，无处可刷（先在 /irs/underlying-monitors 加标的）")
-
-        # 2. 僵尸清理 + 全局互斥（与 bds 各同步端点同一把锁）
+        # 1. 僵尸清理 + 全局互斥（与 bds 各同步端点同一把锁）
         cleanup_zombies(db, minutes=5)
         running = db.query(BdsSyncTask).filter(BdsSyncTask.status == "running").first()
         if running:
             raise HTTPException(status_code=409,
                                 detail=f"已有进行中的任务 #{running.id}，请等待完成后再启动")
 
-        # 3. 建任务（scope=um_pct_latest，13 字符 ≤ String(16)）
-        task = BdsSyncTask(
-            scope="um_pct_latest",
-            scope_params={
-                "subjects": symbols,
-                "subject_count": len(symbols),
-                "range_source": "irs_underlying_monitor",
-            },
-            tables=["irs-um-percentile"],
-            status="running",
-            total_count=len(symbols),
-            done_count=0, success_count=0, no_data_count=0, error_count=0,
-            progress=0, errors=None,
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
+        # 2. 建任务（scope=um_pct_latest，13 字符 ≤ String(16)）；
+        #    监测表为空的校验在 _create_um_pct_task 内，先于落行抛出，不留垃圾记录
+        task, stop_event, symbols = _create_um_pct_task(db)
 
-        # 4. 注册停止信号 + 起 daemon 线程
-        stop_event = threading.Event()
-        STOP_EVENTS[task.id] = stop_event
+        # 3. 起 daemon 线程（停止信号已由 _create_um_pct_task 注册）
         threading.Thread(
             target=_run_um_pct_thread,
             args=(task.id, len(symbols), stop_event),
@@ -1284,6 +1263,54 @@ def sync_um_percentile():
         return task
     finally:
         db.close()
+
+
+def _create_um_pct_task(db: Session):
+    """建最新分位刷新任务行 + 注册停止信号（POST /irs/sync/um-percentile 与串联同步链复用）。
+
+    返回 (task, stop_event, symbols)；监测表为空抛 HTTPException。
+    """
+    symbols = service.um_percentile.monitor_symbols(db)
+    if not symbols:
+        raise HTTPException(status_code=400,
+                            detail="标的监测表为空，无处可刷（先在 /irs/underlying-monitors 加标的）")
+    task = BdsSyncTask(
+        scope="um_pct_latest",
+        scope_params={
+            "subjects": symbols,
+            "subject_count": len(symbols),
+            "range_source": "irs_underlying_monitor",
+        },
+        tables=["irs-um-percentile"],
+        status="running",
+        total_count=len(symbols),
+        done_count=0, success_count=0, no_data_count=0, error_count=0,
+        progress=0, errors=None,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    stop_event = threading.Event()
+    STOP_EVENTS[task.id] = stop_event
+    return task, stop_event, symbols
+
+
+def _run_um_pct_latest_card(params: dict) -> int:
+    """串联同步链卡片：标的监测最新分位刷新（建任务行 + 内联执行，不开线程）。
+
+    经 register_chain_card_runner 注册（irs → bds 合规，规则 4.12）；
+    params 忽略（该卡片无参数），接口与其它链卡片保持一致。
+    """
+    db = SessionLocal()
+    try:
+        task, stop_event, symbols = _create_um_pct_task(db)
+        _run_um_pct_thread(task.id, len(symbols), stop_event)
+        return task.id
+    finally:
+        db.close()
+
+
+register_chain_card_runner("um_pct_latest", _run_um_pct_latest_card)
 
 
 @router.get("/um-percentile/stats")
