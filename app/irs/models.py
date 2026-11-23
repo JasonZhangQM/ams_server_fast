@@ -523,10 +523,8 @@ class UmPercentile(Base, BaseModel):
         Date, nullable=False, comment="锚点：该标的上游估值序列最后一个交易日")
     source_as_of: Mapped[Optional[date]] = mapped_column(
         Date, nullable=True, comment="该标的所属上游估值表末日，指数/个股各自")
-    first_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    raw_n: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    # 锚点当日原始值（个股未清洗，可为负 / NULL）
+    # 锚点当日原始值（个股未清洗，可为负 / NULL）——抽屉「估值与走势」Tab 消费，保留
     current_pe: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(20, 4), nullable=True, comment="PE(TTM)")
     current_pb: Mapped[Optional[Decimal]] = mapped_column(
@@ -550,30 +548,15 @@ class UmPercentile(Base, BaseModel):
     dy_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
     dy_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
 
-    # 每指标 3 窗口的 {pct,min,max,median,z,n}
-    pe_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    pb_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    ps_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    dy_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-
     # 每指标独立状态：个股可能仅 dy 无有效值，其余三个照常出分位
     status_pe: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="ok", comment="ok/loss/no_data")
     status_pb: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
     status_ps: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
     status_dy: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
-    status_note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    windows_short: Mapped[Optional[dict]] = mapped_column(
-        JSON, nullable=True, comment="按 metric 分组的短窗口标记（n<250）")
-    windows_undercovered: Mapped[Optional[dict]] = mapped_column(
-        JSON, nullable=True, comment="按 metric 分组的覆盖不足窗口（左界早于数据首日）")
     window_cut: Mapped[Optional[dict]] = mapped_column(
         JSON, nullable=True, comment="锚点日的 3/5/10y 实际左界，口径审计用")
 
-    cleaned_n_pe: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    cleaned_n_pb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    cleaned_n_ps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    cleaned_n_dy: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     input_fp: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True, comment="4 指标源序列指纹（Python 侧 sha256）")
     calc_at: Mapped[datetime] = mapped_column(

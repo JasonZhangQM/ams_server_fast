@@ -40,22 +40,21 @@ TABLE = "irs_um_percentile"
 
 # 4 个指标在宽表里的列前缀（与 bds 历史表同源，改这里必须同步 percentile_stat）
 PCT_PREFIX = {"pe_ttm": "pe", "pb_mrq": "pb", "ps_ttm": "ps", "dy_ttm": "dy"}
-JSON_FIELDS = {"pe_stat", "pb_stat", "ps_stat", "dy_stat",
-               "windows_short", "windows_undercovered", "window_cut"}
+JSON_FIELDS = {"window_cut"}
 
 # 🔒4.9 显式白名单：只覆盖派生列，绝不含 id / create_time / update_time / note，
 # 也不含唯一键 subject_type / symbol（建行时赋值，之后不动）。
+# 2026-11-23 瘦身（随 bds 历史表 44 → 28 列）：current_* 保留（抽屉 MarketStatsTab
+# 消费），first_date / raw_n / *_stat / status_note / windows_* / cleaned_n_* 删除。
 UPDATE_FIELDS: list[str] = [
-    "as_of", "source_as_of", "first_date", "raw_n",
+    "as_of", "source_as_of",
     "current_pe", "current_pb", "current_ps", "current_dy",
     "pe_pct_3y", "pe_pct_5y", "pe_pct_10y",
     "pb_pct_3y", "pb_pct_5y", "pb_pct_10y",
     "ps_pct_3y", "ps_pct_5y", "ps_pct_10y",
     "dy_pct_3y", "dy_pct_5y", "dy_pct_10y",
-    "pe_stat", "pb_stat", "ps_stat", "dy_stat",
-    "status_pe", "status_pb", "status_ps", "status_dy", "status_note",
-    "windows_short", "windows_undercovered", "window_cut",
-    "cleaned_n_pe", "cleaned_n_pb", "cleaned_n_ps", "cleaned_n_dy",
+    "status_pe", "status_pb", "status_ps", "status_dy",
+    "window_cut",
     "input_fp", "calc_at",
 ]
 
@@ -285,9 +284,6 @@ def read_row(symbol: str, db: Optional[Session] = None) -> Optional[dict]:
             "as_of": r.as_of.isoformat() if r.as_of else None,
             "source_as_of": r.source_as_of.isoformat() if r.source_as_of else None,
             "calc_at": r.calc_at.strftime("%Y-%m-%d %H:%M:%S") if r.calc_at else None,
-            "first_date": r.first_date.isoformat() if r.first_date else None,
-            "raw_n": r.raw_n,
-            "status_note": r.status_note,
             "current": current,
             "pct": pct,
             "status": status,

@@ -56,8 +56,9 @@ from server_fast.app.bds.models import (
     OptionConfig,
     OptionInfo,
     OptionMarket,
-    SymbolInfo, 
+    SymbolInfo,
     TradeDate,
+    ValuationPercentile,
 )
 from server_fast.app.bds.schemas import (
     BdsSyncTaskOut,
@@ -89,6 +90,7 @@ from server_fast.app.bds.schemas import (
     OptionMarketUpdate,
     SymbolInfoOut,
     TradeDateOut,
+    ValuationPercentileRow,
     ValuationPctSubjectOut,
     ValuationPctSyncRequest,
 )
@@ -2857,6 +2859,41 @@ def list_index_valuation_percentiles(
         return index_valuation.get_percentiles(index_codes, metric)
     except ValueError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
+
+
+@router.get("/valuation-percentiles", response_model=PageResponse[ValuationPercentileRow])
+def list_valuation_percentiles(
+    subject_type: Optional[str] = Query(default=None, description="index / stock，不传=全部"),
+    symbols: Optional[List[str]] = Query(default=None, description="标的 gm 代码（可多值），不传=全部"),
+    start_date: Optional[date] = Query(default=None, description="观察日起始 YYYY-MM-DD"),
+    end_date: Optional[date] = Query(default=None, description="观察日结束 YYYY-MM-DD"),
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """估值分位落盘原始数据（行式分页），供 /bds/market-data/percentile 表格页。
+
+    一行 = 一个标的的一个观察日；排序 `as_of DESC, subject_type, symbol`——
+    首页固定是最新观察日 × 全部标的，与 um 截面表当前值对得上。
+    窗口口径 A：有效样本 n<250 的窗口分位为 NULL（前端显示 —）。
+    """
+    _guard_list_offset(offset)
+    q = db.query(ValuationPercentile)
+    if subject_type:
+        q = q.filter(ValuationPercentile.subject_type == subject_type)
+    if symbols:
+        q = q.filter(ValuationPercentile.symbol.in_(symbols))
+    if start_date:
+        q = q.filter(ValuationPercentile.as_of >= start_date)
+    if end_date:
+        q = q.filter(ValuationPercentile.as_of <= end_date)
+    total = q.count()
+    rows = q.order_by(
+        ValuationPercentile.as_of.desc(),
+        ValuationPercentile.subject_type,
+        ValuationPercentile.symbol,
+    ).offset(offset).limit(limit).all()
+    return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/stock-valuations")

@@ -617,6 +617,41 @@ class IndexValuationRow(BaseModel):
     update_time: datetime  # 更新时间
 
 
+class ValuationPercentileRow(BaseModel):
+    """估值分位落盘行（对应 bds.ValuationPercentile 模型，供 /valuation-percentiles 用）。
+
+    一行 = 一个标的的一个观察日（窗口口径 A：有效样本 n<250 的窗口分位为 NULL，
+    页面显示 —）。status_* 只描述当日值有效性（ok/loss/no_data），与窗口样本量解耦。
+    ⚠️ 2026-11-23 瘦身后表里已无 current_*/ *_stat/窗口标记列；audit 列仅保留
+    input_fp / calc_at（分位数值由同一内核产出，与 um 截面表逐值一致）。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    subject_type: str  # index / stock
+    symbol: str  # gm 格式代码
+    as_of: date  # 观察日
+    pe_pct_3y: Optional[Decimal] = None
+    pe_pct_5y: Optional[Decimal] = None
+    pe_pct_10y: Optional[Decimal] = None
+    pb_pct_3y: Optional[Decimal] = None
+    pb_pct_5y: Optional[Decimal] = None
+    pb_pct_10y: Optional[Decimal] = None
+    ps_pct_3y: Optional[Decimal] = None
+    ps_pct_5y: Optional[Decimal] = None
+    ps_pct_10y: Optional[Decimal] = None
+    dy_pct_3y: Optional[Decimal] = None
+    dy_pct_5y: Optional[Decimal] = None
+    dy_pct_10y: Optional[Decimal] = None
+    status_pe: str = "ok"  # ok/loss/no_data
+    status_pb: str = "ok"
+    status_ps: str = "ok"
+    status_dy: str = "ok"
+    source_as_of: Optional[date] = None  # 上游源末日（读取侧新鲜度）
+    input_fp: Optional[str] = None  # 源序列指纹（修订审计）
+    calc_at: Optional[datetime] = None  # 本行计算时间
+
+
 class BdsSyncTaskOut(BaseModel):
     """批量同步任务响应 Schema（对应 bds.BdsSyncTask 模型）。"""
 

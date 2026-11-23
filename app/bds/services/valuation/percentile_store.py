@@ -36,12 +36,15 @@
   监测表移除标的后历史行默认保留，只在 `result.orphan_in_store` 提示（用户裁定 2）。
 
 2026-11-04 P1 修复（docs/估值分位落盘问题优化方案_2026-11-04.md §2）：
-- `windows_undercovered`：只标「窗口左界早于该 metric 有效值首日 ⇒ 名义年限 > 实际覆盖」，
-  **不改分位数值、不改 status 三态、不改 `um_today.percentiles()` 契约**（方案 A）。
-- 源末日按 subject_type 取各自上游表末日，快跳过不再拿个股表末日判指数 subject。
 - 🔴 `SCHEMA_EPOCH` 结构变更闸：新增列 / 改口径后，历史行 `calc_at` 早于该时刻 ⇒
   强制全量重建。否则新增列永远等不到回填——快跳过只看 fp / 源末日 / window_cut，
   这三者都没变时会静默跳过，新列 26,816 行全是 NULL。
+
+2026-11-23 瘦身（44 → 28 列，激进版）：删除前端零消费的纯审计列——current_*、
+*_stat、windows_short、windows_undercovered（percentile_warnings 链路下线，无调用方）、
+status_note、first_date / raw_n / cleaned_n_*。保留：12 分位列 + status 四态 +
+window_cut / source_as_of / input_fp / calc_at（三道闸 + 新鲜度）+ note 人工哨兵。
+SCHEMA_EPOCH 同步上调触发全量重建回填。
 """
 from __future__ import annotations
 
@@ -70,13 +73,18 @@ TABLE = "bds_valuation_percentile"
 # 🔒4.12：bds 只能被依赖。这里只登记**表名字符串**，不 import irs 任何模块/模型；
 # 默认标的清单由 subject_diagnostics() 在运行时用原生 SQL 取（方案 §3.1）。
 MONITOR_TABLE = "irs_underlying_monitor"
-MIN_WINDOW_SAMPLES = 250  # 与 stock_valuation 同源：n 低于它说明窗口实际覆盖不足
+# 口径 A（2026-11-23 用户定稿）：窗口有效样本下限（约一年交易日）。
+# n 低于它 ⇒ 该窗口分位不保存（NULL）。与实时分位专页的 short 标记口径一致。
+MIN_WINDOW_SAMPLES = 250
 
 # 🔴 表结构 / 落表口径变更时刻：calc_at 早于它的行必须全量重建（P1 新增列时用）。
 # 快跳过的三道闸（fp / 源末日 / window_cut）感知不到「多了/改了一列」，
 # 没有这道闸，新增列的历史行会永远保持 NULL。以后再改落表结构请同步上调此常量，
 # 并把变更原因写进 docs 的实施记录；result.schema_epoch 会把它暴露给排查。
-SCHEMA_EPOCH = datetime(2026, 11, 4, 21, 0, 0)
+# 2026-11-23 瘦身（44 → 28 列）：删 current_*/ *_stat / windows_short /
+# windows_undercovered / status_note / first_date / raw_n / cleaned_n_*，上调触发全量重建。
+# 同日口径 A：窗口 n<250 分位不保存（NULL），再次上调（09:00）触发全量重写。
+SCHEMA_EPOCH = datetime(2026, 11, 23, 9, 0, 0)
 
 # ⚠️ **兜底常量，不再是默认清单**（2026-11-04 起）：仅当 irs_underlying_monitor
 # 查询失败 / 空表时由 subject_diagnostics() 回退，同时作为几个历史探针的固定基线。
@@ -93,16 +101,12 @@ UNIQUE_KEYS = ["subject_type", "symbol", "as_of"]
 # 漏传 update_columns 会让 upsert_df_to_db 默认「除唯一键外全更」，
 # 将来加人工列时就会把它悄悄覆盖掉（§10 哨兵 4）。
 fields_pct_update: list[str] = [
-    "current_pe", "current_pb", "current_ps", "current_dy",
     "pe_pct_3y", "pe_pct_5y", "pe_pct_10y",
     "pb_pct_3y", "pb_pct_5y", "pb_pct_10y",
     "ps_pct_3y", "ps_pct_5y", "ps_pct_10y",
     "dy_pct_3y", "dy_pct_5y", "dy_pct_10y",
-    "pe_stat", "pb_stat", "ps_stat", "dy_stat",
-    "status_pe", "status_pb", "status_ps", "status_dy", "status_note",
-    "windows_short", "windows_undercovered", "window_cut",
-    "first_date", "raw_n",
-    "cleaned_n_pe", "cleaned_n_pb", "cleaned_n_ps", "cleaned_n_dy",
+    "status_pe", "status_pb", "status_ps", "status_dy",
+    "window_cut",
     "source_as_of", "input_fp", "calc_at",
 ]
 
@@ -268,7 +272,7 @@ def _valid(subject_type: str, metric: str, v) -> bool:
 
 @lru_cache(maxsize=30000)
 def _cuts_map(as_of: date) -> dict[str, date]:
-    """窗口左界（date 对象），供覆盖不足判据逐行比较，避免重复 `json.loads`。"""
+    """窗口左界（date 对象）缓存，供 `_cuts_json` 序列化 window_cut 列。"""
     return {k: date.fromisoformat(v) for k, v in window_cuts(as_of).items()}
 
 
@@ -284,91 +288,60 @@ def build_rows(db, subject_type: str, symbol: str, raw: list[tuple],
                fp: str, only_dates: Optional[set] = None) -> list[dict]:
     """一个 subject 的全历史宽表行（一 as_of 一行）。
 
-    `current_*` 存**当日原始值**（个股未清洗，可为负 / NULL），只作审计；
-    分位公式里的 `current` 是「截至 as_of 的最后一个有效值」，由 daily_percentiles 内部取。
+    2026-11-23 瘦身后只产出：12 分位列 + status 四态 + window_cut + 工程三列
+    （外加 current_* 4 键仅存于返回 dict，供 um 截面表 `_upsert` 消费——bds 历史
+    表列已删、白名单不含，落库不带）。
+    当日原始值 / 分布 stat / 窗口标记 / 样本量审计列已删除（前端零消费）。
+
+    口径 A（2026-11-23 用户定稿）：**窗口有效样本 n < 250（约一年交易日）⇒
+    该窗口分位直接不保存（NULL）**，不再有 short/undercovered 标记列。
+    status 仍只描述当日值有效性（ok/loss/no_data），与窗口样本量解耦——
+    status=ok 但某窗口 pct=NULL 是合法组合（新股早期窗口），页面显示 `—`。
     """
     if not raw:
         return []
-    dates = [r[0] for r in raw]
-    first_date = dates[0]
-    raw_n = len(raw)
 
     daily: dict[str, dict] = {}
-    seq_by_metric: dict[str, list] = {}
     for j, m in enumerate(PCT_METRICS, start=1):
         seq = [(r[0], float(r[j])) for r in raw if _valid(subject_type, m, r[j])]
-        seq_by_metric[m] = seq
         # 增量模式只让内核对目标日构造 stat dict（滑动状态仍逐日维护）
         daily[m] = daily_percentiles(seq, only_dates=only_dates) if seq else {}
 
     # 每个 metric 是否全序列都无有效值（no_data），区别于某日无效（loss）
-    no_data = {m: not seq_by_metric[m] for m in PCT_METRICS}
-    # P1-4：按 **metric 级**有效值首日判覆盖不足，不用行级 first_date。
-    # 个股 dy_ttm 可能前几年全 NULL、指数某日整体留空，用行级首日会漏标。
-    first_valid: dict[str, Optional[date]] = {
-        m: (seq_by_metric[m][0][0] if seq_by_metric[m] else None)
-        for m in PCT_METRICS
-    }
+    no_data = {m: not any(_valid(subject_type, m, r[j]) for r in raw)
+               for j, m in enumerate(PCT_METRICS, start=1)}
 
     rows = []
     iter_raw = raw if only_dates is None else [r for r in raw if r[0] in only_dates]
     for r in iter_raw:
         as_of = r[0]
-        # 本行的短窗口标记（按 metric 分组，逐行 O(4×3)，不是全历史 O(n²)）
-        short_row: dict[str, list[str]] = {}
-        for m in PCT_METRICS:
-            drow = daily[m].get(as_of)
-            if not drow:
-                continue
-            bad = [k for k in WINDOW_KEYS if drow[k]["n"] < MIN_WINDOW_SAMPLES]
-            if bad:
-                short_row[m] = bad
-        # P1-4：窗口左界早于该 metric 有效值首日 ⇒ 名义年限 > 实际覆盖。
-        # 只落标记，分位数值与 status 三态一律不动（方案 A）；无有效值则全窗口都标。
-        cuts = _cuts_map(as_of)
-        under_row: dict[str, list[str]] = {}
-        for m in PCT_METRICS:
-            fd = first_valid[m]
-            bad = [k for k in WINDOW_KEYS if cuts[k] < fd] if fd else list(WINDOW_KEYS)
-            if bad:
-                under_row[m] = bad
         row: dict = {
             "subject_type": subject_type, "symbol": symbol, "as_of": as_of,
-            "first_date": first_date, "raw_n": raw_n,
             "source_as_of": source_as_of, "input_fp": fp, "calc_at": calc_at,
             "window_cut": _cuts_json(as_of),
-            "windows_short": json.dumps(short_row, ensure_ascii=False) if short_row else None,
-            "windows_undercovered": (json.dumps(under_row, ensure_ascii=False)
-                                     if under_row else None),
         }
-        statuses, notes = [], []
         for j, m in enumerate(PCT_METRICS, start=1):
             pre = PCT_PREFIX[m]
-            v = r[j]
-            row[f"current_{pre}"] = None if v is None else float(v)
-            row[f"cleaned_n_{pre}"] = len(seq_by_metric[m])
-
+            # current_* 只进行字典（um 截面表 upsert 消费）；bds 历史表列已删、
+            # fields_pct_update 白名单不含 ⇒ 落库不受影响
+            row[f"current_{pre}"] = None if r[j] is None else float(r[j])
             if no_data[m]:
                 st = "no_data"
                 stats = None
-                notes.append(f"{m} 无有效样本")
             elif as_of not in daily[m]:
                 # 当天无有效值 ⇒ 该 metric 分位全 NULL，其余指标照常写
                 st = "loss"
                 stats = None
-                notes.append(f"{m} 当日无有效值")
             else:
                 st = "ok"
                 stats = {k: daily[m][as_of][k] for k in WINDOW_KEYS}
 
             row[f"status_{pre}"] = st
-            statuses.append(st)
             for k in WINDOW_KEYS:
+                d = (stats or {}).get(k)
+                # 口径 A：样本不足的窗口不保存分位（n 不足 ⇒ NULL，下游显示 —）
                 row[f"{pre}_pct_{k.split('_')[1]}"] = (
-                    (stats or {}).get(k, {}).get("pct") if stats else None)
-            row[f"{pre}_stat"] = json.dumps(stats, ensure_ascii=False) if stats else None
-
-        row["status_note"] = "；".join(dict.fromkeys(notes))[:255] if notes else None
+                    d.get("pct") if d and d.get("n", 0) >= MIN_WINDOW_SAMPLES else None)
         rows.append(row)
     return rows
 
@@ -710,9 +683,9 @@ def _cut_is_calendar(prev: tuple) -> bool:
 # 读取侧（§6.1）
 # ---------------------------------------------------------------------------
 
-READ_COLUMNS = ["subject_type", "symbol", "as_of", "source_as_of", "first_date",
+READ_COLUMNS = ["subject_type", "symbol", "as_of", "source_as_of",
                 "status_pe", "status_pb", "status_ps", "status_dy",
-                "window_cut", "windows_short", "windows_undercovered"] + PCT_COLUMNS
+                "window_cut"] + PCT_COLUMNS
 
 
 def read_latest_rows(recent_days: int = 15) -> dict[tuple[str, str], dict]:
@@ -753,46 +726,4 @@ def read_percentiles() -> dict[tuple[str, str], Optional[float]]:
             if row.get(f"status_{pre}") != "ok":
                 continue
             out[(symbol, metric)] = _norm(row.get(f"{pre}_pct_10y"))
-    return out
-
-
-def _as_dict(v) -> dict:
-    """JSON 列可能是 str / dict / None，统一成 dict（MySQL driver 版本不同返回不同）。"""
-    if not v:
-        return {}
-    if isinstance(v, str):
-        try:
-            return json.loads(v)
-        except ValueError:
-            return {}
-    return dict(v)
-
-
-def percentile_warnings() -> dict[str, dict]:
-    """窗口覆盖 / 样本不足提示，**供新查询页调用**（P1-4，方案 §2.1）。
-
-    与 `read_percentiles()` 完全解耦：`um_today.percentiles()` 契约及 6 个 irs 消费方
-    保持零改动，列表页不加 ⚠️（本轮明确取舍）。两种标记语义不同、不可混用：
-    - `undercovered`：窗口左界早于该 metric 有效值首日 ⇒ 名义年限 > 实际覆盖
-      （如 300750 的 10y 实际只有 8.4y）；
-    - `short`：该窗口有效样本 `n < 250`（约一年交易日），沿用实时分位专页口径。
-
-    数值一律不动：这里只返回提示，不改分位、不改 status、不置 NULL。
-    """
-    out: dict[str, dict] = {}
-    for (t, symbol), row in read_latest_rows().items():
-        under = _as_dict(row.get("windows_undercovered"))
-        short = _as_dict(row.get("windows_short"))
-        if not under and not short:
-            continue
-        out[symbol] = {
-            "subject_type": t,
-            "as_of": row["as_of"].isoformat() if row.get("as_of") else None,
-            "source_as_of": (row["source_as_of"].isoformat()
-                             if row.get("source_as_of") else None),
-            "first_date": (row["first_date"].isoformat()
-                           if row.get("first_date") else None),
-            "undercovered": under,
-            "short": short,
-        }
     return out

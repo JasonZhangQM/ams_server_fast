@@ -1286,13 +1286,16 @@ class ValuationPercentile(Base, BaseModel):
     只落 PE(TTM) / PB(MRQ) / PS(TTM) / 股息率(%) 四指标 × 3/5/10 年，
     `pct_all` 仍由分位专页实时算。
 
-    ⚠️ 列名 `current_*` / `status_*` 刻意避开 MySQL 保留字与 `conclusion varchar(8)`
+    ⚠️ 2026-11-23 瘦身（44 → 28 列，激进版）：删除从未被前端消费的纯审计列——
+    `current_*`（源表可查）、`*_stat`（pct 已单独成列）、`windows_short` /
+    `windows_undercovered`（percentile_warnings 链路下线，无调用方）、`status_note`、
+    `first_date` / `raw_n` / `cleaned_n_*`（样本量审计）。保留：12 分位列（业务产出）、
+    status_* 四态（read_percentiles 按 ok 过滤）、工程列 input_fp / calc_at /
+    window_cut / source_as_of（增量闸 + 新鲜度）。`note` 人工哨兵列不动。
+    ⚠️ 列名 `status_*` 刻意避开 MySQL 保留字与 `conclusion varchar(8)`
     的 1406 坑；DDL 与模型声明两步走（🔒4.4），比对列名/类型/可空，不比列序。
     ⚠️ `note` 是人工列/哨兵列，**不在 `percentile_store.fields_pct_update` 白名单**，
     重算不得覆盖（§10 哨兵 4）。
-    ⚠️ `windows_undercovered`（P1-4）只标「窗口左界早于该 metric 有效值首日」，
-    与 `windows_short`（n<250）语义不同；分位数值与 status 三态一律不受影响。
-    ⚠️ 宽表已 44 列：若 L3 再纳入 `pcf_ttm_oper` / `pe_median`，必须转长表。
     """
 
     __tablename__ = "bds_valuation_percentile"
@@ -1300,13 +1303,6 @@ class ValuationPercentile(Base, BaseModel):
     subject_type: Mapped[str] = mapped_column(String(8), nullable=False, comment="index / stock")
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="gm 格式代码")
     as_of: Mapped[date] = mapped_column(Date, nullable=False, comment="观察日：分位所属交易日，窗口右端锚点")
-
-    # 当日原始值（个股未清洗，可为负 / NULL）
-    current_pe: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="PE(TTM)")
-    current_pb: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="PB(MRQ)")
-    current_ps: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="PS(TTM)")
-    current_dy: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(20, 4), nullable=True, comment="股息率(%)，百分数（4.7224=4.72%），非小数")
 
     # 12 个分位列：4 指标 × 3 窗口
     pe_pct_3y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
@@ -1322,30 +1318,12 @@ class ValuationPercentile(Base, BaseModel):
     dy_pct_5y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
     dy_pct_10y: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
 
-    # 每指标 3 窗口的 {pct,min,max,median,z,n}
-    pe_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    pb_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    ps_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    dy_stat: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-
     # 每指标独立状态：个股可能仅 dy 无有效值，其余三个照常出分位
     status_pe: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok", comment="ok/loss/no_data")
     status_pb: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
     status_ps: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
     status_dy: Mapped[str] = mapped_column(String(16), nullable=False, server_default="ok")
-    status_note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    windows_short: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="按 metric 分组的短窗口标记（n<250）")
-    # P1-4：仅标记「名义窗口年限 > 实际数据覆盖」，不改分位数值 / status（方案 A）
-    windows_undercovered: Mapped[Optional[dict]] = mapped_column(
-        JSON, nullable=True, comment="按 metric 分组的覆盖不足窗口（左界早于该 metric 有效值首日）")
     window_cut: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="本行 3/5/10y 实际左界，口径审计用")
-
-    first_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    raw_n: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    cleaned_n_pe: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    cleaned_n_pb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    cleaned_n_ps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    cleaned_n_dy: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     source_as_of: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="写入时上游源末日，读取侧判新鲜度")
     input_fp: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="4 指标源序列指纹（Python 侧 sha256）")
