@@ -890,6 +890,9 @@ def _create_index_fund_agg_task(db: Session, codes: list, start_date) -> BdsSync
 
     codes 为去重校验后的指数清单；校验失败抛 HTTPException。
     """
+    # 起点在未来日期 ⇒ 三表过滤后必然 0 行、只有 deriv 空转，属误用（2026-11-24）
+    if start_date is not None and start_date > date.today():
+        raise HTTPException(status_code=400, detail=f"start_date {start_date} 晚于今天，未来日期无报告期可聚合")
     task = BdsSyncTask(
         scope="index_fund_agg",
         scope_params={

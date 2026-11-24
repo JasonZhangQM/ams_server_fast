@@ -17,8 +17,9 @@
 - 三表落库后，从库内该指数聚合行（balance+income）派生 bds_finance_deriv 指标
   （整体法，比率类 ×100 存百分比，与 gm 个股行口径一致），sec_type='index' 幂等落库；
   deriv 无成分股可加总的字段（roe_weight 加权口径、ebitda_toi 无折旧摊销科目）落 NULL
-- deriv 全历史重算、不受 start_date 限制：派生自三表聚合行，确定性可重算，
-  避免 start_date 场景下平均类/YoY 找不到上年参考行的边界问题
+- deriv 派生自三表聚合行（确定性可重算，避免 start_date 场景下平均类/YoY
+  找不到上年参考行的边界问题）；2026-11-24 起：起点之后无报告期（三表 computed
+  均空、库内三表聚合行未变）时跳过 deriv 重算，避免幂等空转的假行数
 
 性能约定：每指数每表一次 IN 查询（uk(symbol, rpt_date) 支撑），pandas 内存聚合，
 避免逐 symbol 查询；量级每指数每表约 80 行聚合结果。
@@ -345,7 +346,8 @@ def _aggregate_one_index(index_code, errors, start_date=None):
 
     无快照/跳过原因写入 errors[index_code]。
     start_date（可选）：仅聚合该日及之后的报告期，更早报告期不重算不覆盖；
-    deriv 派生不受 start_date 限制（确定性派生自库内聚合行，全历史重算）。
+    起点之后无报告期（三表 computed 均空）时跳过 deriv 派生——库内三表聚合行
+    未变，重算 deriv 只是幂等空转（2026-11-24 用户定稿，配合未来起点 400 拦截）。
     """
     with SessionLocal() as db:
         snap = _load_snapshot_map(db, index_code)
@@ -356,23 +358,30 @@ def _aggregate_one_index(index_code, errors, start_date=None):
         all_syms = {s for members in snap_map.values() for s in members}
         total_saved = 0
         reasons_by_model = {}
+        any_computed = False  # 本次是否有报告期聚合行产出（决定 deriv 是否重算）
         for model in AGG_MODELS:
             df, numeric_cols = _fetch_fund_df(db, model, all_syms)
             if start_date is not None:
                 # 重算起点：仅聚合该日及之后的报告期，更早报告期不重算不覆盖
                 df = df[df["rpt_date"] >= start_date]
             computed, reasons = _compute_index_rows(df, numeric_cols, snap_map, snap_dates)
+            if computed:
+                any_computed = True
             if df.empty:
-                reasons = ["成分股无该表数据"]
+                # 区分归因：起点过滤后为空 ≠ 成分股真缺数据（2026-11-24，配合未来起点 400 拦截）
+                reasons = ([f"起点 {start_date} 之后无报告期"] if start_date is not None
+                           else ["成分股无该表数据"])
             total_saved += _upsert_index_rows(db, model, index_code, computed)
             if reasons:
                 reasons_by_model[model] = reasons
         # ---- 财务指标派生（整体法）：三表落库后从库内聚合行重算，幂等覆盖 ----
-        deriv_rows = _compute_deriv_rows(
-            _load_index_agg_rows(db, FundBalance, index_code),
-            _load_index_agg_rows(db, FundIncome, index_code),
-        )
-        total_saved += _upsert_index_rows(db, FinanceDeriv, index_code, deriv_rows)
+        # 起点之后无报告期 ⇒ 三表聚合行未变，deriv 重算只是空转，跳过（2026-11-24）
+        if any_computed:
+            deriv_rows = _compute_deriv_rows(
+                _load_index_agg_rows(db, FundBalance, index_code),
+                _load_index_agg_rows(db, FundIncome, index_code),
+            )
+            total_saved += _upsert_index_rows(db, FinanceDeriv, index_code, deriv_rows)
     if reasons_by_model:
         errors[index_code] = "；".join(
             f"{TABLE_LABELS[m]}：{'；'.join(rs)}" for m, rs in reasons_by_model.items()
