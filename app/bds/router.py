@@ -3267,42 +3267,55 @@ def _create_valuation_pct_task(db: Session, req: ValuationPctSyncRequest, p: dic
 def list_valuation_pct_subjects(db: Session = Depends(get_db)):
     """估值分位落盘候选标的（只读，供批量同步卡片 / 新查询页下拉）。
 
-    **以 `irs_underlying_monitor` 运行时清单为基准**（不 import irs，走
-    `percentile_store.subject_diagnostics()` 的表名字符串 SQL，🔒4.12）：
-    监测表全部标的都列出（含 SPX / GC00Y 这类无估值数据的，标 `has_data=false`）；
-    再补「落表已有但监测表已移除」（`orphan_in_store=true`，历史行默认保留）与
-    「指数源表有但还没落盘」（`in_store=false`）。个股源表有 5,920 只，全列会
-    撑爆下拉 ⇒ 不列；任意其它代码由前端 `tag` 自由输入后走单标的 M1。
+    2026-11-25 性能重写：全市场落盘（1,790 万行 / 5,586 标的）后旧实现三处
+    全表扫描合计 137s，远超前端 10s 超时 ⇒
+    - 落表统计改 loose index scan（uk_bvp 上 MIN+MAX 一次出 5,586 组，3.1s），
+      不再 GROUP BY COUNT(*) 全表扫（42s）⇒ row_count 不再逐标的统计，
+      前端 label 改用 first_date 展示
+    - has_data 恢复「点查仅用于差集」原假设：落表有行 ⟹ 曾有非空 pe（空壳行
+      不落盘）⇒ 直接 True；仅对 (监测 ∪ 指数源表) − 落表 的十来个点查（旧
+      实现对 5,588 个候选逐只 EXISTS，60.7s）
+    - in_default / 孤儿白名单对齐五档化口径：SymbolInfo 有效清单（不再用
+      监测表口径的 subject_diagnostics——落表 − 监测表会把 343 只退市股
+      全误标孤儿；真孤儿 = 落表 − SymbolInfo 任意档位 − 监测表）
+    - 旧实现内部的 DISTINCT symbol 全扫（34.8s）随 subject_diagnostics
+      一起退出该端点
     """
-    diag = percentile_store.subject_diagnostics(db)
-    default = set(diag["default"])
-    excluded = set(diag["excluded_no_data"])
-    orphan = set(diag["orphan_in_store"])
+    # 落表统计：loose index scan，标的集合 + 首末 as_of 一次拿（输出已按索引序）
+    store_rows = db.execute(text(
+        "SELECT subject_type, symbol, MIN(as_of), MAX(as_of) "
+        "FROM bds_valuation_percentile GROUP BY subject_type, symbol")).all()
+    seen = {r[1] for r in store_rows}
+
+    # 白名单：默认档（仅在市）与任意档位（含退市）
+    whitelist_default, _ = percentile_store.resolve_scope_subjects(
+        db, scope="all", trading_status="trading")
+    whitelist_any, _ = percentile_store.resolve_scope_subjects(
+        db, scope="all", trading_status="all")
+    mon = percentile_store.monitor_subjects(db)
+
+    # has_data：落表直接 True；仅差集（十来个）EXISTS 点查
     index_codes = set(db.execute(text(
         "SELECT DISTINCT index_code FROM bds_index_valuation")).scalars().all())
+    pending = sorted((set(mon) | index_codes) - seen)
+    has = percentile_store.subjects_with_data(db, pending)
 
-    rows = db.execute(text(
-        "SELECT subject_type, symbol, MIN(as_of), MAX(as_of), COUNT(*) "
-        "FROM bds_valuation_percentile GROUP BY subject_type, symbol"
-    )).all()
-    seen = {r[1] for r in rows}
-    # 一次性判「有没有可算分位的数据」，候选只有十来个，EXISTS 点查即可
-    has = percentile_store.subjects_with_data(
-        db, sorted(seen | set(diag["monitor"]) | index_codes))
+    # 落表标的（store_rows 天然 index 在前、各按 symbol 升序）
     items = [ValuationPctSubjectOut(
         subject_type=r[0], symbol=r[1], first_date=r[2], last_date=r[3],
-        row_count=int(r[4]), in_store=True,
-        in_default=(r[1] in default), has_data=(r[1] in has),
-        orphan_in_store=(r[1] in orphan),
-    ) for r in rows]
+        in_store=True,
+        in_default=(r[1] in whitelist_default),
+        has_data=True,
+        orphan_in_store=(r[1] not in whitelist_any and r[1] not in set(mon)),
+    ) for r in store_rows]
 
-    # 监测表里尚未落盘的（含无数据标的，仍列出以便用户看见「为什么没落」）
-    for code in diag["monitor"]:
+    # 监测表里尚未落盘的（含 SPX / GC00Y 这类无数据标的，仍列出便于理解）
+    for code in mon:
         if code not in seen:
             items.append(ValuationPctSubjectOut(
                 subject_type=("index" if code in index_codes else "stock"),
                 symbol=code, in_store=False,
-                in_default=(code in default), has_data=(code in has),
+                in_default=(code in whitelist_default), has_data=(code in has),
                 orphan_in_store=False))
             seen.add(code)
 
@@ -3311,7 +3324,8 @@ def list_valuation_pct_subjects(db: Session = Depends(get_db)):
         if code not in seen:
             items.append(ValuationPctSubjectOut(
                 subject_type="index", symbol=code, in_store=False,
-                in_default=False, has_data=(code in has), orphan_in_store=False))
+                in_default=(code in whitelist_default), has_data=(code in has),
+                orphan_in_store=False))
     return sorted(items, key=lambda x: (x.subject_type != "index", x.symbol))
 
 

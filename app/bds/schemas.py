@@ -1033,19 +1033,19 @@ class ValuationPctSyncRequest(BaseModel):
 class ValuationPctSubjectOut(BaseModel):
     """估值分位落盘候选标的（GET /bds/valuation-percentile/subjects）。
 
-    **以 `irs_underlying_monitor` 运行时清单为基准**（不再硬编码 L1）：监测表全部
-    标的都列出，含无估值数据的（`has_data=false`）；再补「落表已有但监测表已移除」
-    （`orphan_in_store=true`，历史行默认保留）与「指数源表有但还没落盘」。
-    个股源表有 5,920 只，全列会撑爆下拉 ⇒ 不列；任意其它代码可用前端 `tag`
-    自由输入后走单标的 M1（`subjects` 参数本来就接受任意代码）。
+    2026-11-25 口径对齐五档化：`in_default` 以 SymbolInfo 有效清单为基准
+    （仅 A 股指数 ∪ 仅在市个股）；孤儿白名单 = SymbolInfo 任意档位 ∪ 监测表，
+    落表标的在白名单外才标 `orphan_in_store`（退市股属合法档位不算孤儿）。
+    性能口径：落表统计走 loose index scan，`row_count` 不再逐标的统计恒 0，
+    首末日由 MIN/MAX(as_of) 提供。
     """
 
     symbol: str = Field(description="gm 格式代码")
     subject_type: str = Field(description="index / stock")
     first_date: Optional[date] = Field(default=None, description="落表最早 as_of")
     last_date: Optional[date] = Field(default=None, description="落表最新 as_of")
-    row_count: int = Field(default=0, description="落表行数；未落盘恒 0")
+    row_count: int = Field(default=0, description="2026-11-25 起不再逐标的统计，恒 0")
     in_store: bool = Field(default=True, description="是否已在落表中存在")
-    in_default: bool = Field(default=False, description="是否属于本次运行时默认清单（监测表 ∧ 有估值数据）")
+    in_default: bool = Field(default=False, description="是否属于默认档（SymbolInfo 有效清单 ∧ 仅在市）")
     has_data: bool = Field(default=True, description="上游估值表是否有可算分位的数据；无数据的不落盘")
     orphan_in_store: bool = Field(default=False, description="落表已有但监测表已移除；需显式 prune 才清理")
