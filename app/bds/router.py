@@ -2890,13 +2890,36 @@ def list_valuation_percentiles(
         q = q.filter(ValuationPercentile.as_of >= start_date)
     if end_date:
         q = q.filter(ValuationPercentile.as_of <= end_date)
-    total = q.count()
-    rows = q.order_by(
-        ValuationPercentile.as_of.desc(),
-        ValuationPercentile.subject_type,
-        ValuationPercentile.symbol,
-    ).offset(offset).limit(limit).all()
-    return {"items": rows, "total": total, "limit": limit, "offset": offset}
+    # 总数缓存（2026-11-25 对齐 history_market）：全市场落盘后 1,800 万行级 + JSON
+    # 宽列，无筛选 COUNT(*) 预计 5~10s 级；有筛选走组合索引精确计数，仍用精确值
+    total, total_estimated = resolve_total(
+        db, q, ValuationPercentile,
+        bool(subject_type or symbols or start_date or end_date))
+    # 延迟关联取数（2026-11-25）：k_bvp_list 只解决排序，OFFSET N 仍要逐条回表
+    # （offset=10 万实测 28s 超时）；子查询只取 id 走覆盖索引（叶子含隐式 PK），
+    # 回表从 N 次降到 20 次——offset=178 万（末页）实测 2.99s。外层 join 需重排序
+    sub = (
+        q.with_entities(ValuationPercentile.id)
+        .order_by(
+            ValuationPercentile.as_of.desc(),
+            ValuationPercentile.subject_type,
+            ValuationPercentile.symbol,
+        )
+        .offset(offset).limit(limit)
+        .subquery()
+    )
+    rows = (
+        db.query(ValuationPercentile)
+        .join(sub, ValuationPercentile.id == sub.c.id)
+        .order_by(
+            ValuationPercentile.as_of.desc(),
+            ValuationPercentile.subject_type,
+            ValuationPercentile.symbol,
+        )
+        .all()
+    )
+    return {"items": rows, "total": total, "limit": limit, "offset": offset,
+            "total_is_estimated": total_estimated}
 
 
 @router.get("/stock-valuations")
@@ -3122,6 +3145,14 @@ def _run_valuation_pct_thread(task_id: int, mode: str,
         print(f'[valuation-pct #{task_id}] 失败: {e}')
     finally:
         _stop_events.pop(task_id, None)
+        # 收尾刷新总数缓存（2026-11-25 对齐批量同步收尾）：成功/失败/停止均无条件，
+        # 失败不影响任务终态；1,800 万行级全表 COUNT 约数秒，任务线程内可接受
+        try:
+            refreshed = refresh_table_stat(db, targets=["valuation-percentile"])
+            print(f'[valuation-pct #{task_id}] 已重算总数缓存: {refreshed}')
+        except Exception as e:
+            print(f'[valuation-pct #{task_id}] 重算总数缓存失败（不影响任务）: '
+                  f'{type(e).__name__}: {e}')
         db.close()
 
 

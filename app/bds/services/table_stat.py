@@ -56,6 +56,7 @@ from server_fast.app.bds.models import (
     OptionInfo,
     OptionMarket,
     TradeDate,
+    ValuationPercentile,
 )
 
 # 同步目标名 → ORM 模型。key 由各同步链路自带标识决定，调用方直接把 targets 传进来，
@@ -85,6 +86,9 @@ STAT_TABLES: dict[str, type] = {
     # ↓ 两条独立指数同步线程
     "index-constituent": IndexConstituent,
     "index-valuation": IndexValuation,
+    # ↓ 估值分位落盘（独立卡片线程收尾刷新）：全市场后 1,800 万行级 + JSON 宽列，
+    #   无筛选 COUNT(*) 慢到必须缓存（2026-11-25 对齐 history_market 口径）
+    "valuation-percentile": ValuationPercentile,
 }
 
 # 缓存有效期：超过则视为过旧 → 回落 information_schema 估算（并让前端标 ≈）。

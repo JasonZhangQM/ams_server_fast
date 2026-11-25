@@ -22,6 +22,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     select,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1292,6 +1293,9 @@ class ValuationPercentile(Base, BaseModel):
     `first_date` / `raw_n` / `cleaned_n_*`（样本量审计）。保留：12 分位列（业务产出）、
     status_* 四态（read_percentiles 按 ok 过滤）、工程列 input_fp / calc_at /
     window_cut / source_as_of（增量闸 + 新鲜度）。`note` 人工哨兵列不动。
+    ⚠️ 分位落盘双闸（2026-11-25 定稿）：口径 A——窗口有效样本 n<250 ⇒ NULL；
+    口径 B——window_cut 早于标的最早交易日（窗口日历覆盖不完整）⇒ NULL。
+    status_*=ok 但某窗口 pct=NULL 是合法组合（早期窗口未攒满），页面显示 `—`。
     ⚠️ 列名 `status_*` 刻意避开 MySQL 保留字与 `conclusion varchar(8)`
     的 1406 坑；DDL 与模型声明两步走（🔒4.4），比对列名/类型/可空，不比列序。
     ⚠️ `note` 是人工列/哨兵列，**不在 `percentile_store.fields_pct_update` 白名单**，
@@ -1334,6 +1338,10 @@ class ValuationPercentile(Base, BaseModel):
         UniqueConstraint("subject_type", "symbol", "as_of", name="uk_bvp"),
         Index("k_bvp_asof", "as_of"),
         Index("k_bvp_calc", "calc_at"),
+        # 列表端点排序索引（2026-11-25）：as_of 显式 DESC 与
+        # ORDER BY as_of DESC, subject_type, symbol 完全匹配，避免 179 万行
+        # 宽行全表 filesort（实测 21s → 0.01s）；MySQL 8.0+ 降序索引
+        Index("k_bvp_list", text("as_of DESC"), "subject_type", "symbol"),
     )
 
     unique_keys = ["subject_type", "symbol", "as_of"]
