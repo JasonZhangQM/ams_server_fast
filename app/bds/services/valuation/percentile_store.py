@@ -16,8 +16,15 @@
 - 🔴 修订检测主判据是 Python 侧源序列指纹 `input_fp`，**绝不用 `MAX(update_time)`**：
   `market_data/daily_valuation.py` 对已存在行无条件 setattr 覆盖，重复同步同一天
   会刷时间戳但值没变 ⇒ 100% 误报。
+- 🔴 指纹比对用**历史前缀**（截断到表内最新 as_of，2026-11-25 用户确认）：纯追加
+  新交易日不改前缀 ⇒ auto 走 M1 增量；历史/同日值修订改前缀 ⇒ 强制 M2。全序列
+  哈希会让追加与修订不可区分（追加必变哈希 ⇒ 每天误触发 M2），行内落库的
+  `input_fp` 仍为写入时点的全序列哈希（闸只读最新行 fp，自洽闭环）。
 - 写入走 `upsert_df_to_db` + **显式 `fields_pct_update` 白名单**，`note` 人工列不在白名单
-  （哨兵：重算不覆盖人工值）。
+  （哨兵：重算不覆盖人工值）。**2026-11-25 起写库时机改为逐标的落库**：一个标的
+  build_rows 完成即 audit + upsert，不再全清单攒完一次性写——全市场 ~5,590 标的
+  / ~1,800 万行量级下，攒到最后既把内存撑爆（原 planned 列表全量驻留）、又让
+  长任务中途不可见、崩溃全损；逐标的落库后 upsert 幂等保证结果与一次写完全一致。
 - 归属 bds（🔒4.12：bds 只能被依赖、禁 import irs）。**2026-11-24 起默认标的范围改由
   证券信息表 `bds_symbol_info` 驱动**（`resolve_scope_subjects`：all=A股指数∪A股个股
   默认 / index / stock / industry，个股档带退市口径三态），取代监测表默认清单；
@@ -82,6 +89,14 @@ MONITOR_TABLE = "irs_underlying_monitor"
 # n 低于它 ⇒ 该窗口分位不保存（NULL）。与实时分位专页的 short 标记口径一致。
 MIN_WINDOW_SAMPLES = 250
 
+# 口径 B（2026-11-25 用户定稿）：窗口左界必须完整覆盖标的全部历史起点——
+# window_cut < 标的最早交易日 ⇒ 该窗口分位不保存（NULL）。
+# 例：SHSE.000300 最早交易日 2005-04-08，观察日 2015-04-07 的 10y 左界 2005-04-07
+# 早于起点 ⇒ 10y 分位不落盘（3y 左界 2012-04-07 / 5y 左界 2010-04-07 均不早于
+# 起点，正常落盘）。与口径 A 叠加生效：A 管窗口内样本密度，B 管窗口日历覆盖
+# 完整性——「窗口名义区间没攒满」的分位没有可比基准，不许落盘。
+WINDOW_CUT_COVERAGE = True
+
 # 🔴 表结构 / 落表口径变更时刻：calc_at 早于它的行必须全量重建（P1 新增列时用）。
 # 快跳过的三道闸（fp / 源末日 / window_cut）感知不到「多了/改了一列」，
 # 没有这道闸，新增列的历史行会永远保持 NULL。以后再改落表结构请同步上调此常量，
@@ -89,7 +104,9 @@ MIN_WINDOW_SAMPLES = 250
 # 2026-11-23 瘦身（44 → 28 列）：删 current_*/ *_stat / windows_short /
 # windows_undercovered / status_note / first_date / raw_n / cleaned_n_*，上调触发全量重建。
 # 同日口径 A：窗口 n<250 分位不保存（NULL），再次上调（09:00）触发全量重写。
-SCHEMA_EPOCH = datetime(2026, 11, 23, 9, 0, 0)
+# 2026-11-25 口径 B：window_cut 早于标的最早交易日的窗口分位不保存（NULL），
+# 历史行按新口径重写（早期区间的分位由非 NULL 改为 NULL），再次上调触发全量重算。
+SCHEMA_EPOCH = datetime(2026, 11, 25, 9, 0, 0)
 
 # ⚠️ **兜底常量，不再是默认清单**（2026-11-04 起）：仅当 irs_underlying_monitor
 # 查询失败 / 空表时由 subject_diagnostics() 回退，同时作为几个历史探针的固定基线。
@@ -360,6 +377,10 @@ def fingerprint(raw: list[tuple]) -> str:
 
     逐行拼 `trade_date|4 值` 后 sha256，值用原样 str（Decimal 字符串化稳定）。
     用于判「上游历史有没有被修订」，比 `MAX(update_time)` 可靠得多。
+
+    2026-11-25 前缀语义：闸比对传的是**截断到表内最新 as_of 的前缀切片**
+    （纯追加不改前缀 ⇒ M1 增量；历史/同日修订改前缀 ⇒ 强制 M2），落库行的
+    `input_fp` 仍存本函数对全序列的哈希——两种用法共用这一个纯函数。
     """
     h = hashlib.sha256()
     for r in raw:
@@ -407,11 +428,18 @@ def build_rows(db, subject_type: str, symbol: str, raw: list[tuple],
 
     口径 A（2026-11-23 用户定稿）：**窗口有效样本 n < 250（约一年交易日）⇒
     该窗口分位直接不保存（NULL）**，不再有 short/undercovered 标记列。
+    口径 B（2026-11-25 用户定稿）：**window_cut 早于该标的最早交易日 ⇒ 该窗口
+    分位不保存（NULL）**——窗口名义区间没攒满（日历覆盖不完整）的分位没有
+    可比基准。两闸叠加：A 管样本密度，B 管日历覆盖。
     status 仍只描述当日值有效性（ok/loss/no_data），与窗口样本量解耦——
     status=ok 但某窗口 pct=NULL 是合法组合（新股早期窗口），页面显示 `—`。
     """
     if not raw:
         return []
+
+    # 口径 B 的比较基准：源序列升序首行日期 = 该标的最早交易日（与指标有效性无关，
+    # 以标的出现在估值源表的第一天为准，与用户口径一致）
+    first_trade_date: date = raw[0][0]
 
     daily: dict[str, dict] = {}
     for j, m in enumerate(PCT_METRICS, start=1):
@@ -449,11 +477,16 @@ def build_rows(db, subject_type: str, symbol: str, raw: list[tuple],
                 stats = {k: daily[m][as_of][k] for k in WINDOW_KEYS}
 
             row[f"status_{pre}"] = st
+            cuts = _cuts_map(as_of)
             for k in WINDOW_KEYS:
                 d = (stats or {}).get(k)
-                # 口径 A：样本不足的窗口不保存分位（n 不足 ⇒ NULL，下游显示 —）
+                # 口径 A：窗口有效样本 n<250 ⇒ 不保存（NULL）
+                # 口径 B：窗口左界早于标的最早交易日（日历覆盖不完整）⇒ 不保存（NULL）
                 row[f"{pre}_pct_{k.split('_')[1]}"] = (
-                    d.get("pct") if d and d.get("n", 0) >= MIN_WINDOW_SAMPLES else None)
+                    d.get("pct")
+                    if d and d.get("n", 0) >= MIN_WINDOW_SAMPLES
+                    and cuts[k] >= first_trade_date
+                    else None)
         rows.append(row)
     return rows
 
@@ -602,6 +635,21 @@ def plan(subjects: Optional[list[str]] = None, mode: str = "M2",
             "subjects_explicit": explicit}
 
 
+def _merge_audit(acc: dict, inc: dict) -> dict:
+    """把单标的 audit_diff 结果累加进累计审计（2026-11-25 逐标的落库配套）。
+
+    changed / appeared / vanished 直接求和（key 集合互不相交，加法即并集口径）；
+    max_pct 取最大；samples 保留累计前 5 条（诊断样本，条数对齐原单次口径）。
+    """
+    acc["changed"] += inc["changed"]
+    acc["max_pct"] = max(acc["max_pct"], inc["max_pct"])
+    acc["appeared"] += inc["appeared"]
+    acc["vanished"] += inc["vanished"]
+    if len(acc["samples"]) < 5:
+        acc["samples"].extend(inc["samples"][: 5 - len(acc["samples"])])
+    return acc
+
+
 def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             from_date: Optional[date] = None,
             prune_orphans: bool = False,
@@ -629,9 +677,15 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
         raise ValueError("M3 必须给 from_date（修订起始日）")
 
     calc_at = datetime.now()
-    planned: list[dict] = []
     fps: dict[str, str] = {}
     as_of_range = [None, None]
+    # 2026-11-25 起逐标的落库：不再全量攒 planned（全市场 M2 会把 ~1,800 万行 dict
+    # 堆在内存、且写库要等全部标的算完），一个标的算完即 audit + upsert，
+    # 审计跨标的累加（_merge_audit），结果字段口径与原单次写完全一致。
+    audit_total = {"changed": 0, "max_pct": 0.0, "appeared": 0, "vanished": 0,
+                   "samples": []}
+    rows_written = 0
+    rows_rowcount = 0
 
     with SessionLocal() as db:
         # 范围清单每次任务实时按 SymbolInfo 解析（不缓存、不自动触发）。
@@ -677,7 +731,6 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
         cut_stale_subjects: list[str] = []
         fp_changed_subjects: list[str] = []
         schema_stale_subjects: list[str] = []
-        written_keys: set[tuple[str, str]] = set()
         source_by_subject: dict[str, Optional[date]] = {}
 
         for i, (t, s) in enumerate(pairs):
@@ -694,11 +747,17 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             prev = latest.get((t, s))
             # 三道强制全量闸：
             # ① 口径陈旧（P0，§7.2）：表内最新行 window_cut 不是日历对日；
-            # ② input_fp 变化（P0-2/3）：上游历史或同日被修订，影响 [D, D+10y] 上千行；
+            # ② input_fp 前缀变化（P0-2/3）：历史前缀（截断到表内最新 as_of prev[0]）
+            #    被修订——纯追加新交易日不改前缀（走 M1 增量），历史/同日修订改前缀；
+            #    截断点用 prev[0] 而非 source_as_of：上次成功运行后 prev[0] = 源表末日，
+            #    前缀范围恰与已存 input_fp（写入时点全序列哈希）对齐，源表领先时两者
+            #    分叉，用 source_as_of 会读到未落盘的日子产生误判；
             # ③ 结构陈旧（P1-4）：calc_at 早于 SCHEMA_EPOCH ⇒ 新增列尚未回填。
             # 任一命中都 ⇒ 该 subject 全量重建，不做脆弱的「找最早变更日」。
+            fp_hist = (fingerprint([r for r in raw if r[0] <= prev[0]])
+                       if prev else fp)
             stale = bool(prev) and not _cut_is_calendar(prev)
-            fp_changed = bool(prev) and prev[1] != fp
+            fp_changed = prev is not None and prev[1] != fp_hist
             schema_stale = bool(prev) and (
                 len(prev) < 4 or prev[3] is None or prev[3] < SCHEMA_EPOCH)
             if stale:
@@ -752,21 +811,21 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
                     continue
             rows = build_rows(db, t, s, raw, end_t, calc_at, fp,
                               only_dates=only_dates)
-            planned.extend(rows)
-            written_keys.add((t, s))
             if rows:
+                # 逐标的落库：本标的算完即比对 + upsert，不等全清单跑完。
+                # audit 必须先于本标的的 upsert 执行，读到的是写入前的旧值，
+                # 与原「全攒完最后统一比对」的口径等价（各标的 key 互不相交）。
+                audit_total = _merge_audit(audit_total, audit_diff(db, rows, {(t, s)}))
+                rows_rowcount += upsert_rows(rows)
+                rows_written += len(rows)
                 a, b = rows[0]["as_of"], rows[-1]["as_of"]
                 as_of_range[0] = min(as_of_range[0], a) if as_of_range[0] else a
                 as_of_range[1] = max(as_of_range[1], b) if as_of_range[1] else b
             if on_progress:
                 on_progress(i + 1, len(pairs))
 
-        # audit 只比「本次实际写了的 subject」，否则被跳过的行会被误算成 vanished
-        audit = audit_diff(db, planned, written_keys)
-        rows_rowcount = upsert_rows(planned)
-        # MySQL 的 rowcount 在「值未变的 ON DUPLICATE KEY UPDATE」时返回 0，
-        # 它不等于写行数 ⇒ 审计里两个量分开记，rows_upserted 才是实际 UPSERT 行数
-        rows_upserted = len(planned)
+        # 逐标的落库后这里只剩孤儿清理：audit 与 upsert 已在循环内逐标的完成，
+        # rows_written / rows_rowcount 语义不变（rowcount 仍可能因值未变返回 0）
         # 🔴 P0-1 + 用户裁定 2：孤儿清理必须显式开 + 默认清单（非显式 subjects）才执行；
         # 监测表移除标的后历史行默认保留，只在 result.orphan_in_store 提示。
         # 传了 subjects（单标的/子集）说明只是局部重算，删别人的历史行是数据破坏；
@@ -794,7 +853,7 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
         "index_count": index_count, "stock_count": len(pairs) - index_count,
         "orphan_in_store": orphan,
         "as_of_range": [d.isoformat() if d else None for d in as_of_range],
-        "rows_total": len(planned), "rows_upserted": rows_upserted,
+        "rows_total": rows_written, "rows_upserted": rows_written,
         "rows_rowcount": rows_rowcount, "orphans_deleted": orphans,
         "skipped_subjects": skipped_subjects, "skipped_count": len(skipped_subjects),
         "cut_stale_subjects": cut_stale_subjects,
@@ -805,7 +864,7 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
                                  | set(schema_stale_subjects)),
         "prune_orphans": allow_prune,
         "subjects_explicit": subjects is not None,
-        "audit": audit,
+        "audit": audit_total,
         "input_fp": ({k: v[:16] for k, v in fps.items()}
                      if len(fps) <= AUDIT_CAP else None),
         "input_fp_count": len(fps),
