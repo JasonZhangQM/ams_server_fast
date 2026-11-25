@@ -3057,7 +3057,10 @@ def _create_index_valuation_task(db: Session, req: IndexValuationSyncRequest, pl
 def _run_valuation_pct_thread(task_id: int, mode: str,
                               subjects: Optional[list[str]],
                               from_date, total_count: int,
-                              prune_orphans: bool = False):
+                              prune_orphans: bool = False,
+                              scope: Optional[str] = None,
+                              industry: Optional[str] = None,
+                              trading_status: str = "trading"):
     """后台线程：估值分位按日落盘重算，结束时把结构化审计写进 task.result。
 
     与 `_run_valuation_thread` 同构：自建 SessionLocal、复用 `_stop_events`、
@@ -3087,7 +3090,8 @@ def _run_valuation_pct_thread(task_id: int, mode: str,
         result = percentile_store.rebuild(
             mode=mode, subjects=subjects, from_date=from_date,
             prune_orphans=prune_orphans, on_progress=on_progress,
-            should_stop=stop_event.is_set if stop_event is not None else None)
+            should_stop=stop_event.is_set if stop_event is not None else None,
+            scope=scope, industry=industry, trading_status=trading_status)
 
         stopped = bool(stop_event is not None and stop_event.is_set())
         task.status = "stopped" if stopped else "done"
@@ -3137,13 +3141,15 @@ def sync_valuation_percentile(req: ValuationPctSyncRequest):
     口径由 365 天改对日属 **M2 全量重建强制触发事件**。
 
     P0（2026-11-04）：`input_fp` 变化或窗口口径陈旧 ⇒ 该标的强制全量重建（含 M1/M3）；
-    `prune_orphans` 默认 False，只有「默认清单 + M2/auto + 显式开启」才删孤儿行，
+    `prune_orphans` 默认 False，只有「范围档清单 + M2/auto + 显式开启」才删孤儿行，
     传 `subjects`（单标的/子集）一律不删，避免误删其余标的全历史（方案 §1）。
 
-    **默认清单运行时从 `irs_underlying_monitor` 推导**（不传 subjects 时）：过滤掉
-    无估值数据的标的（SPX / GC00Y），监测表增删后下一次重算自动跟上；不自动触发，
-    改完监测表需手动跑一次。`result` 会带 `default_subjects` / `excluded_no_data` /
-    `orphan_in_store` / `monitor_fallback` 供核查。
+    **标的范围由 SymbolInfo 驱动（2026-11-24）**：不传 subjects 时按 `scope` 运行时
+    从 `bds_symbol_info` 解析——all=A股指数∪A股个股（默认）/ index / stock / industry，
+    退市口径 `trading_status` 仅作用个股档；无估值数据的标的逐只 no_data 跳过，
+    不做预过滤。显式 `subjects`（单标的/子集/串联链）优先级最高。`result` 带
+    `scope / subject_source / subject_count / index_count / stock_count /
+    orphan_in_store` 供核查；清单超 AUDIT_CAP 时逐标的明细截断为 null。
     """
     db = next(get_db())
     try:
@@ -3161,14 +3167,16 @@ def sync_valuation_percentile(req: ValuationPctSyncRequest):
         task = _create_valuation_pct_task(db, req, p)
 
         # 4. 注册停止信号并启动后台线程
-        # 🔴 线程收 `req.subjects`（原始值，可为 None），不能收 `p["subjects"]`：
-        #    plan() 会把 None 展开成运行时默认清单，传展开值会让 rebuild 永远认为
-        #    「用户显式指定了标的」⇒ prune_orphans 在 HTTP 路径被静默忽略（P0-1 失效）。
+        # 🔴 线程收 `req.subjects`（原始值，可为 None）与范围档原始 spec，不能收
+        #    `p["subjects"]`：plan() 会把 None 展开成运行时范围清单，传展开值会让
+        #    rebuild 永远认为「用户显式指定了标的」⇒ prune_orphans 在 HTTP 路径被
+        #    静默忽略（P0-1 失效）；范围档在 rebuild 内运行时解析，保证清单新鲜。
         _stop_events[task.id] = threading.Event()
         threading.Thread(
             target=_run_valuation_pct_thread,
             args=(task.id, req.mode, req.subjects, req.from_date,
-                  p["total_count"], req.prune_orphans),
+                  p["total_count"], req.prune_orphans,
+                  req.scope, req.industry, req.trading_status),
             daemon=True,
         ).start()
         return task
@@ -3183,7 +3191,9 @@ def _validate_valuation_pct_req(req: ValuationPctSyncRequest) -> dict:
     """
     try:
         p = percentile_store.plan(
-            subjects=req.subjects, mode=req.mode, from_date=req.from_date)
+            subjects=req.subjects, mode=req.mode, from_date=req.from_date,
+            scope=req.scope, industry=req.industry,
+            trading_status=req.trading_status)
     except ValueError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
     if p["total_count"] == 0:
@@ -3193,18 +3203,22 @@ def _validate_valuation_pct_req(req: ValuationPctSyncRequest) -> dict:
 
 def _create_valuation_pct_task(db: Session, req: ValuationPctSyncRequest, p: dict) -> BdsSyncTask:
     """建估值分位落盘任务行（POST /bds/sync/valuation-percentile 与串联同步链复用）。"""
+    explicit = req.subjects is not None
     task = BdsSyncTask(
         scope="valuation_pct",
         scope_params={
             "mode": req.mode,
-            "subjects": p["subjects"],
             "from_date": req.from_date.isoformat() if req.from_date else None,
             "prune_orphans": req.prune_orphans,
-            "subjects_explicit": req.subjects is not None,
-            # 本次运行时默认清单快照，便于事后回溯「当时监测表里有什么」
-            "default_subjects": p["default_subjects"],
-            "excluded_no_data": p["excluded_no_data"],
-            "monitor_fallback": p["monitor_fallback"],
+            "subjects_explicit": explicit,
+            # 显式清单才落 JSON；范围档（全市场 ~5,926 标的）只落 spec + 规模快照，
+            # 清单本身在 rebuild 运行时重新解析，回溯规模看 subject_count
+            "subjects": p["subjects"] if explicit else None,
+            "scope": p["scope"], "industry": req.industry,
+            "trading_status": req.trading_status,
+            "subject_count": p["subject_count"],
+            "index_count": p["index_count"], "stock_count": p["stock_count"],
+            "subject_source": p["subject_source"],
         },
         tables=["valuation-percentile"],
         status="running",
@@ -4451,9 +4465,10 @@ def _run_valuation_pct_card(params: dict) -> int:
     try:
         task = _create_valuation_pct_task(db, req, p)
         _stop_events[task.id] = threading.Event()
-        # 与端点同口径：线程收原始 subjects 而非 plan 展开值（P0-1 prune 语义）
+        # 与端点同口径：线程收原始 subjects / 范围档 spec 而非 plan 展开值（P0-1 prune 语义）
         _run_valuation_pct_thread(task.id, req.mode, req.subjects, req.from_date,
-                                  p["total_count"], req.prune_orphans)
+                                  p["total_count"], req.prune_orphans,
+                                  req.scope, req.industry, req.trading_status)
         return task.id
     finally:
         db.close()

@@ -18,11 +18,14 @@
   会刷时间戳但值没变 ⇒ 100% 误报。
 - 写入走 `upsert_df_to_db` + **显式 `fields_pct_update` 白名单**，`note` 人工列不在白名单
   （哨兵：重算不覆盖人工值）。
-- 归属 bds（🔒4.12：bds 只能被依赖、禁 import irs）。**默认 subject 清单运行时从
-  `irs_underlying_monitor` 推导**（用表名字符串 SQL，不 import irs），过滤掉无估值
-  数据的标的；监测表增删后下一次重算自动跟上。`L1_SUBJECTS` 仅作查询失败时的兜底。
+- 归属 bds（🔒4.12：bds 只能被依赖、禁 import irs）。**2026-11-24 起默认标的范围改由
+  证券信息表 `bds_symbol_info` 驱动**（`resolve_scope_subjects`：all=A股指数∪A股个股
+  默认 / index / stock / industry，个股档带退市口径三态），取代监测表默认清单；
+  显式 `subjects`（单标的/子集/串联链）优先级最高。无估值数据的标的**不做预过滤**，
+  逐只走 no_data 跳过路径（全市场 ~5,926 标的量级下逐只 EXISTS 点查不可行）。
+  孤儿白名单口径同步改为「SymbolInfo 范围档清单」。
 
-模式：M1 增量追加 / M2 全量重建（默认、推荐）/ M3 修订区间重算 / auto 自动。
+模式：M1 增量追加 / M2 全量重建 / M3 修订区间重算 / auto（**默认、推荐**）。
 四者调用同一个纯函数，区别只在「写哪些 as_of 行」——计算始终用全序列（窗口需要历史），
 全量组装约 5.4 s。M2 另有「快跳过」：源序列指纹 + 源末日 + 窗口口径三者未变时，
 重写与不写逐值全等，直接跳过该 subject（实测 57 s → 约 3 s）。
@@ -66,6 +69,8 @@ from server_fast.app.bds.services.valuation.percentile_stat import (
 from server_fast.common.db import SessionLocal
 from server_fast.common.utils import upsert_df_to_db
 from server_fast.config import settings
+from server_fast.app.bds.config import Config as dbsCfg
+from server_fast.app.bds.services.symbol_info.market_board import INDEX_INDUSTRY
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -227,6 +232,113 @@ def subject_diagnostics(db) -> dict:
     return {"default": default, "monitor": mon,
             "excluded_no_data": excluded, "orphan_in_store": orphan,
             "fallback": fallback}
+
+
+# ---------------------------------------------------------------------------
+# 标的范围解析（2026-11-24：SymbolInfo 驱动五档，取代「监测表默认清单」）
+# ---------------------------------------------------------------------------
+
+# 范围档取值（手写清单不占 scope：走 subjects 显式参数，优先级高于 scope）
+PCT_SCOPES = ("all", "index", "stock", "industry")
+TRADING_STATUSES = ("trading", "delisted", "all")
+
+# 逐标的审计明细（subjects / input_fp / source_as_of_by_subject）的落 JSON 上限：
+# 全市场 ~5,926 标的时逐项明细会把 task.result 撑到数百 KB，超限只存计数。
+AUDIT_CAP = 200
+
+
+def _scope_conditions(scope: str, industry: Optional[str],
+                      trading_status: str) -> tuple[str, str, dict]:
+    """范围档 → (指数 WHERE, 个股 WHERE, 绑定参数)。
+
+    清单解析（resolve_scope_subjects）与行数统计（count_scope_source_rows）共用
+    同一条件构造，保证两处口径永不漂移。
+
+    - 指数恒为 industry='A股指数'（退市口径不作用指数）
+    - 个股恒为 market IS NOT NULL（指数 / 美股 / 黄金的 market 恒 NULL，天然排除）
+      + 退市口径三态（与 /bds/symbol-infos 的 trading_status 同枚举同语义）
+    - scope=industry 再叠加个股 industry 精确匹配
+    """
+    if trading_status not in TRADING_STATUSES:
+        raise ValueError(f"非法 trading_status: {trading_status}（应为 trading/delisted/all）")
+    params: dict = {}
+    stock_where = "market IS NOT NULL"
+    if trading_status == "trading":
+        stock_where += " AND (delisted_date IS NULL OR delisted_date > :today)"
+        params["today"] = date.today()
+    elif trading_status == "delisted":
+        stock_where += " AND delisted_date IS NOT NULL AND delisted_date <= :today"
+        params["today"] = date.today()
+    if scope == "industry":
+        if not industry:
+            raise ValueError("scope=industry 需填 industry 参数")
+        stock_where += " AND industry = :industry"
+        params["industry"] = industry
+    return "industry = :idx_ind", stock_where, {**params, "idx_ind": INDEX_INDUSTRY}
+
+
+def resolve_scope_subjects(db, scope: str, industry: Optional[str] = None,
+                           trading_status: str = "trading") -> tuple[list[str], dict]:
+    """SymbolInfo 驱动的标的清单解析（2026-11-24 方案，取代监测表默认清单）。
+
+    scope: all=A股指数∪A股个股（默认）/ index=仅A股指数 / stock=仅A股个股 /
+           industry=指定行业个股；手写清单不走这里（调用方直接传 subjects）。
+    - 指数清单为空时回退 Config.INDEX_CODE 键集（与历史行情段同一兜底口径）
+    - 无估值数据的标的**不做预过滤**：逐标的 EXISTS 点查在全市场 ~5,926 标的
+      量级下不可行，no_data 跳过路径（load_source 空 → 0 行）已存在，直接复用
+    - 清单先指数后个股、各按 symbol 升序 ⇒ 顺序稳定、进度可复现
+    返回 (清单, meta)；meta.scope / meta.subject_source 供任务审计。
+    """
+    if scope not in PCT_SCOPES:
+        raise ValueError(f"非法 scope: {scope}（应为 {'/'.join(PCT_SCOPES)}）")
+    iw, sw, p = _scope_conditions(scope, industry, trading_status)
+    index_syms = [str(s) for s in db.execute(
+        text(f"SELECT symbol FROM bds_symbol_info WHERE {iw} ORDER BY symbol"),
+        p).scalars().all()]
+    if not index_syms:
+        index_syms = list(dbsCfg.INDEX_CODE)
+        logger.warning("证券信息表无 industry='%s' 标的，分位范围回退 Config.INDEX_CODE",
+                       INDEX_INDUSTRY)
+    if scope == "index":
+        subs = index_syms
+    else:
+        stock_syms = [str(s) for s in db.execute(
+            text(f"SELECT symbol FROM bds_symbol_info WHERE {sw} ORDER BY symbol"),
+            p).scalars().all()]
+        subs = list(dict.fromkeys(index_syms + stock_syms)) if scope == "all" else stock_syms
+    return subs, {"scope": scope, "subject_source": f"symbol_info:{scope}"}
+
+
+def count_scope_source_rows(db, scope: str, industry: Optional[str],
+                            trading_status: str) -> int:
+    """范围档的源表总行数（plan 的 total_count 用）。
+
+    两条聚合半连接 COUNT 与 resolve_scope_subjects 共用 _scope_conditions，
+    全市场量级下代替逐标的 COUNT 循环（5,926 次点查在 HTTP 请求线程不可接受）。
+    """
+    iw, sw, p = _scope_conditions(scope, industry, trading_status)
+    total = 0
+    if scope in ("all", "index"):
+        total += int(db.execute(text(
+            f"SELECT COUNT(*) FROM bds_index_valuation WHERE index_code IN "
+            f"(SELECT symbol FROM bds_symbol_info WHERE {iw})"), p).scalar() or 0)
+    if scope in ("all", "stock", "industry"):
+        total += int(db.execute(text(
+            f"SELECT COUNT(*) FROM bds_daily_valuation WHERE symbol IN "
+            f"(SELECT symbol FROM bds_symbol_info WHERE {sw})"), p).scalar() or 0)
+    return total
+
+
+def _orphan_symbols(db, whitelist: list[str]) -> list[str]:
+    """落表已有但不在白名单内的标的（默认保留历史行，仅审计提示）。
+
+    白名单恒取「范围档默认清单」而非本次运行清单：显式子集 / 单标的重算时，
+    其余标的历史行仍在白名单内，不算孤儿（与 P0-1「传 subjects 永不删」同语义）。
+    结果按 AUDIT_CAP 截断，防白名单意外清空时 result 被撑爆。
+    """
+    existing = {str(r[0]) for r in db.execute(
+        text(f"SELECT DISTINCT symbol FROM {TABLE}")).all()}
+    return sorted(existing - set(whitelist))[:AUDIT_CAP]
 
 
 def load_source(db, subject_type: str, symbol: str) -> list[tuple]:
@@ -440,43 +552,63 @@ def delete_orphans(db, keep_subjects: set[tuple[str, str]]) -> int:
 # 主流程
 # ---------------------------------------------------------------------------
 
+def _count_rows_by_subject(db, pairs: list[tuple[str, str]]) -> int:
+    """显式小清单的行数统计：逐标的 COUNT（千级以内点查可接受）。"""
+    n = 0
+    for t, s in pairs:
+        table = SOURCE_TABLES[t]
+        key = "index_code" if t == "index" else "symbol"
+        n += int(db.execute(
+            text(f"SELECT COUNT(*) FROM {table} WHERE {key}=:c"), {"c": s}).scalar() or 0)
+    return n
+
+
 def plan(subjects: Optional[list[str]] = None, mode: str = "M2",
-         from_date: Optional[date] = None) -> dict:
+         from_date: Optional[date] = None, scope: Optional[str] = None,
+         industry: Optional[str] = None, trading_status: str = "trading") -> dict:
     """任务计划：subject 清单、模式、预计行数（供 total_count 与前端展示）。
 
-    默认清单**运行时**从 `irs_underlying_monitor` 推导（方案 §3，不再用固定常量）；
-    显式传 `subjects` 时以用户清单为准（单标的 / 子集），且不删别人的历史行。
+    2026-11-24 起：subjects=None 时按 SymbolInfo 范围档解析（scope 默认 all =
+    A股指数 ∪ A股个股），取代原「监测表默认清单」；显式传 subjects（单标的 /
+    子集）以用户清单为准。范围档的行数统计走聚合半连接 COUNT（与清单解析
+    同条件），显式小清单保留逐标的 COUNT 循环。
     """
     if mode not in ("M1", "M2", "M3", "auto"):
         raise ValueError("mode 必须是 M1 / M2 / M3 / auto")
     if mode == "M3" and from_date is None:
         raise ValueError("M3 必须给 from_date（修订起始日）")
     with SessionLocal() as db:
-        diag = subject_diagnostics(db)
-        subs = list(subjects) if subjects is not None else diag["default"]
+        if subjects is not None:
+            subs = list(subjects)
+            scope_meta = {"scope": "explicit", "subject_source": "explicit"}
+            explicit = True
+        else:
+            subs, scope_meta = resolve_scope_subjects(
+                db, scope or "all", industry, trading_status)
+            explicit = False
         pairs = resolve_subject_types(db, subs)
         end = source_end_date(db)
-        n_days = 0
-        # 只数行，不要把全序列拉进内存（plan 在 HTTP 请求线程里跑）
-        for t, s in pairs:
-            table = SOURCE_TABLES[t]
-            key = "index_code" if t == "index" else "symbol"
-            n_days += int(db.execute(
-                text(f"SELECT COUNT(*) FROM {table} WHERE {key}=:c"), {"c": s}).scalar() or 0)
+        if explicit:
+            n_days = _count_rows_by_subject(db, pairs)
+        else:
+            n_days = count_scope_source_rows(
+                db, scope_meta["scope"], industry, trading_status)
+        index_count = sum(1 for t, _ in pairs if t == "index")
     return {"subjects": subs, "subject_pairs": pairs, "mode": mode,
             "from_date": from_date, "source_as_of": end, "total_count": n_days,
-            # 监测表偏差诊断：端点 scope_params / 前端提示用
-            "default_subjects": diag["default"],
-            "excluded_no_data": diag["excluded_no_data"],
-            "orphan_in_store": diag["orphan_in_store"],
-            "monitor_fallback": diag["fallback"]}
+            "scope": scope_meta["scope"], "subject_source": scope_meta["subject_source"],
+            "subject_count": len(subs), "index_count": index_count,
+            "stock_count": len(pairs) - index_count,
+            "subjects_explicit": explicit}
 
 
 def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             from_date: Optional[date] = None,
             prune_orphans: bool = False,
             on_progress: Optional[Callable[[int, int], None]] = None,
-            should_stop: Optional[Callable[[], bool]] = None) -> dict:
+            should_stop: Optional[Callable[[], bool]] = None,
+            scope: Optional[str] = None, industry: Optional[str] = None,
+            trading_status: str = "trading") -> dict:
     """执行重算，返回结构化审计（写进 bds_sync_task.result）。
 
     `on_progress(done, total)` 由后台线程传入，用于刷任务进度。
@@ -484,6 +616,11 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
     已算完的 subject 仍会落库（停止是「不再继续」而不是「丢弃已完成」）。
     `prune_orphans=True` 且 `subjects is None` 且 mode ∈ (M2, auto) 时才清理孤儿标的；
     默认关闭，单标的/子集重算永不删别人的历史行（P0-1）。
+
+    2026-11-24 起：subjects=None 时按 SymbolInfo 范围档**运行时**解析
+    （scope 默认 all = A股指数 ∪ A股个股），取代监测表默认清单；
+    🔴 与 P0-1 同构：`subjects is not None` 才是「用户显式指定」判据，
+    范围档解析出的全市场清单仍走默认清单语义（允许 prune_orphans）。
     """
     t0 = time.perf_counter()
     if mode not in ("M1", "M2", "M3", "auto"):
@@ -497,11 +634,24 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
     as_of_range = [None, None]
 
     with SessionLocal() as db:
-        # 默认清单每次任务实时读监测表（不缓存、不自动触发）。
+        # 范围清单每次任务实时按 SymbolInfo 解析（不缓存、不自动触发）。
         # 🔴 `subjects is not None` 才是「用户显式指定」的判据，绝不能拿展开后的
         # subs 判断——否则 prune_orphans 会被静默忽略（P0 端到端抓到过）。
-        diag = subject_diagnostics(db)
-        subs = list(subjects) if subjects is not None else diag["default"]
+        if subjects is not None:
+            subs = list(subjects)
+            scope_meta = {"scope": "explicit", "subject_source": "explicit"}
+            # 孤儿审计恒按「范围档默认白名单」口径：显式子集重算时其余标的
+            # 仍在白名单内，不算孤儿；范围档解析失败时退回本次清单（保守）。
+            try:
+                whitelist, _ = resolve_scope_subjects(
+                    db, scope or "all", industry, trading_status)
+            except ValueError:
+                whitelist = subs
+        else:
+            subs, scope_meta = resolve_scope_subjects(
+                db, scope or "all", industry, trading_status)
+            whitelist = subs
+        orphan = _orphan_symbols(db, whitelist)
         pairs = resolve_subject_types(db, subs)
         # P1-6：两表末日独立取；全局字段保留「最早末日」，仅供展示与近 15 天水位
         # 下界（保守，指数表落后时不会被整体漏掉）。逐 subject 判据一律用 end_t。
@@ -626,21 +776,23 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
         orphans = delete_orphans(db, all_keys) if allow_prune else 0
 
     duration_ms = int((time.perf_counter() - t0) * 1000)
+    index_count = sum(1 for t, _ in pairs if t == "index")
     return {
         "mode": mode, "window_mode": "calendar_anniversary",
         "metrics": list(PCT_METRICS), "windows": list(WINDOW_KEYS),
         "source_as_of": source_as_of.isoformat() if source_as_of else None,
         # P1-6：各 subject 所属源表的末日（指数 / 个股可能不同）
-        "source_as_of_by_subject": {k: v.isoformat() if v else None
-                                    for k, v in source_by_subject.items()},
-        "subjects": subs,
-        # 监测表偏差诊断：默认清单、原始清单、被过滤的、已移除待清理的、是否回退
-        "subject_source": "L1_fallback" if diag["fallback"] else MONITOR_TABLE,
-        "default_subjects": diag["default"],
-        "monitor_subjects": diag["monitor"],
-        "excluded_no_data": diag["excluded_no_data"],
-        "orphan_in_store": diag["orphan_in_store"],
-        "monitor_fallback": diag["fallback"],
+        # AUDIT_CAP 截断：全市场量级下逐标的明细不落 JSON，只存计数
+        "source_as_of_by_subject": (
+            {k: v.isoformat() if v else None for k, v in source_by_subject.items()}
+            if len(source_by_subject) <= AUDIT_CAP else None),
+        "source_as_of_by_subject_count": len(source_by_subject),
+        # 范围档审计：清单来源、规模、孤儿（清单超限截断为 null，计数恒有）
+        "scope": scope_meta["scope"], "subject_source": scope_meta["subject_source"],
+        "subjects": subs if len(subs) <= AUDIT_CAP else None,
+        "subject_count": len(subs),
+        "index_count": index_count, "stock_count": len(pairs) - index_count,
+        "orphan_in_store": orphan,
         "as_of_range": [d.isoformat() if d else None for d in as_of_range],
         "rows_total": len(planned), "rows_upserted": rows_upserted,
         "rows_rowcount": rows_rowcount, "orphans_deleted": orphans,
@@ -654,7 +806,9 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
         "prune_orphans": allow_prune,
         "subjects_explicit": subjects is not None,
         "audit": audit,
-        "input_fp": {k: v[:16] for k, v in fps.items()},
+        "input_fp": ({k: v[:16] for k, v in fps.items()}
+                     if len(fps) <= AUDIT_CAP else None),
+        "input_fp_count": len(fps),
         "duration_ms": duration_ms,
     }
 

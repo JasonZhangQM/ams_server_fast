@@ -989,14 +989,14 @@ class ValuationPctSyncRequest(BaseModel):
     2026-11-04 P2。与批量同步 / 成分 / 指数估值共用 `bds_sync_task`（全库一把锁），
     必须排在「批量同步 → 成分增量 → 指数估值增量」之后；不塞 SYNC_MAP / 一键同步 stage。
 
-    `mode`：
-    - M2（默认、推荐）：6 subject 全历史重建，24 序列滑动窗口 + 幂等 upsert，
+    `mode`（2026-11-24 起默认 auto）：
+    - auto（默认）：按 Python 侧源序列指纹 `input_fp` 自动选 skip / M1，
+      **只要 fp 变化就强制该 subject 全量重建**（P0-2：修订影响 `[D, D+10y]` 上千行，
+      只重写最新行会把错误永久固化）；
+    - M2：全历史重建，24 序列滑动窗口 + 幂等 upsert，
       兜底新增交易日与上游历史修订，不需要脆弱的变更检测；
     - M1：只补表内最新 as_of 之后的新增交易日；
-    - M3：从 `from_date` 起重算 `[from_date, 末日]`（上游历史补录 / 成分快照变化时）；
-    - auto：按 Python 侧源序列指纹 `input_fp` 自动选 skip / M1，
-      **只要 fp 变化就强制该 subject 全量重建**（P0-2：修订影响 `[D, D+10y]` 上千行，
-      只重写最新行会把错误永久固化）。
+    - M3：从 `from_date` 起重算 `[from_date, 末日]`（上游历史补录 / 成分快照变化时）。
       🔴 绝不用 `MAX(update_time)` 判修订（重复同步同一天会刷时间戳但值没变 ⇒ 误报）。
 
     **口径变更（365 天 → 日历对日）属 M2 强制触发事件**：上线时必须全量重建，
@@ -1006,18 +1006,26 @@ class ValuationPctSyncRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: str = Field(
-        default="M2", description="重算模式: M1 / M2 / M3 / auto（默认 M2 全量重建）")
-    # 不传 = 运行时从 irs_underlying_monitor 推导（过滤无估值数据标的）；
-    # 显式传 = 单标的/子集，bds 用表名字符串 SQL 取数、不 import irs（🔒4.12）
+        default="auto", description="重算模式: M1 / M2 / M3 / auto（默认 auto：指纹不变跳过、只增新日期增量）")
+    # 标的范围（2026-11-24 起由 SymbolInfo 驱动，取代监测表默认清单）：
+    # scope 运行时从 bds_symbol_info 解析（all=A股指数∪A股个股 默认 / index / stock /
+    # industry 需 industry 参数）；subjects 显式清单优先级最高（单标的/子集/串联链）
+    scope: Optional[str] = Field(
+        default="all", description="标的范围档: all / index / stock / industry；subjects 传入时忽略")
+    industry: Optional[str] = Field(
+        default=None, description="scope=industry 时必填：个股行业精确匹配")
+    trading_status: str = Field(
+        default="trading", description="退市口径: trading仅在市 / delisted仅退市 / all全部；仅作用个股档")
+    # 显式清单（单标的落盘 / 子集重算）：bds 用表名字符串 SQL 取数、不 import irs（🔒4.12）
     subjects: Optional[list[str]] = Field(
-        default=None, description="标的代码清单；不传 = 标的监测表全部有效标的（运行时推导）")
+        default=None, description="显式标的代码清单；传了则忽略 scope，按用户清单跑")
     from_date: Optional[date] = Field(
         default=None, description="M3 的修订起始日（闭区间，含当日）；M3 必填")
-    # 🔴 P0-1：默认关闭。只有「不传 subjects（默认清单）+ M2/auto」时开启才真的删，
+    # 🔴 P0-1：默认关闭。只有「不传 subjects（范围档清单）+ M2/auto」时开启才真的删，
     # 单标的/子集重算永不删除其余标的的历史行。
     prune_orphans: bool = Field(
         default=False,
-        description="危险操作：清理不在标的白名单内的孤儿行；默认 False，且传 subjects 时一律忽略")
+        description="危险操作：清理不在范围白名单内的孤儿行；默认 False，且传 subjects 时一律忽略")
 
 
 class ValuationPctSubjectOut(BaseModel):
