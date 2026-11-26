@@ -7,7 +7,7 @@
   本模块读数不过滤 sec_type（一个 symbol 只会有一种主体类型的行）
 - 外盘标的（SPX / GC00Y）无财务数据 ⇒ empty=true HTTP 200 空态，不猜数
 - 双口径（方案 v8，2026-11-17）：freq=annual 近 N 年年报（默认 5，N ∈ {3,5,10}）/
-  freq=latest 近 12 个标准报告期（含单季差分与单季同比）；响应统一字段 series
+  freq=latest 近 10 年标准报告期（含单季差分与单季同比，2026-11-26 由 12 期改为 10 年）；响应统一字段 series
 - 最新报告期快照卡（含 TTM 差分）
 
 单季口径（方案 v8）：
@@ -213,8 +213,8 @@ def build(symbol: str, years: int = 5, freq: str = "annual",
     """一次返回财务分析 Tab 全部数据。`symbol` 是业务主键（id 会漂移，禁用 id 关联）。
 
     freq=annual：近 N 年年报（默认 5 年，2026-11-17 用户拍板，与路由 Query(5)、
-    前端 years 初值三处同步）；freq=latest：近 12 个标准报告期（含单季差分，
-    years 被忽略，期数固定 12）。
+    前端 years 初值三处同步）；freq=latest：近 10 年标准报告期（含单季差分，
+    years 被忽略，窗口固定 10 年，2026-11-26 由 12 期改为 10 年）。
     """
     own = db is None
     session = SessionLocal() if own else db
@@ -260,7 +260,12 @@ def build(symbol: str, years: int = 5, freq: str = "annual",
             std_rows = [r for r in deriv_rows
                         if r["rpt_date"].strftime("%m-%d") in STANDARD_MD]
             sq_map = _quarterly_enrich(std_rows, inc_map, cf_map)
-            window = std_rows[-12:]
+            # 近 10 年标准报告期（2026-11-26 由固定 12 期改为 10 年窗口，years 仍仅年报口径生效）
+            if std_rows:
+                cutoff_year = std_rows[-1]["rpt_date"].year - 9
+                window = [r for r in std_rows if r["rpt_date"].year >= cutoff_year]
+            else:
+                window = []
             series = []
             for r in window:
                 item = make_item(r)
