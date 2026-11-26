@@ -655,13 +655,15 @@ def _merge_audit(acc: dict, inc: dict) -> dict:
 def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             from_date: Optional[date] = None,
             prune_orphans: bool = False,
-            on_progress: Optional[Callable[[int, int], None]] = None,
+            on_progress: Optional[Callable[..., None]] = None,
             should_stop: Optional[Callable[[], bool]] = None,
             scope: Optional[str] = None, industry: Optional[str] = None,
             trading_status: str = "trading") -> dict:
     """执行重算，返回结构化审计（写进 bds_sync_task.result）。
 
-    `on_progress(done, total)` 由后台线程传入，用于刷任务进度。
+    `on_progress(done, total, stats=None)` 由后台线程传入，用于刷任务进度；
+    stats 为实时统计 {skipped/rows/forced_full}（2026-11-26 起附带，线程层
+    写 task.result.live 供前端运行中展示，结束时被完整 result 覆盖）。
     `should_stop()` 由后台线程传入停止信号；逐 subject 检查，命中即中止循环，
     已算完的 subject 仍会落库（停止是「不再继续」而不是「丢弃已完成」）。
     `prune_orphans=True` 且 `subjects is None` 且 mode ∈ (M2, auto) 时才清理孤儿标的；
@@ -749,6 +751,19 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
                     f"GROUP BY {key}")).all():
                 src_mtime[r[0]] = r[1]
 
+        def _emit(i: int):
+            """逐标的进度回调（循环内 5 个出口统一走这里）：除进度数外附带实时
+            统计（skipped/rows/forced_full），线程层写入 task.result.live 供前端
+            运行中展示，结束时被完整 result 覆盖。"""
+            if on_progress:
+                on_progress(i + 1, len(pairs), {
+                    "skipped": len(skipped_subjects),
+                    "rows": rows_written,
+                    "forced_full": len(set(cut_stale_subjects)
+                                       | set(fp_changed_subjects)
+                                       | set(schema_stale_subjects)),
+                })
+
         for i, (t, s) in enumerate(pairs):
             # 停止信号：逐 subject 检查（单个 subject 的全量重建是原子步骤，不做中途打断）
             if should_stop is not None and should_stop():
@@ -776,8 +791,7 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
                     and src_mtime.get(s) is not None
                     and src_mtime[s] < prev[3]):
                 skipped_subjects.append(s)
-                if on_progress:
-                    on_progress(i + 1, len(pairs))
+                _emit(i)
                 continue
             raw = load_source(db, t, s)
             fp, fp_hist = fingerprint_pair(raw, prev[0] if prev else None)
@@ -813,8 +827,7 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             if mode == "M2" and prev and prev[1] == fp and end_t \
                     and prev[0] >= end_t and not (stale or fp_changed or schema_stale):
                 skipped_subjects.append(s)
-                if on_progress:
-                    on_progress(i + 1, len(pairs))
+                _emit(i)
                 continue
 
             # ---- 先定「写哪些 as_of」，再让 build_rows 只算这些行 ----
@@ -836,8 +849,7 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
 
             if eff_mode == "skip":
                 skipped_subjects.append(s)
-                if on_progress:
-                    on_progress(i + 1, len(pairs))
+                _emit(i)
                 continue
 
             only_dates = None
@@ -845,8 +857,7 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
                 only_dates = ({r[0] for r in raw if r[0] > low} if eff_mode == "M1"
                               else {r[0] for r in raw if r[0] >= low})
                 if not only_dates:
-                    if on_progress:
-                        on_progress(i + 1, len(pairs))
+                    _emit(i)
                     continue
             rows = build_rows(db, t, s, raw, end_t, calc_at, fp,
                               only_dates=only_dates)
@@ -860,8 +871,7 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
                 a, b = rows[0]["as_of"], rows[-1]["as_of"]
                 as_of_range[0] = min(as_of_range[0], a) if as_of_range[0] else a
                 as_of_range[1] = max(as_of_range[1], b) if as_of_range[1] else b
-            if on_progress:
-                on_progress(i + 1, len(pairs))
+            _emit(i)
 
         # 逐标的落库后这里只剩孤儿清理：audit 与 upsert 已在循环内逐标的完成，
         # rows_written / rows_rowcount 语义不变（rowcount 仍可能因值未变返回 0）

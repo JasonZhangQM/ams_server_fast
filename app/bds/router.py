@@ -3097,15 +3097,20 @@ def _run_valuation_pct_thread(task_id: int, mode: str,
         task.start_time = datetime.now()
         db.commit()
 
-        def on_progress(done: int, total: int):
+        def on_progress(done: int, total: int, stats: Optional[dict] = None):
             """逐 subject 刷进度；total_count 的语义是「待算标的数」（2026-11-26
             起 plan 不再统计源表行数——旧行数分母 1,790 万 vs 标的分子使进度条
-            恒 0.03% 失真，且 COUNT 半连接是点击启动后长时间无反应的主因）。"""
+            恒 0.03% 失真，且 COUNT 半连接是点击启动后长时间无反应的主因）。
+            stats 为实时统计，运行中写 result.live 供前端展示写入行数/跳过标的
+            （此前这两格读完整 result，结束才更新、运行中恒 0），结束时被
+            完整 result 覆盖。"""
             s = SessionLocal()
             try:
                 t = s.query(BdsSyncTask).get(task_id)
                 t.done_count = done
                 t.progress = round(done / total * 100, 2) if total else 100
+                if stats is not None:
+                    t.result = {"live": stats}
                 s.commit()
             finally:
                 s.close()
