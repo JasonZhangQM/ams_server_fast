@@ -659,11 +659,14 @@ class DailyValuation(Base, BaseModel):
     dy_lfy: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True, comment="股息率(上一财年LFY)")
 
     # 联合唯一约束 + trade_date DESC 单列索引（支撑 ORDER BY trade_date DESC LIMIT 的高频查询，
-    # 避免 120 万行全表扫描 + filesort）
+    # 避免 120 万行全表扫描 + filesort）+ (symbol, update_time) 索引（估值分位 skip 短路闸的
+    # 批量 MAX(update_time) GROUP BY 走 loose index scan，1,990 万行稠密扫 158s → 1.6s）
     __table_args__ = (
         UniqueConstraint("symbol", "trade_date", name="uk_bds_daily_valuation"),
         Index("k_dv_td", "trade_date", postgresql_using="btree",
               mysql_using="btree"),  # DESC 方向由 MySQL 8.0 自然提供，单列索引足够
+        Index("k_dv_sym_upd", "symbol", "update_time", postgresql_using="btree",
+              mysql_using="btree"),
     )
 
     # 供 upsert 使用的唯一键

@@ -3098,13 +3098,14 @@ def _run_valuation_pct_thread(task_id: int, mode: str,
         db.commit()
 
         def on_progress(done: int, total: int):
-            """逐 subject 刷进度；total_count 的语义是「待算 as_of 行数」。"""
-            ratio = done / total if total else 1.0
+            """逐 subject 刷进度；total_count 的语义是「待算标的数」（2026-11-26
+            起 plan 不再统计源表行数——旧行数分母 1,790 万 vs 标的分子使进度条
+            恒 0.03% 失真，且 COUNT 半连接是点击启动后长时间无反应的主因）。"""
             s = SessionLocal()
             try:
                 t = s.query(BdsSyncTask).get(task_id)
-                t.done_count = int(ratio * total_count)
-                t.progress = round(ratio * 100, 2)
+                t.done_count = done
+                t.progress = round(done / total * 100, 2) if total else 100
                 s.commit()
             finally:
                 s.close()
@@ -3122,7 +3123,7 @@ def _run_valuation_pct_thread(task_id: int, mode: str,
         if not stopped:
             task.done_count = total_count
             task.progress = 100
-        task.success_count = result["rows_upserted"]
+        task.success_count = result["subject_count"]  # 标的维度（skip 计入完成）
         task.no_data_count = 0
         task.error_count = 0
         task.errors = None
@@ -3228,7 +3229,7 @@ def _validate_valuation_pct_req(req: ValuationPctSyncRequest) -> dict:
     except ValueError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
     if p["total_count"] == 0:
-        raise HTTPException(status_code=400, detail="所选标的在估值源表里没有任何交易日")
+        raise HTTPException(status_code=400, detail="所选范围内没有任何标的（请检查范围档/行业/清单）")
     return p
 
 

@@ -13,13 +13,20 @@
 - 指数侧「非空即有效」、个股侧按 `clean_value` 清洗，**两套规则故意不统一**。
 - 无效值日照常落行，但按 metric 独立置 status 并把该 metric 的 3 个分位列全置 NULL；
   禁止整行清空（个股 dy_ttm 有 1,136 个 NULL 日，不能连 PE/PB/PS 一起丢）。
-- 🔴 修订检测主判据是 Python 侧源序列指纹 `input_fp`，**绝不用 `MAX(update_time)`**：
-  `market_data/daily_valuation.py` 对已存在行无条件 setattr 覆盖，重复同步同一天
-  会刷时间戳但值没变 ⇒ 100% 误报。
+- 🔴 修订检测主判据是 Python 侧源序列指纹 `input_fp`，**「证明变了」绝不用
+  `MAX(update_time)`**：`market_data/daily_valuation.py` 对已存在行无条件 setattr
+  覆盖，重复同步同一天会刷时间戳但值没变 ⇒ 用时间戳判「变了」100% 误报。
+  ⚠️ 与 2026-11-26 的 skip 短路闸不矛盾：闸用 update_time 只做「证明**没动**」的
+  快速短路（update_time ≤ 上次落盘 calc_at ⇒ 源行未动 ⇒ 指纹必不变），方向相反
+  ——时间戳多刷只会多走一次完整验证，永远不会误 skip；「动了」仍由指纹裁决。
 - 🔴 指纹比对用**历史前缀**（截断到表内最新 as_of，2026-11-25 用户确认）：纯追加
   新交易日不改前缀 ⇒ auto 走 M1 增量；历史/同日值修订改前缀 ⇒ 强制 M2。全序列
   哈希会让追加与修订不可区分（追加必变哈希 ⇒ 每天误触发 M2），行内落库的
   `input_fp` 仍为写入时点的全序列哈希（闸只读最新行 fp，自洽闭环）。
+- 🔴 skip 短路闸（2026-11-26）：批量 MAX(update_time)（个股走 k_dv_sym_upd
+  loose scan 1.6s）逐标的与上次落盘 calc_at 比较，源行未动 ⇒ 不读源不哈希直接
+  跳过——修复「昨晚已同步、盘前重跑仍要 5,586 × (103ms 读源 + 31ms 双哈希)
+  ≈ 8 分钟」。M3 显式区间重算恒不走闸；input_fp 审计仅含实际读源的标的。
 - 写入走 `upsert_df_to_db` + **显式 `fields_pct_update` 白名单**，`note` 人工列不在白名单
   （哨兵：重算不覆盖人工值）。**2026-11-25 起写库时机改为逐标的落库**：一个标的
   build_rows 完成即 audit + upsert，不再全清单攒完一次性写——全市场 ~5,590 标的
@@ -268,8 +275,8 @@ def _scope_conditions(scope: str, industry: Optional[str],
                       trading_status: str) -> tuple[str, str, dict]:
     """范围档 → (指数 WHERE, 个股 WHERE, 绑定参数)。
 
-    清单解析（resolve_scope_subjects）与行数统计（count_scope_source_rows）共用
-    同一条件构造，保证两处口径永不漂移。
+    清单解析（resolve_scope_subjects）使用；2026-11-26 起行数统计已随
+    total_count 改标的数而移除，条件构造单点维护避免口径漂移。
 
     - 指数恒为 industry='A股指数'（退市口径不作用指数）
     - 个股恒为 market IS NOT NULL（指数 / 美股 / 黄金的 market 恒 NULL，天然排除）
@@ -326,35 +333,18 @@ def resolve_scope_subjects(db, scope: str, industry: Optional[str] = None,
     return subs, {"scope": scope, "subject_source": f"symbol_info:{scope}"}
 
 
-def count_scope_source_rows(db, scope: str, industry: Optional[str],
-                            trading_status: str) -> int:
-    """范围档的源表总行数（plan 的 total_count 用）。
-
-    两条聚合半连接 COUNT 与 resolve_scope_subjects 共用 _scope_conditions，
-    全市场量级下代替逐标的 COUNT 循环（5,926 次点查在 HTTP 请求线程不可接受）。
-    """
-    iw, sw, p = _scope_conditions(scope, industry, trading_status)
-    total = 0
-    if scope in ("all", "index"):
-        total += int(db.execute(text(
-            f"SELECT COUNT(*) FROM bds_index_valuation WHERE index_code IN "
-            f"(SELECT symbol FROM bds_symbol_info WHERE {iw})"), p).scalar() or 0)
-    if scope in ("all", "stock", "industry"):
-        total += int(db.execute(text(
-            f"SELECT COUNT(*) FROM bds_daily_valuation WHERE symbol IN "
-            f"(SELECT symbol FROM bds_symbol_info WHERE {sw})"), p).scalar() or 0)
-    return total
-
-
 def _orphan_symbols(db, whitelist: list[str]) -> list[str]:
     """落表已有但不在白名单内的标的（默认保留历史行，仅审计提示）。
 
     白名单恒取「范围档默认清单」而非本次运行清单：显式子集 / 单标的重算时，
     其余标的历史行仍在白名单内，不算孤儿（与 P0-1「传 subjects 永不删」同语义）。
     结果按 AUDIT_CAP 截断，防白名单意外清空时 result 被撑爆。
+    落表标的集合走 loose index scan（uk_bvp 上 GROUP BY 前两列，2026-11-26：
+    原 DISTINCT symbol 稠密扫 1,790 万行 35.3s，每次 rebuild 都付一遍）。
     """
     existing = {str(r[0]) for r in db.execute(
-        text(f"SELECT DISTINCT symbol FROM {TABLE}")).all()}
+        text(f"SELECT subject_type, symbol FROM {TABLE} "
+             f"GROUP BY subject_type, symbol")).all()}
     return sorted(existing - set(whitelist))[:AUDIT_CAP]
 
 
@@ -372,6 +362,16 @@ def load_source(db, subject_type: str, symbol: str) -> list[tuple]:
     ), {"c": symbol}).all()
 
 
+def _row_line(r) -> bytes:
+    """源序列单行 → 指纹输入行（`trade_date|4 值\\n`，值原样 str）。
+
+    fingerprint 与 fingerprint_pair 共用，保证两种哈希的字节级一致性。
+    """
+    parts = [r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])]
+    parts += ["" if v is None else str(v) for v in r[1:5]]
+    return ("|".join(parts) + "\n").encode("utf-8")
+
+
 def fingerprint(raw: list[tuple]) -> str:
     """Python 侧源序列指纹（🔒6.9：集合指纹禁 MD5(GROUP_CONCAT())）。
 
@@ -384,12 +384,26 @@ def fingerprint(raw: list[tuple]) -> str:
     """
     h = hashlib.sha256()
     for r in raw:
-        d = r[0]
-        parts = [d.isoformat() if hasattr(d, "isoformat") else str(d)]
-        parts += ["" if v is None else str(v) for v in r[1:5]]
-        h.update("|".join(parts).encode("utf-8"))
-        h.update(b"\n")
+        h.update(_row_line(r))
     return h.hexdigest()
+
+
+def fingerprint_pair(raw: list[tuple], cutoff=None) -> tuple[str, str]:
+    """单遍双哈希（2026-11-26）：全序列指纹与「截断到 cutoff 的前缀指纹」
+    一次遍历同时产出。rebuild 每个标的都要全序列 fp（写行/跳过闸）与前缀
+    fp_hist（修订闸），两遍 sha256 合一遍，哈希成本减半。
+
+    cutoff=None（无已落盘行）时前缀恒等全序列，返回 (fp, fp)。
+    """
+    h_full = hashlib.sha256()
+    h_hist = hashlib.sha256()
+    for r in raw:
+        line = _row_line(r)
+        h_full.update(line)
+        if cutoff is None or r[0] <= cutoff:
+            h_hist.update(line)
+    fp = h_full.hexdigest()
+    return fp, (fp if cutoff is None else h_hist.hexdigest())
 
 
 def _valid(subject_type: str, metric: str, v) -> bool:
@@ -585,26 +599,18 @@ def delete_orphans(db, keep_subjects: set[tuple[str, str]]) -> int:
 # 主流程
 # ---------------------------------------------------------------------------
 
-def _count_rows_by_subject(db, pairs: list[tuple[str, str]]) -> int:
-    """显式小清单的行数统计：逐标的 COUNT（千级以内点查可接受）。"""
-    n = 0
-    for t, s in pairs:
-        table = SOURCE_TABLES[t]
-        key = "index_code" if t == "index" else "symbol"
-        n += int(db.execute(
-            text(f"SELECT COUNT(*) FROM {table} WHERE {key}=:c"), {"c": s}).scalar() or 0)
-    return n
-
-
 def plan(subjects: Optional[list[str]] = None, mode: str = "M2",
          from_date: Optional[date] = None, scope: Optional[str] = None,
          industry: Optional[str] = None, trading_status: str = "trading") -> dict:
-    """任务计划：subject 清单、模式、预计行数（供 total_count 与前端展示）。
+    """任务计划：subject 清单、模式、待算标的数（供 total_count 与前端展示）。
 
     2026-11-24 起：subjects=None 时按 SymbolInfo 范围档解析（scope 默认 all =
     A股指数 ∪ A股个股），取代原「监测表默认清单」；显式传 subjects（单标的 /
-    子集）以用户清单为准。范围档的行数统计走聚合半连接 COUNT（与清单解析
-    同条件），显式小清单保留逐标的 COUNT 循环。
+    子集）以用户清单为准。
+    2026-11-26 起：total_count 语义由「预计落库 as_of 行数」改为**标的数**，
+    与任务线程按标的推进的 on_progress 对齐（旧行数分母 1,790 万 vs 标的分子
+    5,590 ⇒ 进度条恒 0.03% 失真）；plan 阶段随之去掉两表半连接 COUNT（全市场
+    量级 5~15s，是「点击启动后长时间无反应」的主因），HTTP 建任务只做清单解析。
     """
     if mode not in ("M1", "M2", "M3", "auto"):
         raise ValueError("mode 必须是 M1 / M2 / M3 / auto")
@@ -621,14 +627,10 @@ def plan(subjects: Optional[list[str]] = None, mode: str = "M2",
             explicit = False
         pairs = resolve_subject_types(db, subs)
         end = source_end_date(db)
-        if explicit:
-            n_days = _count_rows_by_subject(db, pairs)
-        else:
-            n_days = count_scope_source_rows(
-                db, scope_meta["scope"], industry, trading_status)
         index_count = sum(1 for t, _ in pairs if t == "index")
     return {"subjects": subs, "subject_pairs": pairs, "mode": mode,
-            "from_date": from_date, "source_as_of": end, "total_count": n_days,
+            "from_date": from_date, "source_as_of": end,
+            "total_count": len(subs),
             "scope": scope_meta["scope"], "subject_source": scope_meta["subject_source"],
             "subject_count": len(subs), "index_count": index_count,
             "stock_count": len(pairs) - index_count,
@@ -733,6 +735,20 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
         schema_stale_subjects: list[str] = []
         source_by_subject: dict[str, Optional[date]] = {}
 
+        # 🔴 skip 短路闸预取（2026-11-26）：每源表一次 GROUP BY MAX(update_time)。
+        # update_time 语义 = 行最后写入时刻（同步走 ORM，覆盖写触发 onupdate=now()；
+        # 增量设计「只拉新日期」下即行插入时刻）。个股表 1,990 万行走
+        # k_dv_sym_upd (symbol, update_time) loose index scan（1.6s），
+        # 指数表 1.9 万行稠密扫毫秒级。
+        src_mtime: dict[str, datetime] = {}
+        for stype in ("stock", "index"):
+            tbl = SOURCE_TABLES[stype]
+            key = "index_code" if stype == "index" else "symbol"
+            for r in db.execute(text(
+                    f"SELECT {key}, MAX(update_time) FROM {tbl} "
+                    f"GROUP BY {key}")).all():
+                src_mtime[r[0]] = r[1]
+
         for i, (t, s) in enumerate(pairs):
             # 停止信号：逐 subject 检查（单个 subject 的全量重建是原子步骤，不做中途打断）
             if should_stop is not None and should_stop():
@@ -741,10 +757,31 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             # P1-6：该 subject 所属源表的末日，不拿全局（个股表）末日判指数
             end_t = ends.get(t)
             source_by_subject[s] = end_t
-            raw = load_source(db, t, s)
-            fp = fingerprint(raw)
-            fps[s] = fp
             prev = latest.get((t, s))
+            # ---- skip 短路闸（2026-11-26）----
+            # 源行自该标的上次落盘（calc_at）后未动 ⇒ 源序列必然不变 ⇒ 全序列/
+            # 前缀指纹必不变 ⇒ M2 快跳过 / auto skip 的全部条件必然成立，直接
+            # 跳过，**不 load_source 不做双哈希**。修复「昨晚已同步、盘前重跑
+            # 仍要全市场读源 + 双哈希（5,586 × 133ms ≈ 8 分钟）」的浪费。
+            # 边界：① 严格 < 防同秒边界（源写入与重算同秒时保守判「动过」走
+            # 完整路径）；② M3 显式区间重算恒不走闸（用户意图是强制重写）；
+            # ③闸是 M2 快跳过/ auto skip 的必要条件推导，非独立新语义——
+            # 源行未动 ⇒ prev[1] == fp、stale/fp_changed/schema_stale 均否；
+            # ④ 若未来引入历史行重拉路径，ORM onupdate 会刷新 update_time
+            # ⇒ 闸自动放行，完整前缀指纹验证兜底，修订不漏检。
+            if (mode != "M3" and prev and end_t and prev[0] >= end_t
+                    and _cut_is_calendar(prev)
+                    and len(prev) >= 4 and prev[3] is not None
+                    and prev[3] >= SCHEMA_EPOCH
+                    and src_mtime.get(s) is not None
+                    and src_mtime[s] < prev[3]):
+                skipped_subjects.append(s)
+                if on_progress:
+                    on_progress(i + 1, len(pairs))
+                continue
+            raw = load_source(db, t, s)
+            fp, fp_hist = fingerprint_pair(raw, prev[0] if prev else None)
+            fps[s] = fp
             # 三道强制全量闸：
             # ① 口径陈旧（P0，§7.2）：表内最新行 window_cut 不是日历对日；
             # ② input_fp 前缀变化（P0-2/3）：历史前缀（截断到表内最新 as_of prev[0]）
@@ -754,8 +791,8 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             #    分叉，用 source_as_of 会读到未落盘的日子产生误判；
             # ③ 结构陈旧（P1-4）：calc_at 早于 SCHEMA_EPOCH ⇒ 新增列尚未回填。
             # 任一命中都 ⇒ 该 subject 全量重建，不做脆弱的「找最早变更日」。
-            fp_hist = (fingerprint([r for r in raw if r[0] <= prev[0]])
-                       if prev else fp)
+            # （fp_hist 由 fingerprint_pair 单遍产出：全序列 fp 与截断到
+            # prev[0] 的前缀指纹一次哈希同时得到，2026-11-26 起不再二次切片。）
             stale = bool(prev) and not _cut_is_calendar(prev)
             fp_changed = prev is not None and prev[1] != fp_hist
             schema_stale = bool(prev) and (
@@ -770,7 +807,9 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
             # ---- M2 快速跳过（恒定性推论，§0.1）----
             # 源序列指纹、**该 subject 的**源末日、窗口口径、表结构版本四者都没变时，
             # 「全量重写」与「不写」逐值全等。实测第二次全量覆盖写 26,816 行要 57 s
-            # （ON DUPLICATE KEY UPDATE 全字段），跳过可把日常重算降到只拉源序列的 1.6 s。
+            # （ON DUPLICATE KEY UPDATE 全字段），跳过可把日常重算降到只拉源序列；
+            # 2026-11-26 起更上层还有 skip 短路闸（源行未动连源都不读），本闸仅在
+            # 源行动过（新交易日/修订）后才真正参与判定。
             if mode == "M2" and prev and prev[1] == fp and end_t \
                     and prev[0] >= end_t and not (stale or fp_changed or schema_stale):
                 skipped_subjects.append(s)
@@ -865,6 +904,8 @@ def rebuild(mode: str = "M2", subjects: Optional[list[str]] = None,
         "prune_orphans": allow_prune,
         "subjects_explicit": subjects is not None,
         "audit": audit_total,
+        # input_fp 仅含实际读源的标的（skip 短路闸跳过的不算指纹，2026-11-26 起
+        # input_fp_count 可小于 subject_count——全 skip 场景为 0）
         "input_fp": ({k: v[:16] for k, v in fps.items()}
                      if len(fps) <= AUDIT_CAP else None),
         "input_fp_count": len(fps),
