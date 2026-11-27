@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""标的维度的横切口径：估值分位 + 证伪自动判定（2026-11-13 起，今日待办已下线）。
+"""标的维度的横切口径：估值分位（2026-11-13 起，今日待办已下线）。
 
 本模块曾承载「今日页（GET /irs/today）」的到价清单聚合，2026-11-13 随今日待办页一并
-删除；保留两项仍被其它链路消费的能力：
+删除；保留仍被其它链路消费的能力：
 
 - `percentiles()`：PE/PB 10 年分位（契约在 bds `percentile_store.read_percentiles()`），
-  被标的监测列表、风险看板、档位 Tab 等多处调用；
-- `judge_one / judge_list`：证伪候选判定（只读、不改 status）。
+  被标的监测列表、风险看板、档位 Tab 等多处调用。
+
+证伪候选判定 `judge_one / judge_list` 已随证伪功能下线一并删除（2026-11-27，
+证伪只在研报文件中维护）。
 
 `_is_hit` / `_unfinished_plans` 仍被 `um_simulate`（推演页命中剧本）复用，故保留。
 
@@ -81,91 +83,3 @@ def _unfinished_plans(db: Session, symbol: str) -> list[UnderlyingPlan]:
     """未暂停的剧本（长期有效，全部纳入今日命中判定）。"""
     rows = db.query(UnderlyingPlan).filter(UnderlyingPlan.underlying_symbol == symbol).order_by(UnderlyingPlan.seq).all()
     return [p for p in rows if not p.is_cancelled]
-
-
-# =========================================================================
-# P2-2 证伪自动判定（只读，候选不改 status）
-# =========================================================================
-
-import re
-from server_fast.app.irs.models import UnderlyingInvalidate, UnderlyingMonitor
-
-# judge_expr 格式约定：{metric}{op}{value}，如 price<=3900 / pb_pct>=0.7
-_OP_RE = re.compile(r"^(.*?)\s*(<=|>=|==|=|<|>|≤|≥)\s*([0-9]*\.?[0-9]+)\s*$")
-
-
-def judge_one(db: Session, inv: UnderlyingInvalidate,
-              pct_map: Optional[dict] = None) -> Optional[dict]:
-    """对一条证伪做候选触发判定（只读，**不改 status**）。
-
-    三类分治（方案 P2-2）：
-    - price       → 当前价 UnderlyingMonitor.price
-    - percentile  → 指数标的 pe_pct / pb_pct 10y 分位（um_today.percentiles()）
-    - manual      → 不做
-    - discount    → 暂不做（贴水率需要跨模块查）
-
-    返回格式（可算的才有值，不可算返回 None）：
-        {"candidate": True/False, "current_value": float,
-         "threshold": float, "op": str, "metric": str}
-
-    关键约束：**只写候选、不改 UnderlyingInvalidate.status**。机器给提示，人做决定。
-    """
-    if inv.judge in (None, "manual"):
-        return None
-    if not inv.judge_expr:
-        return None
-    m = _OP_RE.match(inv.judge_expr.strip())
-    if not m:
-        return None
-    metric = m.group(1).strip()
-    op_raw = m.group(2).strip()
-    try:
-        threshold = float(m.group(3))
-    except (TypeError, ValueError):
-        return None
-
-    # 统一比较符（Unicode 符号归一并去掉等号前的多余空格）
-    op = {"≤": "<=", "≥": ">=", "=": "=="}.get(op_raw, op_raw)
-    if op not in ("<", ">", "<=", ">=", "=="):
-        return None
-
-    # 数据源解析
-    current_value: Optional[float] = None
-    if inv.judge == "price" and metric == "price":
-        um = (db.query(UnderlyingMonitor.price)
-              .filter(UnderlyingMonitor.symbol == inv.symbol).scalar())
-        current_value = float(um) if um is not None else None
-    elif inv.judge == "percentile" and metric in ("pe_pct", "pb_pct"):
-        pct = (pct_map or percentiles()).get((inv.symbol, metric))
-        current_value = float(pct) if pct is not None else None
-    else:
-        return None  # discount / 其他未实现
-
-    if current_value is None:
-        return None
-
-    # 执行比较
-    ops = {
-        "<=": lambda a, b: a <= b,
-        ">=": lambda a, b: a >= b,
-        "<": lambda a, b: a < b,
-        ">": lambda a, b: a > b,
-        "==": lambda a, b: abs(a - b) < 1e-9,
-    }
-    return {
-        "candidate": bool(ops[op](current_value, threshold)),
-        "current_value": current_value,
-        "threshold": threshold,
-        "op": op,
-        "metric": metric,
-    }
-
-
-def judge_list(db: Session, symbol: str) -> dict[int, Optional[dict]]:
-    """批量判定一个标的的全部证伪（复用一次 percentiles() 调用）。"""
-    invs = (db.query(UnderlyingInvalidate)
-            .filter(UnderlyingInvalidate.symbol == symbol).all())
-    if not invs:
-        return {}
-    pct_map = percentiles()
-    return {inv.id: judge_one(db, inv, pct_map) for inv in invs}

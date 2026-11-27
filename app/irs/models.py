@@ -216,7 +216,7 @@ def _compute_discount_monitor(mapper, connection, target):
 
 
 # =========================================================================
-# v3 新增：标的层档案（档位版本 / 研究定稿 / 逻辑 / 证伪 / 剧本）
+# v3 新增：标的层档案（档位版本 / 研究定稿 / 逻辑 / 剧本；证伪 2026-11-27 下线，表保留供历史数据）
 #
 # 外键一律 ON DELETE RESTRICT：主表历史上被删过约 47 次（AUTO_INCREMENT=56 只有 8 行），
 # 用 CASCADE 会让"随手删一行"变成"静默清空该标的的全部研究与档位档案"。
@@ -261,7 +261,7 @@ class UnderlyingResearch(Base, BaseModel):
         Index("k_vmr_date", "research_date"),
     )
 
-    CONCLUSION_CHOICES = ["买入", "增持", "持有", "观望", "回避", "不入池"]
+    CONCLUSION_CHOICES = ["买入", "增持", "持有", "观望", "减持", "卖出"]
 
     symbol: Mapped[str] = mapped_column(
         String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
@@ -269,7 +269,8 @@ class UnderlyingResearch(Base, BaseModel):
     research_date: Mapped[date] = mapped_column(Date, nullable=False, comment="研究定稿日")
     thesis: Mapped[Optional[str]] = mapped_column(
         String(200), nullable=True, comment="一句话本质：买它本质上在买什么")
-    conclusion: Mapped[Optional[str]] = mapped_column(String(8), nullable=True, comment="结论")
+    conclusion: Mapped[Optional[str]] = mapped_column(
+        String(8), nullable=True, comment="结论（买入/增持/持有/观望/减持/卖出）")
     max_risk: Mapped[Optional[str]] = mapped_column(
         String(200), nullable=True, comment="最大风险：最可能让我亏钱的那件事")
     expectation_gap: Mapped[Optional[str]] = mapped_column(
@@ -281,8 +282,6 @@ class UnderlyingResearch(Base, BaseModel):
         String(128), nullable=True, comment="知识库研究报告名（双链名，不含 .md）")
     research_brief: Mapped[Optional[str]] = mapped_column(
         Text, nullable=True, comment="结论摘要（<=800 字，禁止抄报告正文）")
-    research_log: Mapped[Optional[str]] = mapped_column(
-        Text, nullable=True, comment="研究过程：怎么得出结论 / 换过什么锚 / 推翻过什么")
 
     unique_keys = ["symbol", "research_date"]
 
@@ -323,41 +322,6 @@ class UnderlyingLogic(Base, BaseModel):
 
     def __str__(self):
         return f"{self.symbol}#{self.seq}({self.state})"
-
-
-class UnderlyingInvalidate(Base, BaseModel):
-    """证伪条件登记：只登记判据与触发状态，**不自动计算**。"""
-
-    __tablename__ = "irs_um_invalidate"
-    __table_args__ = (
-        UniqueConstraint("symbol", "seq", name="uk_vmi_symbol_seq"),
-        Index("k_vmi_status", "status"),
-    )
-
-    STATUS_CHOICES = ["未触发", "已触发", "已失效"]
-
-    symbol: Mapped[str] = mapped_column(
-        String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
-        nullable=False, comment="标的代码")
-    logic_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, comment="对应逻辑条目")
-    seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号")
-    proposition: Mapped[str] = mapped_column(String(200), nullable=False, comment="被证伪的命题")
-    signal: Mapped[str] = mapped_column(
-        String(200), nullable=False, comment="证伪信号 + 阈值（必须可量化）")
-    source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="数据源")
-    action: Mapped[Optional[str]] = mapped_column(
-        String(32), nullable=True, comment="触发后动作：减仓/清仓/重估/暂停加仓")
-    judge: Mapped[Optional[str]] = mapped_column(
-        String(16), nullable=True, comment="判定类别：price/percentile/discount/manual")
-    judge_expr: Mapped[Optional[str]] = mapped_column(
-        String(64), nullable=True, comment="判据表达式（如 price<=3900）")
-    status: Mapped[str] = mapped_column(String(8), nullable=False, default="未触发", comment="状态")
-    triggered_at: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="触发日")
-
-    unique_keys = ["symbol", "seq"]
-
-    def __str__(self):
-        return f"{self.symbol}#{self.seq}({self.status})"
 
 
 class UnderlyingPlan(Base, BaseModel):
@@ -438,10 +402,11 @@ class UnderlyingReview(Base, BaseModel):
 
 
 class UnderlyingStateLog(Base, BaseModel):
-    """逻辑 / 证伪状态变更审计日志（append-only，复盘用）。
+    """逻辑状态变更审计日志（append-only，复盘用）。
 
-    主表（UnderlyingLogic.state / UnderlyingInvalidate.status）仍只存当前态，本表只增不改：
-    每一次 state/status **真正变化**时追加一行，旧值不覆盖，「三个月前判过什么」可回放。
+    主表（UnderlyingLogic.state）仍只存当前态，本表只增不改：
+    每一次 state **真正变化**时追加一行，旧值不覆盖，「三个月前判过什么」可回放。
+    证伪表已删除（2026-11-27），历史行中可能仍残留 subject_type='invalidate' 的记录。
     """
 
     __tablename__ = "irs_um_state_log"
@@ -450,12 +415,11 @@ class UnderlyingStateLog(Base, BaseModel):
     )
 
     LOGIC = "logic"
-    INVALIDATE = "invalidate"
 
     subject_type: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="logic=逻辑；invalidate=证伪")
+        String(16), nullable=False, comment="logic=逻辑（历史行或有 invalidate，证伪已删除）")
     subject_id: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="对应 irs_um_logic.id / irs_um_invalidate.id")
+        Integer, nullable=False, comment="对应 irs_um_logic.id")
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="标的代码")
     from_state: Mapped[Optional[str]] = mapped_column(
         String(16), nullable=True, comment="变更前（首次登记为 NULL）")

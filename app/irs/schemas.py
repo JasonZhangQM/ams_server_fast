@@ -214,7 +214,6 @@ class UnderlyingResearchOut(BaseModel):
     next_review: Optional[date] = None
     research_note: Optional[str] = None
     research_brief: Optional[str] = None
-    research_log: Optional[str] = None
     create_time: datetime
     update_time: datetime
 
@@ -231,7 +230,6 @@ class UnderlyingResearchSave(BaseModel):
     next_review: Optional[date] = None
     research_note: Optional[str] = None
     research_brief: Optional[str] = None
-    research_log: Optional[str] = None
 
 
 # =========================================================================
@@ -300,7 +298,7 @@ class UnderlyingReviewSave(BaseModel):
 
 
 # =========================================================================
-# v3：投资逻辑 / 证伪条件（批次二的功能，接口先通）
+# v3：投资逻辑（证伪条件 schema 已于 2026-11-27 随功能下线删除）
 # =========================================================================
 class UnderlyingLogicOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -323,49 +321,6 @@ class UnderlyingLogicSave(BaseModel):
     pricing: Optional[str] = None
     state: str = "完好"
     evidence: Optional[str] = None
-
-
-class UnderlyingInvalidateOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    symbol: str
-    logic_id: Optional[int] = None
-    seq: int
-    proposition: str
-    signal: str
-    source: Optional[str] = None
-    action: Optional[str] = None
-    judge: Optional[str] = None
-    judge_expr: Optional[str] = None
-    status: str
-    triggered_at: Optional[date] = None
-    create_time: datetime
-    update_time: datetime
-    # 派生：signal 里没有数字阈值 -> 前端标红（模板要求"阈值不可量化者视为未填"）
-    quantified: bool = True
-    # P2-2 自动判定候选触发（只读，不改 status）：可算时返回 dict{candidate, current_value, threshold, op, metric}，不可算返回 None
-    auto_judged: Optional[dict] = None
-
-
-class UnderlyingInvalidateSave(BaseModel):
-    """证伪条件保存入参（按 seq upsert）。
-
-    ⚠️ 这里**只能有入参字段**。曾误从 UnderlyingInvalidateOut 复制进来 `id` / `create_time` /
-    `update_time` 三行，`id: int` 无默认值 ⇒ 任何保存都 422，证伪从来没写进去过。
-    出参字段一律放 UnderlyingInvalidateOut，不要回抄。
-    """
-
-    seq: int
-    proposition: str
-    signal: str
-    logic_id: Optional[int] = None
-    source: Optional[str] = None
-    action: Optional[str] = None
-    judge: Optional[str] = None
-    judge_expr: Optional[str] = None
-    status: str = "未触发"
-    triggered_at: Optional[date] = None
 
 
 # =========================================================================

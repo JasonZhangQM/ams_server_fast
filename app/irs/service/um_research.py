@@ -5,7 +5,9 @@
 区分两种改动的责任在前端（"录错"该改、"观点变了"该新建），后端只按日期 upsert。
 
 长度硬约束（对应知识库 0101 模板的边界）：thesis/max_risk/pre_condition <= 200 字，
-research_brief <= 800 字，research_log <= 2000 字 —— 超了说明该写报告，不是写系统。
+research_brief <= 800 字 —— 超了说明该写报告，不是写系统。
+研究过程（换过什么锚、推翻过什么）不存系统：系统只存结构化结论，过程留在知识库报告 §10.2
+「相对上一版的变化」与 irs_um_version.note 里。
 """
 from __future__ import annotations
 
@@ -17,9 +19,9 @@ from sqlalchemy.orm import Session
 from server_fast.app.irs.models import UnderlyingMonitor, UnderlyingResearch
 
 FIELDS = ("thesis", "conclusion", "max_risk", "expectation_gap", "pre_condition",
-          "next_review", "research_note", "research_brief", "research_log")
+          "next_review", "research_note", "research_brief")
 LIMITS = {"thesis": 200, "max_risk": 200, "pre_condition": 200,
-          "research_brief": 800, "research_log": 2000,
+          "research_brief": 800,
           "expectation_gap": 2000, "research_note": 128}
 
 

@@ -8,7 +8,6 @@
 """
 from datetime import date, datetime
 import logging
-import re
 import threading
 from typing import Callable, Dict, List, Optional
 
@@ -32,7 +31,6 @@ from server_fast.app.irs.config import Config as IrsCfg
 from server_fast.app.irs.models import (
     DiscountMonitor,
     UnderlyingMonitor,
-    UnderlyingInvalidate,
     UnderlyingLogic,
     UnderlyingPlan,
     UnderlyingResearch,
@@ -46,8 +44,6 @@ from server_fast.app.irs.schemas import (
     UnderlyingMonitorCreate,
     UnderlyingMonitorOut,
     UnderlyingMonitorUpdate,
-    UnderlyingInvalidateOut,
-    UnderlyingInvalidateSave,
     UnderlyingLogicOut,
     UnderlyingLogicSave,
     UnderlyingPlanOut,
@@ -396,7 +392,7 @@ def get_underlying_monitor_detail(id_: int, db: Session = Depends(get_db)):
     """详情抽屉首屏（概览最小集）。
 
     2026-10-30 瘦身：只返回概览 Tab 用到的数据 + 轻量计数。
-    各 Tab 数据改为切到时懒加载（versions/research/logic/invalidate/plans/trades/groups）。
+    各 Tab 数据改为切到时懒加载（versions/research/logic/plans/trades/groups）。
     """
     um = db.get(UnderlyingMonitor, id_)
     if um is None:
@@ -410,7 +406,6 @@ def get_underlying_monitor_detail(id_: int, db: Session = Depends(get_db)):
     plans_total = db.query(UnderlyingPlan).filter(UnderlyingPlan.underlying_symbol == sym).count()
     plans_active = db.query(UnderlyingPlan).filter(UnderlyingPlan.underlying_symbol == sym, UnderlyingPlan.is_cancelled == False).count()
     logic_total = db.query(UnderlyingLogic).filter(UnderlyingLogic.symbol == sym).count()
-    invalidate_total = db.query(UnderlyingInvalidate).filter(UnderlyingInvalidate.symbol == sym).count()
     # 归属覆盖（groups + bill_rows，供概览底部文字提示）
     cov = service.um_map.coverage(db)
     cov_row = next((r for r in cov if r["underlying_symbol"] == sym), {"group_rows": 0, "bill_rows": 0})
@@ -433,13 +428,12 @@ def get_underlying_monitor_detail(id_: int, db: Session = Depends(get_db)):
         "um": um_dict,
         "current_version": ({"effective_date": cur_ver.effective_date, "note": cur_ver.note}
                             if cur_ver else None),
-        # —— 以下是概览专用数据，不再有全量 versions/research/plans/groups/trades/logic/invalidate ——
+        # —— 以下是概览专用数据，不再有全量 versions/research/plans/groups/trades/logic ——
         "plans_preview": plans_preview,   # 剧本前 10 条（概览只读展示）
         "latest_research": latest_research,  # 最新一版研究（概览决策卡）
         "plans_active_count": plans_active,
         "plans_total_count": plans_total,
         "logic_total_count": logic_total,
-        "invalidate_total_count": invalidate_total,
         "group_rows": cov_row["group_rows"],
         "bill_rows": cov_row["bill_rows"],
     }
@@ -758,7 +752,7 @@ def list_underlying_monitor_unplanned(id_: int, db: Session = Depends(get_db)):
     return {"items": [dict(r) for r in rows], "count": len(rows)}
 
 
-# ---------------------------------------------------------------- 逻辑 / 证伪
+# ---------------------------------------------------------------- 逻辑（证伪端点已于 2026-11-27 下线）
 def _append_state_log(db: Session, subject_type: str, subject_id: int, symbol: str,
                       from_state: Optional[str], to_state: str,
                       note: Optional[str] = None) -> None:
@@ -837,11 +831,7 @@ def save_underlying_monitor_logic(id_: int, payload: UnderlyingLogicSave, db: Se
 
 @router.delete("/underlying-monitors/{id_}/logic/{seq}")
 def delete_underlying_monitor_logic(id_: int, seq: int, db: Session = Depends(get_db)):
-    """删除一条投资逻辑（按 seq）。
-
-    删前必须摘掉证伪对它的引用：`irs_um_invalidate.logic_id` 是裸 Integer，没有外键约束，
-    直接删逻辑会留下悬空 id（"对应逻辑"指向一条不存在的记录，且没有任何报错）。
-    """
+    """删除一条投资逻辑（按 seq）。"""
     um = db.get(UnderlyingMonitor, id_)
     if um is None:
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
@@ -850,96 +840,21 @@ def delete_underlying_monitor_logic(id_: int, seq: int, db: Session = Depends(ge
     if row is None:
         raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的逻辑")
     try:
-        unlinked = (db.query(UnderlyingInvalidate).filter(UnderlyingInvalidate.logic_id == row.id)
-                    .update({UnderlyingInvalidate.logic_id: None}, synchronize_session=False))
         db.delete(row)
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"删除失败：{e}")
-    return {"status": "success", "message": "已删除", "unlinked_invalidates": unlinked}
-
-
-@router.get("/underlying-monitors/{id_}/invalidate", response_model=List[UnderlyingInvalidateOut])
-def list_underlying_monitor_invalidate(id_: int, db: Session = Depends(get_db)):
-    um = db.get(UnderlyingMonitor, id_)
-    if um is None:
-        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
-    rows = db.query(UnderlyingInvalidate).filter(UnderlyingInvalidate.symbol == um.symbol) \
-        .order_by(UnderlyingInvalidate.seq).all()
-    # P2-2 批量判定候选触发（只读，不改 status）
-    from server_fast.app.irs.service.um_today import judge_list
-    judged_map = judge_list(db, um.symbol)
-    out = []
-    for r in rows:
-        d = UnderlyingInvalidateOut.model_validate(r).model_dump()
-        # 判据是否可量化：必须出现"比较符 + 数字"或"数字 + %"，只有数字不算
-        d["quantified"] = bool(re.search(r"[><≥≤=]\s*\d|\d+\s*%", r.signal or ""))
-        # P2-2 自动判定候选触发结果（可算 → candidate true/false；不可算 → null）
-        d["auto_judged"] = judged_map.get(r.id)
-        out.append(d)
-    return out
-
-
-@router.put("/underlying-monitors/{id_}/invalidate")
-def save_underlying_monitor_invalidate(id_: int, payload: UnderlyingInvalidateSave,
-                                 db: Session = Depends(get_db)):
-    """按 seq upsert 一条证伪条件（只登记，不自动计算触发）。"""
-    um = db.get(UnderlyingMonitor, id_)
-    if um is None:
-        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
-    row = (db.query(UnderlyingInvalidate)
-           .filter(UnderlyingInvalidate.symbol == um.symbol, UnderlyingInvalidate.seq == payload.seq)
-           .one_or_none())
-    action = "created" if row is None else "updated"
-    from_status = None if row is None else row.status
-    try:
-        if row is None:
-            row = UnderlyingInvalidate(symbol=um.symbol, seq=payload.seq)
-            db.add(row)
-        # 先赋值 NOT NULL 字段再 flush：flush 会立即发 INSERT，
-        # 若此时 proposition/signal 仍为 None 将违反非空约束（2026-10-30 修复）
-        for f in ("proposition", "signal", "logic_id", "source", "action",
-                  "judge", "judge_expr", "status", "triggered_at"):
-            setattr(row, f, getattr(payload, f))
-        db.flush()  # 拿 row.id，供状态日志使用
-        # 状态历史化：仅 status 真变时追加（新建首次登记 from_state=NULL）
-        if from_status != payload.status:
-            _append_state_log(db, UnderlyingStateLog.INVALIDATE, row.id, um.symbol,
-                              from_status, payload.status)
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"保存失败：{e}")
-    # 不可量化**不阻断**：先登记、后补数字是正常节奏，硬拦会让人干脆不登记
-    quantified = bool(re.search(r"[><≥≤=]\s*\d|\d+\s*%", payload.signal or ""))
-    return {
-        "status": "success", "action": action, "id": row.id, "quantified": quantified,
-        "warning": None if quantified else "证伪信号里没有数字阈值，已保存但会被标记为「不可量化」",
-    }
-
-
-@router.delete("/underlying-monitors/{id_}/invalidate/{seq}")
-def delete_underlying_monitor_invalidate(id_: int, seq: int, db: Session = Depends(get_db)):
-    """删除一条证伪条件（按 seq）。"""
-    um = db.get(UnderlyingMonitor, id_)
-    if um is None:
-        raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
-    n = (db.query(UnderlyingInvalidate)
-         .filter(UnderlyingInvalidate.symbol == um.symbol, UnderlyingInvalidate.seq == seq)
-         .delete(synchronize_session=False))
-    db.commit()
-    if not n:
-        raise HTTPException(status_code=404, detail=f"没有 seq={seq} 的证伪条件")
     return {"status": "success", "message": "已删除"}
 
 
 @router.get("/underlying-monitors/{id_}/state-log", response_model=List[UnderlyingStateLogOut])
 def list_underlying_monitor_state_log(id_: int, db: Session = Depends(get_db)):
-    """某标的状态演化时间轴（逻辑 state + 证伪 status 的 append-only 日志）。
+    """某标的状态演化时间轴（逻辑 state 的 append-only 日志）。
 
-    按 changed_at 正序回放「完好 → 减弱 → 破坏」「未触发 → 已触发」的完整路径。
+    按 changed_at 正序回放「完好 → 减弱 → 破坏」的完整路径。
     只读消费，供复盘视图（研究 Tab）使用；主表仍只存当前态，历史靠本表回放。
+    历史行中可能仍残留 subject_type='invalidate' 的记录（证伪已删除），由前端过滤。
     """
     um = db.get(UnderlyingMonitor, id_)
     if um is None:
@@ -1075,7 +990,7 @@ def update_underlying_monitor(
 @router.delete("/underlying-monitors/{id_}")
 def delete_underlying_monitor(
     id_: int,
-    cascade: bool = Query(False, description="true = 连同研究/档位/逻辑/证伪/剧本一起删"),
+    cascade: bool = Query(False, description="true = 连同研究/档位/逻辑/剧本一起删"),
     db: Session = Depends(get_db),
 ):
     """删除标的监测记录。
@@ -1090,7 +1005,6 @@ def delete_underlying_monitor(
         "version": db.query(func.count(UnderlyingVersion.id)).filter(UnderlyingVersion.symbol == um.symbol).scalar(),
         "research": db.query(func.count(UnderlyingResearch.id)).filter(UnderlyingResearch.symbol == um.symbol).scalar(),
         "logic": db.query(func.count(UnderlyingLogic.id)).filter(UnderlyingLogic.symbol == um.symbol).scalar(),
-        "invalidate": db.query(func.count(UnderlyingInvalidate.id)).filter(UnderlyingInvalidate.symbol == um.symbol).scalar(),
         "plan": db.query(func.count(UnderlyingPlan.id)).filter(UnderlyingPlan.underlying_symbol == um.symbol).scalar(),
     }
     has_child = any(v for v in counts.values())
@@ -1101,9 +1015,8 @@ def delete_underlying_monitor(
         })
     try:
         if has_child:
-            for model, key in ((UnderlyingPlan, "underlying_symbol"), (UnderlyingInvalidate, "symbol"),
-                               (UnderlyingLogic, "symbol"), (UnderlyingResearch, "symbol"),
-                               (UnderlyingVersion, "symbol")):
+            for model, key in ((UnderlyingPlan, "underlying_symbol"), (UnderlyingLogic, "symbol"),
+                               (UnderlyingResearch, "symbol"), (UnderlyingVersion, "symbol")):
                 db.query(model).filter(getattr(model, key) == um.symbol).delete(synchronize_session=False)
             db.flush()
         db.delete(um)
