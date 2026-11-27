@@ -335,7 +335,7 @@ class UnderlyingStateLogOut(BaseModel):
     symbol: str
     from_state: Optional[str] = None
     to_state: str
-    changed_at: datetime
+    create_time: datetime
     note: Optional[str] = None
 
 

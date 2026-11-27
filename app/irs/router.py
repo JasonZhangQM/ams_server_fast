@@ -760,6 +760,7 @@ def _append_state_log(db: Session, subject_type: str, subject_id: int, symbol: s
 
     仅在主表 state/status **真正变化**时调用（值变了才写，保存同值不写）。
     首次登记（新建）时 from_state=None，表示「历史从今天起完整」。
+    变更时间用 create_time（append-only 行创建即变更），不单设 changed_at。
     """
     db.add(UnderlyingStateLog(
         subject_type=subject_type,
@@ -767,7 +768,6 @@ def _append_state_log(db: Session, subject_type: str, subject_id: int, symbol: s
         symbol=symbol,
         from_state=from_state,
         to_state=to_state,
-        changed_at=datetime.now(),
         note=note,
     ))
 
@@ -797,6 +797,7 @@ def save_underlying_monitor_logic(id_: int, payload: UnderlyingLogicSave, db: Se
            .one_or_none())
     action = "created" if row is None else "updated"
     from_state = None if row is None else row.state
+    from_pricing = None if row is None else row.pricing
     try:
         if row is None:
             row = UnderlyingLogic(symbol=um.symbol, seq=payload.seq)
@@ -814,6 +815,12 @@ def save_underlying_monitor_logic(id_: int, payload: UnderlyingLogicSave, db: Se
         if from_state != payload.state:
             _append_state_log(db, UnderlyingStateLog.LOGIC, row.id, um.symbol,
                               from_state, payload.state)
+        # 定价情况历史化：同一张 append-only 表，subject_type=logic_pricing
+        # （未定价→部分定价→充分定价 与 完好→减弱→破坏 同构；「充分定价」翻转日是止盈信号时点）。
+        # 只记「填了档位」的变更；清空（None）不落链，主表置空即可
+        if payload.pricing is not None and from_pricing != payload.pricing:
+            _append_state_log(db, UnderlyingStateLog.LOGIC_PRICING, row.id, um.symbol,
+                              from_pricing, payload.pricing)
         db.commit()
     except Exception as e:
         db.rollback()
@@ -852,7 +859,7 @@ def delete_underlying_monitor_logic(id_: int, seq: int, db: Session = Depends(ge
 def list_underlying_monitor_state_log(id_: int, db: Session = Depends(get_db)):
     """某标的状态演化时间轴（逻辑 state 的 append-only 日志）。
 
-    按 changed_at 正序回放「完好 → 减弱 → 破坏」的完整路径。
+    按 create_time 正序回放「完好 → 减弱 → 破坏」的完整路径。
     只读消费，供复盘视图（研究 Tab）使用；主表仍只存当前态，历史靠本表回放。
     历史行中可能仍残留 subject_type='invalidate' 的记录（证伪已删除），由前端过滤。
     """
@@ -861,7 +868,7 @@ def list_underlying_monitor_state_log(id_: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"记录不存在：{id_}")
     return (db.query(UnderlyingStateLog)
             .filter(UnderlyingStateLog.symbol == um.symbol)
-            .order_by(UnderlyingStateLog.changed_at.asc(), UnderlyingStateLog.id.asc())
+            .order_by(UnderlyingStateLog.create_time.asc(), UnderlyingStateLog.id.asc())
             .all())
 
 

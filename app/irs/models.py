@@ -323,15 +323,11 @@ class UnderlyingLogic(Base, BaseModel):
         String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
         nullable=False, comment="标的代码")
     seq: Mapped[int] = mapped_column(Integer, nullable=False, comment="序号 1-4")
-    content: Mapped[str] = mapped_column(
-        String(200), nullable=False, comment="逻辑：逻辑->影响路径->是否已定价")
-    pricing: Mapped[Optional[str]] = mapped_column(
-        String(8), nullable=True, comment="是否已被定价：未定价/部分/已充分")
+    content: Mapped[str] = mapped_column(String(200), nullable=False, comment="逻辑：逻辑->影响路径->是否已定价")
     state: Mapped[str] = mapped_column(String(8), nullable=False, default="完好", comment="状态")
-    state_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, nullable=True, comment="状态最后变更时间（state 真变时由 service 写）")
-    evidence: Mapped[Optional[str]] = mapped_column(
-        String(200), nullable=True, comment="证据（报告章节 / 数据代码 / 指标）")
+    pricing: Mapped[Optional[str]] = mapped_column(String(8), nullable=True, comment="定价情况：未定价/部分定价/充分定价")
+    state_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, comment="状态最后变更时间（state 真变时由 service 写）")
+    evidence: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="证据：报告章节 / 数据代码 / 指标")
 
     unique_keys = ["symbol", "seq"]
 
@@ -421,28 +417,25 @@ class UnderlyingStateLog(Base, BaseModel):
 
     主表（UnderlyingLogic.state）仍只存当前态，本表只增不改：
     每一次 state **真正变化**时追加一行，旧值不覆盖，「三个月前判过什么」可回放。
+    变更时间直接用 BaseModel.create_time（append-only 行创建即变更，2026-11-27 起
+    不再单设 changed_at）；一个逻辑一天多次变更的场景不存在。
     证伪表已删除（2026-11-27），历史行中可能仍残留 subject_type='invalidate' 的记录。
     """
 
     __tablename__ = "irs_um_state_log"
     __table_args__ = (
-        Index("idx_subject", "subject_type", "subject_id", "changed_at"),
+        Index("idx_subject", "subject_type", "subject_id", "create_time"),
     )
 
     LOGIC = "logic"
+    LOGIC_PRICING = "logic_pricing"
 
-    subject_type: Mapped[str] = mapped_column(
-        String(16), nullable=False, comment="logic=逻辑（历史行或有 invalidate，证伪已删除）")
-    subject_id: Mapped[int] = mapped_column(
-        Integer, nullable=False, comment="对应 irs_um_logic.id")
+    subject_type: Mapped[str] = mapped_column(String(16), nullable=False, comment="logic=逻辑状态演化；logic_pricing=定价情况演化（历史行或有 invalidate，证伪已删除）")
+    subject_id: Mapped[int] = mapped_column(Integer, nullable=False, comment="对应 irs_um_logic.id")
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, comment="标的代码")
-    from_state: Mapped[Optional[str]] = mapped_column(
-        String(16), nullable=True, comment="变更前（首次登记为 NULL）")
+    from_state: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, comment="变更前（首次登记为 NULL）")
     to_state: Mapped[str] = mapped_column(String(16), nullable=False, comment="变更后")
-    changed_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, comment="变更时间")
-    note: Mapped[Optional[str]] = mapped_column(
-        String(200), nullable=True, comment="变更理由/证据（可选）")
+    note: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="变更理由/证据（可选）")
 
     def __str__(self):
         return f"{self.subject_type}#{self.subject_id}:{self.from_state}->{self.to_state}"
