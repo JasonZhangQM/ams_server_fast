@@ -206,13 +206,13 @@ class UnderlyingResearchOut(BaseModel):
     id: int
     symbol: str
     research_date: date
+    data_asof: Optional[date] = None
     thesis: Optional[str] = None
     conclusion: Optional[str] = None
     max_risk: Optional[str] = None
-    expectation_gap: Optional[str] = None
     pre_condition: Optional[str] = None
     next_review: Optional[date] = None
-    research_note: Optional[str] = None
+    report_ref: Optional[str] = None
     research_brief: Optional[str] = None
     create_time: datetime
     update_time: datetime
@@ -222,13 +222,13 @@ class UnderlyingResearchSave(BaseModel):
     """研究保存请求：按 (symbol, research_date) upsert；未传的字段保持不变。"""
 
     research_date: date
+    data_asof: Optional[date] = None
     thesis: Optional[str] = None
     conclusion: Optional[str] = None
     max_risk: Optional[str] = None
-    expectation_gap: Optional[str] = None
     pre_condition: Optional[str] = None
     next_review: Optional[date] = None
-    research_note: Optional[str] = None
+    report_ref: Optional[str] = None
     research_brief: Optional[str] = None
 
 

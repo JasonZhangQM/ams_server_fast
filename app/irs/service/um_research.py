@@ -4,10 +4,14 @@
 语义与档位版本同构：选新日期 = 新建，选历史日期 = 改那一版。
 区分两种改动的责任在前端（"录错"该改、"观点变了"该新建），后端只按日期 upsert。
 
-长度硬约束（对应知识库 0101 模板的边界）：thesis/max_risk/pre_condition <= 200 字，
-research_brief <= 800 字 —— 超了说明该写报告，不是写系统。
-研究过程（换过什么锚、推翻过什么）不存系统：系统只存结构化结论，过程留在知识库报告 §10.2
-「相对上一版的变化」与 irs_um_version.note 里。
+长度硬约束（2026-11-27 收紧，对应知识库 0101 模板 3.5 的字段边界表）：
+thesis <= 80、max_risk <= 120、pre_condition <= 200、research_brief <= 500。
+每个字段只承担一个职责——超限不是"写详细了"，而是写了属于别的字段或报告的内容。
+
+不进系统的三样：
+- 预期差论证（市场已定价 / 未定价的推理）→ 报告 §5；是否已定价写 irs_um_logic.pricing
+- 研究过程（换过什么锚、推翻过什么）→ 报告 §10.2 与 irs_um_version.note
+- 组合约束的实时状态（风险度 / 保证金 / 安全垫）→ /risk 实时口径，冻结进版本必然过期
 """
 from __future__ import annotations
 
@@ -18,11 +22,10 @@ from sqlalchemy.orm import Session
 
 from server_fast.app.irs.models import UnderlyingMonitor, UnderlyingResearch
 
-FIELDS = ("thesis", "conclusion", "max_risk", "expectation_gap", "pre_condition",
-          "next_review", "research_note", "research_brief")
-LIMITS = {"thesis": 200, "max_risk": 200, "pre_condition": 200,
-          "research_brief": 800,
-          "expectation_gap": 2000, "research_note": 128}
+FIELDS = ("thesis", "conclusion", "max_risk", "pre_condition",
+          "next_review", "report_ref", "research_brief", "data_asof")
+LIMITS = {"thesis": 80, "max_risk": 120, "pre_condition": 200,
+          "research_brief": 500, "report_ref": 128}
 
 
 def _validate(payload: dict) -> None:

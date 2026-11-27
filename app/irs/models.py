@@ -252,7 +252,16 @@ class UnderlyingResearch(Base, BaseModel):
     """标的研究定稿（1:N，按 research_date 留版）。
 
     选新日期 = 新建，选历史日期 = 修改（与档位版本同构）。
-    research_date 是"我哪天定了这个结论"，不是报告里的数据截止日。
+    research_date 是"我哪天定了这个结论"，data_asof 是"数据看到哪天"——两者不同：
+    前者作版本键，后者用来回放当时的价与估值（因此 brief 不必抄价格）。
+
+    字段分工（2026-11-27 起，一个职责只归一个字段，禁越界）：
+    - thesis         买什么（本质）          ≤80   禁写价格 / PE / 百分比 / 档位
+    - max_risk       最可能亏钱的那件事      ≤120  须含时点 + 阈值
+    - pre_condition  标的层触发条件（阈值）  ≤200  组合约束（风险度 / 保证金 / 安全垫）不写
+    - research_brief 当时怎么想              ≤500  不写价格快照（归 data_asof 回放）
+    - report_ref     报告文件名（双向链）           不写要点摘要
+    预期差不单列字段：论证归报告 §5，是否已定价写 irs_um_logic.pricing。
     """
 
     __tablename__ = "irs_um_research"
@@ -267,21 +276,27 @@ class UnderlyingResearch(Base, BaseModel):
         String(32), ForeignKey("irs_underlying_monitor.symbol", ondelete="RESTRICT"),
         nullable=False, comment="标的代码")
     research_date: Mapped[date] = mapped_column(Date, nullable=False, comment="研究定稿日")
-    thesis: Mapped[Optional[str]] = mapped_column(
-        String(200), nullable=True, comment="一句话本质：买它本质上在买什么")
+    data_asof: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True,
+        comment="数据截止日：正文行情/财务数据的最后一天（回放当时的价与估值靠它）")
     conclusion: Mapped[Optional[str]] = mapped_column(
         String(8), nullable=True, comment="结论（买入/增持/持有/观望/减持/卖出）")
-    max_risk: Mapped[Optional[str]] = mapped_column(
-        String(200), nullable=True, comment="最大风险：最可能让我亏钱的那件事")
-    expectation_gap: Mapped[Optional[str]] = mapped_column(
-        Text, nullable=True, comment="预期差：市场已定价什么 / 我认为未定价什么")
-    pre_condition: Mapped[Optional[str]] = mapped_column(
-        String(200), nullable=True, comment="前置条件（组合约束，与标的质地分开写）")
     next_review: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="下次复核日期")
-    research_note: Mapped[Optional[str]] = mapped_column(
-        String(128), nullable=True, comment="知识库研究报告名（双链名，不含 .md）")
+    thesis: Mapped[Optional[str]] = mapped_column(
+        String(80), nullable=True,
+        comment="一句话本质：买它本质上在买什么（禁写价格/估值/档位/结论）")
+    max_risk: Mapped[Optional[str]] = mapped_column(
+        String(120), nullable=True,
+        comment="最大风险：最可能让我亏钱的那件事（须含时点 + 阈值，不写会变的组合状态）")
+    pre_condition: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True,
+        comment="标的层触发条件：只写阈值（价格/毛利/现金流），组合约束归 /risk 实时口径")
+    report_ref: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True,
+        comment="知识库报告文件名（唯一双向链，不含 .md；不写要点摘要）")
     research_brief: Mapped[Optional[str]] = mapped_column(
-        Text, nullable=True, comment="结论摘要（<=800 字，禁止抄报告正文）")
+        Text, nullable=True,
+        comment="判断依据（<=500 字，只写当时怎么想，不写价格快照）")
 
     unique_keys = ["symbol", "research_date"]
 
